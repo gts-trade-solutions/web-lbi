@@ -569,6 +569,18 @@ function getDuplicates(values: string[]) {
   return Array.from(dup).sort((a, b) => a.localeCompare(b));
 }
 
+
+function normalizeFileKey(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop()
+    ?.replace(/\s+/g, " ")
+    .trim() || "";
+}
+
 async function sha256File(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
   const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
@@ -641,24 +653,29 @@ export default function ProjectsPage() {
 
       const { data: profiles, error } = await supabase
         .from("profiles")
-        .select("id, full_name, name, email")
-        .in("id", userIds);
+        .select("user_id, name, email")
+        .in("user_id", userIds);
 
       if (error) throw error;
 
       const userIdToName: Record<string, string> = {};
       (profiles || []).forEach((u: any) => {
-        userIdToName[String(u.id)] =
-          u?.full_name || u?.name || u?.email || String(u.id).slice(0, 8);
+        const uid = String(u?.user_id || "");
+        if (!uid) return;
+        userIdToName[uid] = u?.name || u?.email || uid.slice(0, 8);
       });
 
       const map: Record<string, string> = {};
       rows.forEach((p) => {
-        if (p.last_modified_by) map[p.id] = userIdToName[p.last_modified_by] || "—";
+        if (p.last_modified_by) map[p.id] = userIdToName[p.last_modified_by] || p.last_modified_by.slice(0, 8);
       });
       setLastModifiedMap(map);
     } catch {
-      setLastModifiedMap({});
+      const fallback: Record<string, string> = {};
+      rows.forEach((p) => {
+        if (p.last_modified_by) fallback[p.id] = p.last_modified_by.slice(0, 8);
+      });
+      setLastModifiedMap(fallback);
     }
   };
 
@@ -1374,12 +1391,14 @@ export default function ProjectsPage() {
 
       const mapByFileName = new Map<string, ParsedImageMapRow>();
       imageMap.forEach((r) => {
-        if (!mapByFileName.has(r.file_name)) mapByFileName.set(r.file_name, r);
+        const key = normalizeFileKey(r.file_name);
+        if (key && !mapByFileName.has(key)) mapByFileName.set(key, r);
       });
 
       const selectedByName = new Map<string, File>();
       imageFiles.forEach((f) => {
-        if (!selectedByName.has(f.name)) selectedByName.set(f.name, f);
+        const key = normalizeFileKey(f.name);
+        if (key && !selectedByName.has(key)) selectedByName.set(key, f);
       });
 
       const missingFilesInUpload: string[] = [];
@@ -1389,7 +1408,7 @@ export default function ProjectsPage() {
 
       const extraFilesNotInMap: string[] = [];
       imageFiles.forEach((f) => {
-        if (!mapByFileName.has(f.name)) extraFilesNotInMap.push(f.name);
+        if (!mapByFileName.has(normalizeFileKey(f.name))) extraFilesNotInMap.push(f.name);
       });
 
       const noGpsImages: string[] = [];
@@ -1397,7 +1416,7 @@ export default function ProjectsPage() {
       let photosInserted = 0;
 
       await mapLimit(imageFiles, 3, async (file) => {
-        const mapping = mapByFileName.get(file.name);
+        const mapping = mapByFileName.get(normalizeFileKey(file.name));
         if (!mapping) return;
 
         const point_key = mapping.point_key ?? null;
@@ -1409,7 +1428,7 @@ export default function ProjectsPage() {
         }
 
         const safeFileName = file.name.replace(/[^\w.\-]+/g, "_");
-        const storagePath = `reports/${bulkProjectId}/${reportId}/${safeFileName}`;
+        const storagePath = `${bulkProjectId}/${reportId}/${safeFileName}`;
 
         let uploaded: { path: string; publicUrl: string };
         try {
@@ -1474,6 +1493,12 @@ export default function ProjectsPage() {
         ]);
 
       if (historyErr) throw historyErr;
+
+      if (imageFiles.length > 0 && photosInserted === 0) {
+        errors.push(
+          "No report_photos rows were inserted. Most likely the uploaded file names do not exactly match the master file file_name values."
+        );
+      }
 
       setSummary({
         pointsRead: points.length,

@@ -141,10 +141,15 @@ async function uploadReportPhotos(projectId: string, reportId: string, files: Fi
 
   // Upload in parallel (faster) then insert DB rows once
   const uploads = await Promise.all(
-    files.map(async (f) => {
+    files.map(async (f, index) => {
       const safeName = f.name.replace(/[^\w.\-]+/g, "_");
-      const ext = f.name.split(".").pop() || "jpg";
-      const storagePath = `reports/${projectId}/${reportId}/${Date.now()}_${safeName}.${ext}`;
+      const uniquePrefix = `${Date.now()}_${index}_${Math.random().toString(36).slice(2, 8)}`;
+
+      // IMPORTANT:
+      // safeName already contains the original extension, so do not append the extension again.
+      // We keep the storage layout aligned with bulk import:
+      // reports/<projectId>/<reportId>/<fileName>
+      const storagePath = `reports/${projectId}/${reportId}/${uniquePrefix}_${safeName}`;
 
       const size = await getImageSize(f);
       const uploaded = await uploadToBucket(REPORT_PHOTO_BUCKET, storagePath, f);
@@ -158,7 +163,11 @@ async function uploadReportPhotos(projectId: string, reportId: string, files: Fi
     })
   );
 
-  const { error: imgErr } = await supabase.from(REPORT_IMAGE_TABLE).insert(uploads as any);
+  const uniqueUploads = uploads.filter(
+    (row, index, arr) => index === arr.findIndex((x) => x.url === row.url)
+  );
+
+  const { error: imgErr } = await supabase.from(REPORT_IMAGE_TABLE).insert(uniqueUploads as any);
   if (imgErr) throw imgErr;
 }
 

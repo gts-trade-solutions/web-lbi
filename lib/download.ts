@@ -1035,6 +1035,7 @@ if (routeMapBytes) {
 
   return {
     properties: sectionPropsA3Landscape(),
+    headers: { default: new Header({ children: [] }) },
     footers: { default: buildFooterTablePages(footerDate ?? new Date()) },
     children,
   };
@@ -1233,6 +1234,8 @@ type NormalizedPoint = {
 
   __lat?: number | null;
   __lon?: number | null;
+  __report_id?: string | null;
+  __point_order?: number | null;
 };
 
 function s(v: any) {
@@ -1253,6 +1256,14 @@ function normalizeMovement(v: any): VehicleMovement {
   if (t.includes("red")) return "red";
   if (t.includes("yellow") || t.includes("amber")) return "yellow";
   if (t.includes("green")) return "green";
+  return "";
+}
+
+function movementLabel(v: any) {
+  const m = normalizeMovement(v);
+  if (m === "green") return "Green";
+  if (m === "yellow") return "Yellow";
+  if (m === "red") return "Red";
   return "";
 }
 
@@ -2663,11 +2674,11 @@ async function resolvePhotoBytes(supabase: any, ref: string): Promise<Uint8Array
 /** =========================
  * PHOTO cell: adjusted sizing so the image is fully visible in the widened PHOTO area
  * ========================= */
-async function photoCell(supabase: any, refs: string[], includePhotos: boolean, caption?: string) {
-  const list = (refs || []).filter(Boolean).slice(0, 3);
+async function photoCell(supabase: any, refs: string[], includePhotos: boolean, caption?: string, reportId?: string) {
+  const directRefs = Array.from(new Set((refs || []).filter(Boolean))).slice(0, 3);
+  const cap = (caption || "").trim();
 
-  if (!includePhotos || list.length === 0) {
-    const cap = (caption || "").trim();
+  if (!includePhotos) {
     return new TableCell({
       columnSpan: 3,
       verticalAlign: VerticalAlign.TOP,
@@ -2685,11 +2696,10 @@ async function photoCell(supabase: any, refs: string[], includePhotos: boolean, 
     });
   }
 
-  const multi = list.length > 1;
+  const bytesList = await loadResolvedPhotoBytesForReport(supabase, reportId, directRefs);
+  const multi = bytesList.length > 1;
   const imgW = multi ? STYLE.photo.multi.w : STYLE.photo.single.w;
   const imgH = multi ? STYLE.photo.multi.h : STYLE.photo.single.h;
-
-  const bytesList = await Promise.all(list.map((r) => resolvePhotoBytes(supabase, r)));
 
   const paras: Paragraph[] = [];
   for (let i = 0; i < bytesList.length; i++) {
@@ -2705,16 +2715,16 @@ async function photoCell(supabase: any, refs: string[], includePhotos: boolean, 
   }
 
   if (paras.length === 0 && DEBUG_PHOTOS) {
-    throw new Error(`Photo refs detected but could not be resolved.\nFirst ref: ${list[0]}`);
+    throw new Error(`Photo refs detected but could not be resolved.
+First ref: ${directRefs[0] || reportId || "none"}`);
   }
 
-  const cap2 = (caption || "").trim();
-  if (cap2) {
+  if (cap) {
     paras.push(
       new Paragraph({
         alignment: AlignmentType.LEFT,
         spacing: { before: 80, after: 0, line: 276 },
-        children: [new TextRun({ text: cap2, size: STYLE.font.cellSmall })],
+        children: [new TextRun({ text: cap, size: STYLE.font.cellSmall })],
       })
     );
   }
@@ -2834,8 +2844,12 @@ function normalizePoint(raw: any): NormalizedPoint {
     raw.remarks_action ??
       raw.action ??
       raw.actions ??
+      raw.remarks ??
       raw.__report_remarks_action ??
       raw.__report_difficulty ??
+      raw.difficulty ??
+      raw.vehicle_movement ??
+      raw.movement ??
       ""
   ).trim();
 
@@ -2852,6 +2866,8 @@ function normalizePoint(raw: any): NormalizedPoint {
     photo_description,
     __lat: lat,
     __lon: lon,
+    __report_id: raw.__report_id ?? raw.report_id ?? null,
+    __point_order: Number.isFinite(Number(raw.__point_order)) ? Number(raw.__point_order) : null,
   };
 }
 
@@ -3050,31 +3066,62 @@ async function getPointsForReport(supabase: any, reportId: string) {
     } catch {}
   }
 
-  // 3) Last fallback: single lat/lon on the report row itself.
-  if (report?.loc_lat && report?.loc_lon) {
-    return {
-      points: [
-        {
-          loc_lat: report.loc_lat,
-          loc_lon: report.loc_lon,
-          details: report?.category ?? "",
-          location: "",
-          __report_difficulty: reportDifficulty,
-          __report_category: report?.category ?? "",
-          __report_description: report?.description ?? "",
-          __report_remarks_action: report?.remarks_action ?? "",
-        },
-      ],
-      report,
-      routeId,
-    };
-  }
+  // 3) Final fallback: build ONE synthetic point directly from the report row.
+  // This is required for bulk-imported projects where each report row itself is the observation,
+  // but separate point tables are missing or not linked. Without this fallback, the summary can show
+  // all reports while the detail pages collapse to only the few reports that have point-table rows.
+  const syntheticPoint = {
+    gps_no: s(
+      report?.gps_no ??
+      report?.gps ??
+      report?.point_key ??
+      report?.point_no ??
+      report?.seq ??
+      report?.sequence ??
+      report?.sort_order ??
+      ""
+    ),
+    kms: s(
+      report?.kms ??
+      report?.km ??
+      report?.distance ??
+      report?.chainage ??
+      report?.kilometer ??
+      report?.kilometre ??
+      ""
+    ),
+    ne_coordinate: s(
+      report?.ne_coordinate ??
+      report?.coordinate ??
+      report?.ne ??
+      report?.gps_location ??
+      report?.gps_coordinate ??
+      ""
+    ),
+    exact_location: s(
+      report?.exact_location ??
+      report?.location ??
+      report?.location_name ??
+      report?.location_label ??
+      report?.place ??
+      report?.area ??
+      report?.city ??
+      report?.village ??
+      ""
+    ),
+    details: s(report?.category ?? ""),
+    description: s(report?.description ?? ""),
+    remarks_action: s(report?.remarks_action ?? ""),
+    difficulty: s(report?.difficulty ?? reportDifficulty ?? ""),
+    loc_lat: report?.loc_lat ?? report?.latitude ?? report?.lat ?? null,
+    loc_lon: report?.loc_lon ?? report?.longitude ?? report?.lon ?? report?.lng ?? null,
+  };
 
-  throw new Error(
-    `Points not found.
-report_id=${reportId}
-route_id=${routeId || "NULL"} project_id=${projectId || "NULL"}`
-  );
+  return {
+    points: patchRows([syntheticPoint]),
+    report,
+    routeId,
+  };
 }
 
 /** =========================
@@ -3116,7 +3163,7 @@ children: [
 
       await movementCell(p.movement),
 
-      await photoCell(supabase, p.photo_refs, includePhotos, p.photo_description),
+      await photoCell(supabase, p.photo_refs, includePhotos, p.photo_description, String((p as any).__report_id || "").trim() || undefined),
     ],
   });
 }
@@ -3126,6 +3173,53 @@ children: [
  * ✅ FULL-PAGE PHOTO LAYOUT (one photo per page)
  * Top info table (green header) + big centered photo
  * ========================= */
+/**
+ * PHOTO PAGE DESIGN REPLACEMENT
+ *
+ * Replace your existing photo-page design block in `lib/download.ts`
+ * from:
+ *   function getPhotoTheme(...)
+ * through:
+ *   async function buildPhotoPageSection(...)
+ *
+ * This version matches the screenshot layout:
+ * - logo at top-left
+ * - project name centered
+ * - green header row
+ * - light green body row
+ * - two images below the table, side-by-side
+ * - no extra wrapper styling that distorts the page
+ */
+
+
+async function loadResolvedPhotoBytesForReport(
+  supabase: any,
+  reportId: string | undefined,
+  directRefs: string[]
+): Promise<Uint8Array[]> {
+  const refs = Array.from(new Set((directRefs || []).filter(Boolean)));
+
+  if (reportId) {
+    try {
+      const extra = await getExtraPhotosForReport(supabase, reportId);
+      for (const r of extra || []) {
+        if (r && !refs.includes(r)) refs.push(r);
+      }
+    } catch {}
+  }
+
+  const out: Uint8Array[] = [];
+  for (const ref of refs) {
+    try {
+      const bytes = await resolvePhotoBytes(supabase, ref);
+      if (bytes) out.push(bytes);
+      if (out.length >= 2) break;
+    } catch {}
+  }
+
+  return out;
+}
+
 function getPhotoTheme(movement: string) {
   const mm = normalizeMovement(movement);
   if (mm === "green") return PHOTO_THEME.green;
@@ -3138,19 +3232,27 @@ function photoPageHeaderCell(
   text: string,
   widthPct: number,
   fillColor: string,
-  textColor: string = "FFFFFF"
+  textColor: string = "000000"
 ) {
   return new TableCell({
     width: { size: widthPct, type: WidthType.PERCENTAGE },
     verticalAlign: VerticalAlign.CENTER,
     shading: { type: ShadingType.CLEAR, fill: fillColor },
     borders: CELL_BORDERS,
-    margins: { top: 220, bottom: 220, left: 160, right: 160 } as any,
+    margins: { top: 170, bottom: 170, left: 120, right: 120 } as any,
     children: [
       new Paragraph({
         alignment: AlignmentType.CENTER,
         spacing: STYLE.spacing.none,
-        children: [new TextRun({ text, bold: true, color: textColor, size: 32 })],
+        children: [
+          new TextRun({
+            text,
+            bold: true,
+            color: textColor,
+            size: 26,
+            font: "Times New Roman",
+          }),
+        ],
       }),
     ],
   });
@@ -3160,8 +3262,8 @@ function photoPageValueCell(
   text: string,
   widthPct: number,
   align: AlignmentType = AlignmentType.LEFT,
-  fillColor: string = PHOTO_PAGE_ROW_FILL,
-  textColor: string = PHOTO_THEME.default.text
+  fillColor: string = "DDE8D7",
+  textColor: string = "163A2A"
 ) {
   const lines = splitLines(text);
   return new TableCell({
@@ -3169,60 +3271,66 @@ function photoPageValueCell(
     verticalAlign: VerticalAlign.CENTER,
     shading: { type: ShadingType.CLEAR, fill: fillColor },
     borders: CELL_BORDERS,
-    margins: { top: 140, bottom: 140, left: 180, right: 180 } as any,
+    margins: { top: 110, bottom: 110, left: 130, right: 130 } as any,
     children: lines.map((ln) =>
       new Paragraph({
         alignment: align,
-        spacing: STYLE.spacing.cell,
-        children: [new TextRun({ text: ln, bold: true, size: 32, color: textColor })],
+        spacing: { before: 28, after: 28, line: 300 },
+        children: [
+          new TextRun({
+            text: ln,
+            bold: true,
+            size: 28,
+            color: textColor,
+            font: "Times New Roman",
+          }),
+        ],
       })
     ),
   });
 }
 
-/** ✅ NEW: Photo-page helpers (OBS icon + Route difficulty) */
-function routeDifficultyFill(m: string) {
-  const mm = normalizeMovement(m);
-  if (mm === "green") return "C6EFCE"; // light green
-  if (mm === "yellow") return "FFF2CC"; // light yellow
-  if (mm === "red") return "F8CBAD"; // light red
-  return PHOTO_PAGE_ROW_FILL;
-}
-
-function photoPageRouteDifficultyCell(
-  movement: string,
+function photoPageTextBlockCell(
+  text: string,
   widthPct: number,
-  fillColor?: string
+  fillColor: string = "DDE8D7",
+  textColor: string = "163A2A",
+  align: AlignmentType = AlignmentType.LEFT
 ) {
-  const mm = normalizeMovement(movement);
-  const label = mm ? mm.toUpperCase() : "—";
-
+  const lines = splitLines((text || "").trim() || "—");
   return new TableCell({
     width: { size: widthPct, type: WidthType.PERCENTAGE },
     verticalAlign: VerticalAlign.CENTER,
-    shading: { type: ShadingType.CLEAR, fill: fillColor || routeDifficultyFill(mm) },
+    shading: { type: ShadingType.CLEAR, fill: fillColor },
     borders: CELL_BORDERS,
-    margins: { top: 140, bottom: 140, left: 180, right: 180 } as any,
-    children: [
+    margins: { top: 140, bottom: 140, left: 140, right: 140 } as any,
+    children: lines.map((ln) =>
       new Paragraph({
-        alignment: AlignmentType.CENTER,
-        spacing: STYLE.spacing.cell,
-        children: [new TextRun({ text: label, bold: true, size: 32, color: "0B3D2E" })],
-      }),
-    ],
+        alignment: align,
+        spacing: { before: 28, after: 28, line: 320 },
+        children: [
+          new TextRun({
+            text: ln,
+            bold: true,
+            size: 28,
+            color: textColor,
+            font: "Times New Roman",
+          }),
+        ],
+      })
+    ),
   });
 }
-
 
 async function photoPageCategoryCell(
   detailsText: string,
   widthPct: number,
-  fillColor: string
+  fillColor: string = "DDE8D7",
+  textColor: string = "163A2A"
 ) {
   const kind = detectDetailKind(detailsText || "");
   const iconBytes = kind ? await getDocxCategoryIcon(kind) : null;
   const categoryText = String(detailsText || "").trim() || "—";
-
   const none = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
 
   const inner = new Table({
@@ -3232,28 +3340,36 @@ async function photoPageCategoryCell(
       new TableRow({
         children: [
           new TableCell({
-            width: { size: 28, type: WidthType.PERCENTAGE },
+            width: { size: 22, type: WidthType.PERCENTAGE },
             borders: { top: none, bottom: none, left: none, right: none },
-            verticalAlign: VerticalAlign.TOP,
+            verticalAlign: VerticalAlign.CENTER,
             children: [
               new Paragraph({
                 alignment: AlignmentType.CENTER,
-                spacing: { before: 80, after: 0 },
+                spacing: STYLE.spacing.none,
                 children: iconBytes
-                  ? [new ImageRun({ data: iconBytes, transformation: { width: 58, height: 58 } })]
+                  ? [new ImageRun({ data: iconBytes, transformation: { width: 28, height: 28 } })]
                   : [new TextRun({ text: "", size: 2 })],
               }),
             ],
           }),
           new TableCell({
-            width: { size: 72, type: WidthType.PERCENTAGE },
+            width: { size: 78, type: WidthType.PERCENTAGE },
             borders: { top: none, bottom: none, left: none, right: none },
-            verticalAlign: VerticalAlign.TOP,
+            verticalAlign: VerticalAlign.CENTER,
             children: [
               new Paragraph({
-                alignment: AlignmentType.LEFT,
-                spacing: STYLE.spacing.cell,
-                children: [new TextRun({ text: categoryText, bold: true, size: 32, color: "0B3D2E" })],
+                alignment: AlignmentType.CENTER,
+                spacing: { before: 40, after: 40, line: 300 },
+                children: [
+                  new TextRun({
+                    text: categoryText,
+                    bold: true,
+                    size: 28,
+                    color: textColor,
+                    font: "Times New Roman",
+                  }),
+                ],
               }),
             ],
           }),
@@ -3267,510 +3383,10 @@ async function photoPageCategoryCell(
     verticalAlign: VerticalAlign.CENTER,
     shading: { type: ShadingType.CLEAR, fill: fillColor },
     borders: CELL_BORDERS,
-    margins: { top: 120, bottom: 120, left: 120, right: 120 } as any,
+    margins: { top: 100, bottom: 100, left: 100, right: 100 } as any,
     children: [inner],
   });
 }
-
-function photoPageObservationCell(
-  descText: string,
-  widthPct: number,
-  fillColor: string
-) {
-  const lines = splitLines(String(descText || "").trim() || "—");
-  return new TableCell({
-    width: { size: widthPct, type: WidthType.PERCENTAGE },
-    verticalAlign: VerticalAlign.CENTER,
-    shading: { type: ShadingType.CLEAR, fill: fillColor },
-    borders: CELL_BORDERS,
-    margins: { top: 140, bottom: 140, left: 180, right: 180 } as any,
-    children: lines.map((ln) =>
-      new Paragraph({
-        alignment: AlignmentType.LEFT,
-        spacing: STYLE.spacing.cell,
-        children: [new TextRun({ text: ln, bold: true, size: 32, color: "0B3D2E" })],
-      })
-    ),
-  });
-}
-
-async function photoPageObsCell(detailsText: string, descText: string, widthPct: number) {
-  const kind = detectDetailKind(detailsText || "");
-  // High-res source so the icon stays sharp even when displayed
-  const iconBytes = kind ? await getDocxCategoryIcon(kind) : null;
-
-  const d1 = String(detailsText || "").trim();
-  const d2 = String(descText || "").trim();
-
-  // ✅ Only include description if it exists (prevents stray "—" line)
-  const combined = [d1 || "—", d2].filter(Boolean).join("\n");
-  const lines = splitLines(combined);
-
-  const first = lines[0] ?? "—";
-  const rest = lines.slice(1).filter((x) => String(x).trim() !== "—");
-
-  const none = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
-
-  // ✅ Perfect alignment: use a 2-column inner table (icon | text)
-  const iconTextRow = new Table({
-    layout: TableLayoutType.FIXED,
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    rows: [
-      new TableRow({
-        children: [
-          new TableCell({
-            width: { size: 12, type: WidthType.PERCENTAGE },
-            verticalAlign: VerticalAlign.CENTER,
-            borders: { top: none, bottom: none, left: none, right: none },
-            margins: { top: 0, bottom: 0, left: 0, right: 120 } as any,
-            children: [
-              new Paragraph({
-                alignment: AlignmentType.RIGHT,
-                spacing: STYLE.spacing.none,
-                children: iconBytes
-                  ? [new ImageRun({ data: iconBytes, transformation: { width: 46, height: 46 } })]
-                  : [],
-              }),
-            ],
-          }),
-          new TableCell({
-            width: { size: 88, type: WidthType.PERCENTAGE },
-            verticalAlign: VerticalAlign.CENTER,
-            borders: { top: none, bottom: none, left: none, right: none },
-            margins: { top: 0, bottom: 0, left: 0, right: 0 } as any,
-            children: [
-              new Paragraph({
-                alignment: AlignmentType.LEFT,
-                spacing: STYLE.spacing.none,
-                children: [new TextRun({ text: first, bold: true, size: 32, color: "0B3D2E" })],
-              }),
-            ],
-          }),
-        ],
-      }),
-    ],
-  });
-
-  const restParas = rest.map(
-    (ln) =>
-      new Paragraph({
-        alignment: AlignmentType.LEFT,
-        spacing: STYLE.spacing.cell,
-        children: [new TextRun({ text: ln, bold: true, size: 32, color: "0B3D2E" })],
-      })
-  );
-
-  return new TableCell({
-    width: { size: widthPct, type: WidthType.PERCENTAGE },
-    verticalAlign: VerticalAlign.CENTER,
-    shading: { type: ShadingType.CLEAR, fill: PHOTO_PAGE_ROW_FILL },
-    borders: CELL_BORDERS,
-    margins: { top: 140, bottom: 140, left: 180, right: 180 } as any,
-    children: [
-      new Paragraph({ spacing: STYLE.spacing.none, text: "" }),
-      iconTextRow as any,
-      ...restParas,
-    ],
-  });
-}
-
-
-
-
-
-// =========================
-// LAST PAGE: SUMMARY LIST TABLES (Bridges / Toll Plazas / Metro Sites / Tree Branches)
-// Added WITHOUT changing existing data logic — uses already-normalized points.
-// =========================
-function movementRemark(movement: string) {
-  const mm = normalizeMovement(movement);
-  if (mm === "green") return "Clear Pass for TBM";
-  if (mm === "yellow") return "Proceed with Caution";
-  if (mm === "red") return "Not Recommended";
-  return "—";
-}
-
-function summaryItemDescription(p: NormalizedPoint) {
-  const title = String(p.details || "").trim() || "—";
-  const desc = String(p.description || "").trim();
-  const loc = String(p.location || "").trim();
-
-  const parts: string[] = [];
-  const first = loc ? `${title} - ${loc}` : title;
-  parts.push(first);
-
-  const cleanDesc = cleanExportDescription(title, desc);
-  if (cleanDesc && cleanDesc.toLowerCase() !== loc.toLowerCase()) {
-    parts.push(cleanDesc);
-  }
-
-  return parts.join("\n");
-}
-
-function makeSummaryTable(items: NormalizedPoint[]) {
-  const headerFill = "F2F2F2";
-
-  const hdrCell = (text: string) =>
-    new TableCell({
-      borders: CELL_BORDERS,
-      shading: { type: ShadingType.CLEAR, fill: headerFill },
-      verticalAlign: VerticalAlign.CENTER,
-      margins: { top: 220, bottom: 220, left: 180, right: 180 } as any,
-      children: [
-        new Paragraph({
-          alignment: AlignmentType.LEFT,
-          spacing: STYLE.spacing.none,
-          children: [new TextRun({ text, bold: true, size: 34, color: "000000" })],
-        }),
-      ],
-    });
-
-  const valueCell = (text: string, align: AlignmentType = AlignmentType.LEFT, boldFirstLine = false) => {
-    const lines = splitLines(text || "—");
-    return new TableCell({
-      borders: CELL_BORDERS,
-      verticalAlign: VerticalAlign.TOP,
-      margins: { top: 220, bottom: 220, left: 180, right: 180 } as any,
-      children: lines.map((t, i) =>
-        new Paragraph({
-          alignment: align,
-          spacing: { before: i === 0 ? 0 : 90, after: 0 } as any,
-          children: [
-            new TextRun({
-              text: String(t || "—"),
-              size: 32,
-              bold: boldFirstLine && i === 0,
-              color: "000000",
-            }),
-          ],
-        })
-      ),
-    });
-  };
-
-  const rows: TableRow[] = [
-    new TableRow({
-      height: { value: 1000, rule: HeightRule.ATLEAST },
-      children: [hdrCell("Kms"), hdrCell("Description"), hdrCell("Remark/Recommendation")],
-    }),
-  ];
-
-  for (const p of items) {
-    rows.push(
-      new TableRow({
-        height: { value: 1200, rule: HeightRule.ATLEAST },
-        children: [
-          valueCell(String(p.kms || "—"), AlignmentType.CENTER),
-          valueCell(summaryItemDescription(p), AlignmentType.LEFT, true),
-          valueCell(movementRemark(p.movement), AlignmentType.LEFT),
-        ],
-      })
-    );
-  }
-
-  return new Table({
-    layout: TableLayoutType.FIXED,
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    rows,
-    columnWidths: [2500, 15000, 6078],
-  });
-}
-
-async function buildLastSummaryListsSection(params: {
-  projectName: string;
-  points: NormalizedPoint[];
-  footerDate?: string | Date;
-}) {
-  const { projectName, points, footerDate } = params;
-
-  // ✅ Display names for ALL kinds (add more anytime, but anything missing still shows)
-  const KIND_LABEL: Record<string, string> = {
-    footpath_bridge: "List of Footpath Bridges",
-    bridge: "List of Bridges",
-    underpass: "List of Underpass",
-    lt_cable: "List of LT Cables",
-    ht_cable: "List of HT Cables",
-    towerline_cable: "List of Towerline Cables",
-    towerline: "List of Towerlines",
-    junction_left: "List of Left Junctions / Turns",
-    junction_right: "List of Right Junctions / Turns",
-    bend: "List of Bends",
-    diversion: "List of Diversions",
-    tree: "List of Tree Branches",
-    petrol: "List of Petrol Bunks",
-    electric_sign: "List of Electric Sign Boards",
-    signboard: "List of Sign Boards",
-    camera_pole: "List of Camera Poles",
-    toll: "List of Toll Plazas",
-  };
-
-  // ✅ Ordering (you can rearrange; anything not listed will appear later)
-  const ORDER: string[] = [
-    "bridge",
-    "footpath_bridge",
-    "underpass",
-    "toll",
-    "metro", // keyword category
-    "diversion",
-    "petrol",
-    "electric_sign",
-    "signboard",
-    "camera_pole",
-    "junction_left",
-    "junction_right",
-    "bend",
-    "lt_cable",
-    "ht_cable",
-    "towerline_cable",
-    "towerline",
-    "tree",
-  ];
-
-  // ✅ Collect items per category
-  const buckets = new Map<string, NormalizedPoint[]>();
-  const ensure = (k: string) => {
-    if (!buckets.has(k)) buckets.set(k, []);
-    return buckets.get(k)!;
-  };
-
-  for (const p of points) {
-    const details = String(p.details || "");
-    const desc = String(p.description || "");
-    const loc = String(p.location || "");
-    const tAll = `${details} ${desc} ${loc}`.toLowerCase();
-
-    // Special keyword bucket for metro (since detectDetailKind doesn’t return "metro")
-    if (tAll.includes("metro")) {
-      ensure("metro").push(p);
-      continue;
-    }
-
-    const k = detectDetailKind(details);
-
-    if (k) {
-      ensure(k).push(p);
-    } else {
-      ensure("other").push(p);
-    }
-  }
-
-  const children: any[] = [];
-  children.push(new Paragraph({ spacing: { before: 120, after: 0 }, text: "" }));
-
-  // Helper to print a section
-  const addSection = (key: string) => {
-    const items = buckets.get(key);
-    if (!items || !items.length) return;
-
-    // Bridges table in your reference shows without heading first — keep that behavior if you want:
-    const isFirstBridgeLike =
-      key === "bridge" && items.length > 0 && children.length <= 2; // after initial spacer
-
-    const titleBase =
-      key === "metro"
-        ? "List of Metro Site"
-        : (KIND_LABEL[key] || `List of ${key.replace(/_/g, " ")}`);
-
-    const title = `${titleBase} (${items.length})`;
-
-    if (!isFirstBridgeLike) {
-      children.push(
-        new Paragraph({
-          spacing: { before: 60, after: 120 } as any,
-          // User-required: page titles = 24pt => 48 half-points
-          children: [new TextRun({ text: title, bold: true, size: 48, color: "000000" })],
-        })
-      );
-    } else {
-      // If you still want “no heading for first bridges table”, just skip title.
-      // If you DO want the title, comment this else block and keep the if above only.
-    }
-
-    children.push(makeSummaryTable(items));
-    children.push(new Paragraph({ spacing: { before: 260, after: 0 }, text: "" }));
-  };
-
-  // ✅ Print sections in preferred order
-  for (const k of ORDER) addSection(k);
-
-  // ✅ Print any remaining categories not in ORDER
-  const remaining = Array.from(buckets.keys()).filter((k) => !ORDER.includes(k));
-  for (const k of remaining) addSection(k);
-
-  // ✅ If nothing to show
-  const totalItems = Array.from(buckets.values()).reduce((a, b) => a + b.length, 0);
-  if (!totalItems) {
-    children.push(
-      new Paragraph({
-        spacing: { before: 200, after: 0 } as any,
-        children: [new TextRun({ text: "No summary items available.", size: 32, color: "000000" })],
-      })
-    );
-  }
-
-  return {
-    properties: sectionPropsA3Landscape(),
-    footers: { default: buildFooterTablePages(footerDate ?? new Date()) },
-    children,
-  };
-}
-
-
-async function buildCategoryCountSummarySection(params: {
-  projectName: string;
-  points: NormalizedPoint[];
-  footerDate?: string | Date;
-}) {
-  const { points, footerDate } = params;
-
-  // Same labels used in "List of ..." page (kept in-sync)
-  const KIND_LABEL: Record<string, string> = {
-    footpath_bridge: "List of Footpath Bridges",
-    bridge: "List of Bridges",
-    underpass: "List of Underpass",
-    lt_cable: "List of LT Cables",
-    ht_cable: "List of HT Cables",
-    towerline_cable: "List of Towerline Cables",
-    towerline: "List of Towerlines",
-    junction_left: "List of Left Junctions / Turns",
-    junction_right: "List of Right Junctions / Turns",
-    bend: "List of Bends",
-    diversion: "List of Diversions",
-    tree: "List of Tree Branches",
-    petrol: "List of Petrol Bunks",
-    electric_sign: "List of Electric Sign Boards",
-    signboard: "List of Sign Boards",
-    camera_pole: "List of Camera Poles",
-    toll: "List of Toll Plazas",
-  };
-
-  const ORDER: string[] = [
-    "bridge",
-    "footpath_bridge",
-    "underpass",
-    "toll",
-    "metro",
-    "diversion",
-    "petrol",
-    "electric_sign",
-    "signboard",
-    "camera_pole",
-    "junction_left",
-    "junction_right",
-    "bend",
-    "lt_cable",
-    "ht_cable",
-    "towerline_cable",
-    "towerline",
-    "tree",
-  ];
-
-  const counts = new Map<string, number>();
-  const inc = (k: string) => counts.set(k, (counts.get(k) || 0) + 1);
-
-  for (const p of points) {
-    const details = String(p.details || "");
-    const desc = String(p.description || "");
-    const loc = String(p.location || "");
-    const tAll = `${details} ${desc} ${loc}`.toLowerCase();
-
-    if (tAll.includes("metro")) {
-      inc("metro");
-      continue;
-    }
-
-    const k = detectDetailKind(details);
-    if (k) inc(k);
-    else inc("other");
-  }
-
-  const labelOf = (key: string) => {
-    if (key === "metro") return "Metro Site";
-    const raw = KIND_LABEL[key] || `List of ${key.replace(/_/g, " ")}`;
-    return raw.replace(/^List of\s+/i, "").trim();
-  };
-
-  const headerFill = "F2F2F2";
-
-  const hdr = (text: string) =>
-    new TableCell({
-      borders: CELL_BORDERS,
-      shading: { type: ShadingType.CLEAR, fill: headerFill },
-      verticalAlign: VerticalAlign.CENTER,
-      margins: { top: 240, bottom: 240, left: 220, right: 220 } as any,
-      children: [
-        new Paragraph({
-          alignment: AlignmentType.LEFT,
-          spacing: STYLE.spacing.none,
-          children: [new TextRun({ text, bold: true, size: 34, color: "000000" })],
-        }),
-      ],
-    });
-
-  const cell = (text: string, align: AlignmentType = AlignmentType.LEFT, bold = false) =>
-    new TableCell({
-      borders: CELL_BORDERS,
-      verticalAlign: VerticalAlign.CENTER,
-      margins: { top: 240, bottom: 240, left: 220, right: 220 } as any,
-      children: [
-        new Paragraph({
-          alignment: align,
-          spacing: STYLE.spacing.none,
-          children: [new TextRun({ text, size: 32, bold, color: "000000" })],
-        }),
-      ],
-    });
-
-  const rows: TableRow[] = [
-    new TableRow({
-      height: { value: 1000, rule: HeightRule.ATLEAST },
-      children: [hdr("Category"), hdr("Count")],
-    }),
-  ];
-
-  const addRow = (key: string) => {
-    const c = counts.get(key) || 0;
-    if (!c) return;
-    rows.push(
-      new TableRow({
-        height: { value: 950, rule: HeightRule.ATLEAST },
-        children: [cell(labelOf(key), AlignmentType.LEFT, true), cell(String(c), AlignmentType.CENTER, true)],
-      })
-    );
-  };
-
-  for (const k of ORDER) addRow(k);
-
-  // Any remaining non-ordered categories (rare, but safe)
-  const remaining = Array.from(counts.keys()).filter((k) => !ORDER.includes(k) && (counts.get(k) || 0) > 0);
-  remaining.sort();
-  for (const k of remaining) addRow(k);
-
-  const children: any[] = [];
-
-  children.push(
-    new Paragraph({
-      spacing: { before: 160, after: 220 } as any,
-      children: [new TextRun({ text: "CATEGORY STAGE SUMMARY", bold: true, size: 48, color: "000000" })],
-    })
-  );
-
-  children.push(
-    new Table({
-      layout: TableLayoutType.FIXED,
-      width: { size: 100, type: WidthType.PERCENTAGE },
-      rows,
-      columnWidths: [17500, 6078],
-    })
-  );
-
-  return {
-    properties: sectionPropsA3Landscape(),
-    footers: { default: buildFooterTablePages(footerDate ?? new Date()) },
-    children,
-  };
-}
-
 
 async function buildPhotoPageSection(
   params: {
@@ -3778,13 +3394,13 @@ async function buildPhotoPageSection(
     projectName: string;
     p: NormalizedPoint;
     photoRefs: string[];
+    reportId?: string;
     footerDate?: string | Date;
     watermarkEnabled?: boolean;
   }
 ) {
-  const { supabase, projectName, p, photoRefs, footerDate, watermarkEnabled } = params;
+  const { supabase, projectName, p, photoRefs, reportId, footerDate } = params;
 
-  // Location name (reverse-geocode if possible)
   let lat = p.__lat ?? null;
   let lon = p.__lon ?? null;
 
@@ -3812,21 +3428,14 @@ async function buildPhotoPageSection(
   const headerFill = theme.header;
   const bodyTextColor = theme.text;
 
-  const categoryCell = await photoPageCategoryCell(p.details || "—", 15, rowFill);
-  const observationCell = photoPageObservationCell(p.description || "", 19, rowFill);
-  const remarksCell = photoPageObservationCell(
-    p.remarks_action || p.movement || "—",
-    16,
-    rowFill
-  );
-
   const topInfo = new Table({
     layout: TableLayoutType.FIXED,
     width: { size: 100, type: WidthType.PERCENTAGE },
     rows: [
       new TableRow({
+        tableHeader: true,
         children: [
-          photoPageHeaderCell("GPS\nLOCATION", 18, headerFill, "000000"),
+          photoPageHeaderCell("GPS LOCATION", 18, headerFill, "000000"),
           photoPageHeaderCell("KM", 12, headerFill, "000000"),
           photoPageHeaderCell("LOCATION", 20, headerFill, "000000"),
           photoPageHeaderCell("CATEGORY", 15, headerFill, "000000"),
@@ -3835,116 +3444,89 @@ async function buildPhotoPageSection(
         ],
       }),
       new TableRow({
-        height: { value: 3200, rule: HeightRule.ATLEAST },
+        height: { value: 2850, rule: HeightRule.ATLEAST },
         children: [
           photoPageValueCell(p.ne_coordinate || "—", 18, AlignmentType.LEFT, rowFill, bodyTextColor),
-          photoPageValueCell(p.kms || "—", 12, AlignmentType.CENTER, rowFill, bodyTextColor),
+          photoPageValueCell(p.kms || "0.0000", 12, AlignmentType.CENTER, rowFill, bodyTextColor),
           photoPageValueCell(locText, 20, AlignmentType.LEFT, rowFill, bodyTextColor),
-          categoryCell,
-          observationCell,
-          remarksCell,
+          await photoPageCategoryCell(p.details || "—", 15, rowFill, bodyTextColor),
+          photoPageTextBlockCell(p.description || "—", 19, rowFill, bodyTextColor, AlignmentType.LEFT),
+          photoPageTextBlockCell(p.remarks_action || movementLabel(p.movement) || "—", 16, rowFill, bodyTextColor, AlignmentType.LEFT),
         ],
       }),
     ],
   });
 
-  const refs = (photoRefs || []).filter(Boolean).slice(0, 2);
+  const photoBytes = await loadResolvedPhotoBytesForReport(
+    supabase,
+    reportId || String((p as any).__report_id || "").trim() || undefined,
+    (photoRefs || []).filter(Boolean)
+  );
 
-  const bytesA = refs[0] ? await resolvePhotoBytes(supabase, refs[0]) : null;
-  const bytesB = refs[1] ? await resolvePhotoBytes(supabase, refs[1]) : null;
+  const bytesA = photoBytes[0] || null;
+  const bytesB = photoBytes[1] || null;
 
-const wrapperNone = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
+  const children: any[] = [];
+  children.push(topInfo);
+  children.push(new Paragraph({ spacing: { before: 80, after: 40 }, text: "" }));
 
-  const content: any[] = [];
-  content.push(new Paragraph({ spacing: { before: 0, after: 0 }, text: "" }));
-content.push(topInfo);
-
-  // small gap between table and image (keep them together)
-  content.push(new Paragraph({ spacing: { before: 80, after: 0 }, text: "" }));
-
-  if (bytesA && !bytesB) {
-    // ✅ Single image (reduced height so it stays with the table on the same page)
-    content.push(
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
-        spacing: { before: 0, after: 0 },
-        children: [new ImageRun({ data: bytesA, transformation: fitTransform(bytesA, 1500, 560) })],
+  if (bytesA && bytesB) {
+    children.push(
+      new Table({
+        layout: TableLayoutType.FIXED,
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                borders: { top: none, bottom: none, left: none, right: none },
+                margins: { top: 0, bottom: 0, left: 280, right: 90 } as any,
+                children: [
+                  new Paragraph({
+                    alignment: AlignmentType.CENTER,
+                    spacing: STYLE.spacing.none,
+                    children: [new ImageRun({ data: bytesA, transformation: fitTransform(bytesA, 500, 360) })],
+                  }),
+                ],
+              }),
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                borders: { top: none, bottom: none, left: none, right: none },
+                margins: { top: 0, bottom: 0, left: 90, right: 280 } as any,
+                children: [
+                  new Paragraph({
+                    alignment: AlignmentType.CENTER,
+                    spacing: STYLE.spacing.none,
+                    children: [new ImageRun({ data: bytesB, transformation: fitTransform(bytesB, 500, 360) })],
+                  }),
+                ],
+              }),
+            ],
+          }),
+        ],
       })
     );
-  } else if (bytesA && bytesB) {
-    // ✅ Two images side-by-side
-    const imgs = new Table({
-      layout: TableLayoutType.FIXED,
-      width: { size: 100, type: WidthType.PERCENTAGE },
-      rows: [
-        new TableRow({
-          children: [
-            new TableCell({
-              width: { size: 50, type: WidthType.PERCENTAGE },
-              borders: { top: wrapperNone, bottom: wrapperNone, left: wrapperNone, right: wrapperNone },
-              children: [
-                new Paragraph({
-                  alignment: AlignmentType.CENTER,
-                  spacing: { before: 0, after: 0 },
-                  children: [new ImageRun({ data: bytesA, transformation: fitTransform(bytesA, 730, 420) })],
-                }),
-              ],
-            }),
-            new TableCell({
-              width: { size: 50, type: WidthType.PERCENTAGE },
-              borders: { top: wrapperNone, bottom: wrapperNone, left: wrapperNone, right: wrapperNone },
-              children: [
-                new Paragraph({
-                  alignment: AlignmentType.CENTER,
-                  spacing: { before: 0, after: 0 },
-                  children: [new ImageRun({ data: bytesB, transformation: fitTransform(bytesB, 730, 420) })],
-                }),
-              ],
-            }),
-          ],
-        }),
-      ],
-    });
-    content.push(imgs);
-  } else {
-    content.push(
+  } else if (bytesA) {
+    children.push(
       new Paragraph({
         alignment: AlignmentType.CENTER,
-        spacing: { before: 160, after: 0 },
-        children: [new TextRun({ text: "Photo not available.", size: 32, bold: true, color: "B42318" })],
+        spacing: STYLE.spacing.none,
+        children: [new ImageRun({ data: bytesA, transformation: fitTransform(bytesA, 1120, 440) })],
+      })
+    );
+  } else {
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 100, after: 0 },
+        children: [new TextRun({ text: "Photo not available.", size: 28, bold: true, color: "B42318" })],
       })
     );
   }
 
-  // Wrap table+image in one row so Word won't split them across pages
-  const children: any[] = [
-    new Table({
-      layout: TableLayoutType.FIXED,
-      width: { size: 100, type: WidthType.PERCENTAGE },
-      rows: [
-        new TableRow({
-          cantSplit: true,
-          children: [
-            new TableCell({
-              borders: { top: wrapperNone, bottom: wrapperNone, left: wrapperNone, right: wrapperNone },
-              margins: { top: 0, bottom: 0, left: 0, right: 0 } as any,
-              children: content,
-            }),
-          ],
-        }),
-      ],
-    }),
-  ];
-
   return {
-    properties: {
-      verticalAlign: VerticalAlign.CENTER,
-      page: {
-        size: { width: A3_W, height: A3_H, orientation: PageOrientation.LANDSCAPE },
-        margin: TABLE_MARGIN as any,
-        ...(pageBordersTSPL() as any),
-      } as any,
-    },
+    properties: sectionPropsA3Landscape(),
     footers: { default: buildFooterTablePages(footerDate ?? new Date()) },
     children,
   };
@@ -4326,6 +3908,17 @@ async function buildDoc(opts: {
   let normalized = enrichPointsAlways(opts.points);
   if (opts.extraPhotoRefs?.length) normalized = applyExtraPhotos(normalized, opts.extraPhotoRefs);
 
+  for (const p of normalized) {
+    const rid = String((p as any).__report_id || "").trim();
+    if (!rid) continue;
+    try {
+      const extra = await getExtraPhotosForReport(opts.supabase, rid);
+      if (extra?.length) {
+        p.photo_refs = Array.from(new Set([...(p.photo_refs || []), ...extra])).slice(0, 3);
+      }
+    } catch {}
+  }
+
   for (const p of normalized) rows.push(await makeBodyRow(opts.supabase, p, opts.includePhotos));
 
   const table = new Table({
@@ -4369,8 +3962,8 @@ async function buildDoc(opts: {
     logoUrl: cover.logoUrl,
     projectName,
     includeGATitle: false,
-    logoW: 220,
-    logoH: 38,
+    logoW: 240,
+    logoH: 42,
   });
 
 
@@ -4492,20 +4085,36 @@ async function buildDoc(opts: {
           // ignore last-page failures
         }
 
+        // ✅ REMOVED old combined blue detail table page.
+        // The export should use only the reference-style photo/detail pages below.
 
 
-// ✅ FULL-PAGE PHOTO PAGES (1 image = full width, 2 images = side-by-side)
+// ✅ REFERENCE-STYLE DETAIL PAGES
+  // Build one detail page for EVERY report point.
+  // Even when there is no photo, keep the table section and show "Photo not available." below it.
   try {
     for (const p of normalized) {
       const refs = (p.photo_refs || []).filter(Boolean).slice(0, 3);
 
-      if (refs.length === 0) continue;
-      if (refs.length === 1) {
+      if (refs.length === 0) {
+        const photoSec = await buildPhotoPageSection({
+          supabase: opts.supabase,
+          projectName,
+          p,
+          photoRefs: [],
+          reportId: String((p as any).__report_id || "").trim() || undefined,
+          footerDate: opts.footerDate ?? new Date(),
+          watermarkEnabled: wmEnabled,
+        });
+        photoSec.headers = { default: headerPhotoTitle };
+        sections.push(photoSec);
+      } else if (refs.length === 1) {
         const photoSec = await buildPhotoPageSection({
           supabase: opts.supabase,
           projectName,
           p,
           photoRefs: [refs[0]],
+          reportId: String((p as any).__report_id || "").trim() || undefined,
           footerDate: opts.footerDate ?? new Date(),
           watermarkEnabled: wmEnabled,
         });
@@ -4517,18 +4126,19 @@ async function buildDoc(opts: {
           projectName,
           p,
           photoRefs: [refs[0], refs[1]],
+          reportId: String((p as any).__report_id || "").trim() || undefined,
           footerDate: opts.footerDate ?? new Date(),
           watermarkEnabled: wmEnabled,
         });
         photoSec.headers = { default: headerPhotoTitle };
         sections.push(photoSec);
       } else {
-        // 3 photos: first 2 on one page, last one on next page
         const photoSec1 = await buildPhotoPageSection({
           supabase: opts.supabase,
           projectName,
           p,
           photoRefs: [refs[0], refs[1]],
+          reportId: String((p as any).__report_id || "").trim() || undefined,
           footerDate: opts.footerDate ?? new Date(),
           watermarkEnabled: wmEnabled,
         });
@@ -4540,6 +4150,7 @@ async function buildDoc(opts: {
           projectName,
           p,
           photoRefs: [refs[2]],
+          reportId: String((p as any).__report_id || "").trim() || undefined,
           footerDate: opts.footerDate ?? new Date(),
           watermarkEnabled: wmEnabled,
         });
@@ -4711,9 +4322,7 @@ export async function generateProjectDOCX(
     if (includePhotos) {
       const extra = await getExtraPhotosForReport(supabase, r.id);
       if (extra.length && reportPoints.length) {
-        reportPoints[0].photo_refs = Array.from(
-          new Set([...(reportPoints[0].photo_refs || []), ...extra])
-        ).slice(0, 3);
+        applyExtraPhotos(reportPoints as any, extra);
       }
     }
 
@@ -4774,6 +4383,7 @@ export async function generateProjectDOCXByReportIds(
       __report_difficulty: report?.difficulty ?? "",
       __report_category: report?.category ?? "",
       __report_description: report?.description ?? "",
+      __report_remarks_action: report?.remarks_action ?? "",
       __point_order: pointSortValue(pt, idx),
       __report_created_at: report?.created_at ?? "",
       __report_id: report?.id ?? "",
@@ -4782,9 +4392,7 @@ export async function generateProjectDOCXByReportIds(
     if (includePhotos) {
       const extra = await getExtraPhotosForReport(supabase, reportId);
       if (extra.length && reportPoints.length) {
-        reportPoints[0].photo_refs = Array.from(
-          new Set([...(reportPoints[0].photo_refs || []), ...extra])
-        ).slice(0, 3);
+        applyExtraPhotos(reportPoints as any, extra);
       }
     }
 
