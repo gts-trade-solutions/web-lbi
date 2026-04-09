@@ -345,6 +345,44 @@ function fallbackLocationFromLatLon(lat: number, lon: number) {
   return `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
 }
 
+function isCoordinateLikeLocationText(text: string) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (/^-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?$/.test(t)) return true;
+  if (/^[NS]\s*\d/.test(t) || /\b[EW]\s*\d/.test(t)) return true;
+  return false;
+}
+
+function shortenLocationLabel(text: string) {
+  const parts = compactUniqueParts(String(text || "").split(",").map((x) => String(x || "").trim()));
+  return parts.slice(0, 4).join(", ").trim();
+}
+
+async function resolveDisplayLocationFromCoords(
+  lat: number | null | undefined,
+  lon: number | null | undefined,
+  existing?: string
+) {
+  const existingText = String(existing || "").trim();
+
+  if (
+    lat != null &&
+    lon != null &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lon)
+  ) {
+    const place = await reverseGeocodeOSM(lat, lon);
+    const shortPlace = shortenLocationLabel(place);
+    if (shortPlace) return shortPlace;
+  }
+
+  if (existingText && !isCoordinateLikeLocationText(existingText)) {
+    return shortenLocationLabel(existingText) || existingText;
+  }
+
+  return "—";
+}
+
 function pointSortValue(raw: any, index: number) {
   const candidates = [
     raw.point_key,
@@ -3139,16 +3177,7 @@ async function makeBodyRow(supabase: any, p: NormalizedPoint, includePhotos: boo
     }
   }
 
-  let locText = (p.location || "").trim();
-  if (lat != null && lon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
-    const place = await reverseGeocodeOSM(lat, lon);
-    if (place) {
-      locText = place;
-    } else if (!locText) {
-      locText = fallbackLocationFromLatLon(lat, lon);
-    }
-  }
-  if (!locText) locText = "—";
+  const locText = await resolveDisplayLocationFromCoords(lat, lon, p.location || "");
 
   return new TableRow({
     cantSplit: true,
@@ -3412,21 +3441,11 @@ async function buildPhotoPageSection(
     }
   }
 
-  let locText = (p.location || "").trim();
-  if (lat != null && lon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
-    const place = await reverseGeocodeOSM(lat, lon);
-    if (place) {
-      locText = place;
-    } else if (!locText) {
-      locText = fallbackLocationFromLatLon(lat, lon);
-    }
-  }
-  if (!locText) locText = "—";
+  const locText = await resolveDisplayLocationFromCoords(lat, lon, p.location || "");
 
-  const theme = getPhotoTheme(p.movement);
-  const rowFill = theme.body;
-  const headerFill = theme.header;
-  const bodyTextColor = theme.text;
+  const rowFill = "DDE8D7";
+  const headerFill = "4CAF50";
+  const bodyTextColor = "163A2A";
 
   const topInfo = new Table({
     layout: TableLayoutType.FIXED,
@@ -3903,8 +3922,6 @@ async function buildDoc(opts: {
   projectName?: string;
   cover?: CoverOptions;
 }): Promise<Blob> {
-  const rows: TableRow[] = [makeHeaderRow()];
-
   let normalized = enrichPointsAlways(opts.points);
   if (opts.extraPhotoRefs?.length) normalized = applyExtraPhotos(normalized, opts.extraPhotoRefs);
 
@@ -3918,18 +3935,6 @@ async function buildDoc(opts: {
       }
     } catch {}
   }
-
-  for (const p of normalized) rows.push(await makeBodyRow(opts.supabase, p, opts.includePhotos));
-
-  const table = new Table({
-    style: "Table Grid Light1",
-    layout: TableLayoutType.FIXED,
-    width: { size: TABLE_TOTAL_W, type: WidthType.DXA },
-    columnWidths: GRID_COLS,
-    rows,
-    alignment: AlignmentType.CENTER as any,
-    indent: { size: 0, type: WidthType.DXA } as any,
-  });
 
   const wmEnabled = !!opts.watermark?.enabled;
   const projectName = (opts.projectName || "PROJECT").trim();
