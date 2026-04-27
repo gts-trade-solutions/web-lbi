@@ -2,7 +2,6 @@
 
 import React, { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabaseClient";
 
 export default function AuthGate({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -10,44 +9,52 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    let sub: any = null;
+    let cancelled = false;
 
-    const isPublicPath = (p: string) =>
-      p.startsWith("/login") || p.startsWith("/auth");
+    const publicPaths = ["/login", "/auth", "/api"];
+    const isPublic = publicPaths.some((p) => pathname?.startsWith(p));
 
-    (async () => {
-      const { data, error } = await supabase.auth.getSession();
-      if (error) {
-        console.error("getSession error:", error);
-        setReady(true);
-        return;
+    async function checkAuth() {
+      try {
+        if (isPublic) {
+          if (!cancelled) setReady(true);
+          return;
+        }
+
+        const token =
+          typeof window !== "undefined"
+            ? localStorage.getItem("auth_token")
+            : null;
+
+        const res = await fetch("/api/auth/me", {
+          method: "GET",
+          credentials: "include",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+
+        if (!cancelled && !res.ok) {
+          setReady(true);
+          router.replace("/login");
+          return;
+        }
+
+        if (!cancelled) setReady(true);
+      } catch (error) {
+        console.error("[AuthGate] auth check failed:", error);
+        if (!cancelled) {
+          setReady(true);
+          router.replace("/login");
+        }
       }
+    }
 
-      const session = data?.session;
-
-      if (!session && pathname && !isPublicPath(pathname)) {
-        router.replace("/login");
-        setReady(true);
-        return;
-      }
-
-      setReady(true);
-
-      const { data: listener } = supabase.auth.onAuthStateChange((_event, s) => {
-        const p = pathname || "";
-        if (!s && !isPublicPath(p)) router.replace("/login");
-      });
-
-      sub = listener?.subscription;
-    })();
+    checkAuth();
 
     return () => {
-      try {
-        sub?.unsubscribe?.();
-      } catch {}
+      cancelled = true;
     };
   }, [router, pathname]);
 
-  if (!ready) return <div style={{ padding: 24 }}>Loading...</div>;
+  if (!ready) return null;
   return <>{children}</>;
 }

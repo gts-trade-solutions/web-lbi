@@ -5,10 +5,8 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Editor } from "@tinymce/tinymce-react";
 
-import { supabase } from "../../../lib/supabase";
+import { dbClient } from "../../../lib/dbClient";
 import {
-  generateProjectDOCX,
-  generateProjectDOCXByReportIds,
   generateProjectGPX,
   generateProjectGPXByReportIds,
 } from "../../../lib/download";
@@ -100,22 +98,73 @@ function vmDisplayToDb(v: string): VehicleMovement {
   return "";
 }
 
+async function getAuthUserFromApi() {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+  const res = await fetch("/api/auth/me", {
+    method: "GET",
+    credentials: "include",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error("Not logged in.");
+  const data = await res.json().catch(() => ({} as any));
+  const user = data?.user;
+  if (!user?.id) throw new Error("Not logged in.");
+  return user as { id: string };
+}
+
+function authHeaders() {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function parseJsonSafe(res: Response) {
+  return res.json().catch(() => ({} as any));
+}
+
+async function apiRequestJson(url: string, init: RequestInit = {}) {
+  const mergedHeaders: Record<string, string> = {
+    ...(init.body ? { "Content-Type": "application/json" } : {}),
+    ...authHeaders(),
+    ...(init.headers as Record<string, string> | undefined),
+  };
+  const res = await fetch(url, {
+    ...init,
+    credentials: "include",
+    headers: mergedHeaders,
+  });
+  const data = await parseJsonSafe(res);
+  if (!res.ok) throw new Error(data?.error || "Request failed");
+  return data;
+}
+
 async function updateReportVM(reportId: string, next: VehicleMovement) {
   const payload: any = { difficulty: next ? next : null };
-  const { error } = await supabase.from("reports").update(payload).eq("id", reportId);
-  if (error) throw error;
+  await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 }
 
 
 async function uploadToBucket(bucket: string, path: string, file: File) {
-  const { data, error } = await supabase.storage.from(bucket).upload(path, file, {
-    cacheControl: "3600",
-    upsert: true,
-    contentType: file.type || undefined,
+  const normalizedPath = String(path || "").replace(/^\/+/, "").replace(/\\/g, "/");
+  const slash = normalizedPath.lastIndexOf("/");
+  const folderFromPath = slash > 0 ? normalizedPath.slice(0, slash) : normalizedPath || "uploads";
+  const formData = new FormData();
+  formData.append("folder", folderFromPath);
+  formData.append("file", file);
+
+  const res = await fetch("/api/upload", {
+    method: "POST",
+    credentials: "include",
+    headers: authHeaders(),
+    body: formData,
   });
-  if (error) throw error;
-  const { data: pub } = supabase.storage.from(bucket).getPublicUrl(data.path);
-  return { path: data.path, publicUrl: pub.publicUrl };
+  const data = await parseJsonSafe(res);
+  if (!res.ok) throw new Error(data?.error || "Upload failed");
+  return { path: String(data?.key || data?.path || path), publicUrl: String(data?.url || "") };
 }
 
 async function uploadReportPhotos(projectId: string, reportId: string, files: File[]) {
@@ -145,11 +194,10 @@ async function uploadReportPhotos(projectId: string, reportId: string, files: Fi
       const safeName = f.name.replace(/[^\w.\-]+/g, "_");
       const uniquePrefix = `${Date.now()}_${index}_${Math.random().toString(36).slice(2, 8)}`;
 
-      // IMPORTANT:
-      // safeName already contains the original extension, so do not append the extension again.
-      // We keep the storage layout aligned with bulk import:
-      // reports/<projectId>/<reportId>/<fileName>
-      const storagePath = `reports/${projectId}/${reportId}/${uniquePrefix}_${safeName}`;
+      // Storage layout: reports/photos/<reportId>/<fileName>. The folder MUST
+      // be keyed off the actual reports.id (NOT user.id, NOT projectId) so the
+      // export query `WHERE report_id IN (...)` joins against report_photos.
+      const storagePath = `reports/photos/${reportId}/${uniquePrefix}_${safeName}`;
 
       const size = await getImageSize(f);
       const uploaded = await uploadToBucket(REPORT_PHOTO_BUCKET, storagePath, f);
@@ -167,8 +215,24 @@ async function uploadReportPhotos(projectId: string, reportId: string, files: Fi
     (row, index, arr) => index === arr.findIndex((x) => x.url === row.url)
   );
 
-  const { error: imgErr } = await supabase.from(REPORT_IMAGE_TABLE).insert(uniqueUploads as any);
-  if (imgErr) throw imgErr;
+  const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}/photos`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(),
+    },
+    body: JSON.stringify({
+      photos: uniqueUploads.map((x) => ({
+        url: x.url,
+        width: x.width,
+        height: x.height,
+        file_name: x.url.split("/").pop() || null,
+      })),
+    }),
+  });
+  const data = await parseJsonSafe(res);
+  if (!res.ok) throw new Error(data?.error || "Failed to save report photos");
 }
 
 function vmFilterLabel(f: VMFilter) {
@@ -186,6 +250,40 @@ function downloadBlob(blob: Blob, fileName: string) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+async function fetchProjectExportDocx(params: {
+  projectId: string;
+  reportIds?: string[];
+  includePhotos?: boolean;
+  fileName?: string;
+}) {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+  const sp = new URLSearchParams();
+  if (params.reportIds?.length) {
+    sp.set("reportIds", params.reportIds.join(","));
+  }
+  if (typeof params.includePhotos === "boolean") {
+    sp.set("includePhotos", params.includePhotos ? "1" : "0");
+  }
+  if (params.fileName?.trim()) {
+    sp.set("fileName", params.fileName.trim());
+  }
+
+  const suffix = sp.toString() ? `?${sp.toString()}` : "";
+  const res = await fetch(`/api/projects/${encodeURIComponent(params.projectId)}/export${suffix}`, {
+    method: "GET",
+    credentials: "include",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({} as any));
+    throw new Error(data?.error || "Failed to export");
+  }
+
+  return res.blob();
 }
 
 function clamp(n: number, a: number, b: number) {
@@ -292,6 +390,7 @@ export default function ProjectReportsPage() {
   const [project, setProject] = useState<ProjectRow | null>(null);
   const [reports, setReports] = useState<ReportRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const fetchingRef = useRef(false);
 
 
@@ -371,25 +470,22 @@ export default function ProjectReportsPage() {
     if (fetchingRef.current) return;
     fetchingRef.current = true;
 
-    let query = supabase
-      .from("reports")
-      .select("id, project_id, route_id, category, description, remarks_action, created_at, difficulty, sort_order")
-      .eq("project_id", projectId)
-      .order("sort_order", { ascending: dir === "asc", nullsFirst: false })
-      .order("created_at", { ascending: dir === "asc" });
-
-    if (filter === "unset") query = query.is("difficulty", null);
-    else if (filter !== "all") query = query.eq("difficulty", filter);
-
-    const sText = searchText.trim();
-    if (sText) {
-      query = query.textSearch("search_tsv", sText, { type: "websearch", config: "simple" });
-    }
-
     try {
-      const { data, error } = await query;
-      if (error) throw error;
-      setReports((data || []) as ReportRow[]);
+      const params = new URLSearchParams();
+      const sText = searchText.trim();
+      if (sText) params.set("search", sText);
+      if (filter && filter !== "all") params.set("difficulty", filter);
+      params.set("sort", dir);
+
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/reports?${params.toString()}`, {
+        method: "GET",
+        credentials: "include",
+        headers: authHeaders(),
+      });
+      const data = await parseJsonSafe(res);
+      if (!res.ok) throw new Error(data?.error || "Failed to fetch reports");
+      setReports(((data?.reports || data || []) as ReportRow[]) || []);
+      setLoadError(null);
     } finally {
       fetchingRef.current = false;
     }
@@ -398,16 +494,21 @@ export default function ProjectReportsPage() {
   const load = async () => {
     if (!projectId) return;
     setLoading(true);
+    setLoadError(null);
     try {
-      const { data: pData, error: pErr } = await supabase.from("projects").select("*").eq("id", projectId).single();
-      if (pErr) throw pErr;
-
-      setProject(pData as ProjectRow);
+      const pRes = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+        method: "GET",
+        credentials: "include",
+        headers: authHeaders(),
+      });
+      const pData = await parseJsonSafe(pRes);
+      if (!pRes.ok) throw new Error(pData?.error || "Failed to fetch project");
+      setProject((pData?.project || pData?.data || pData) as ProjectRow);
 
       await fetchReports(q, sortDir, vmFilter);
       setSelected({});
     } catch (e: any) {
-      alert(e?.message || String(e));
+      setLoadError(e?.message || "Failed to fetch reports");
     } finally {
       setLoading(false);
     }
@@ -434,17 +535,23 @@ export default function ProjectReportsPage() {
 
     (async () => {
       setLoading(true);
+      setLoadError(null);
       try {
         setSortDir("asc");
 
-        const { data: pData, error: pErr } = await supabase.from("projects").select("*").eq("id", projectId).single();
-        if (pErr) throw pErr;
-        setProject(pData as ProjectRow);
+        const pRes = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+          method: "GET",
+          credentials: "include",
+          headers: authHeaders(),
+        });
+        const pData = await parseJsonSafe(pRes);
+        if (!pRes.ok) throw new Error(pData?.error || "Failed to fetch project");
+        setProject((pData?.project || pData?.data || pData) as ProjectRow);
 
         await fetchReports(q, "asc", vmFilter);
         setSelected({});
       } catch (e: any) {
-        alert(e?.message || String(e));
+        setLoadError(e?.message || "Failed to fetch reports");
       } finally {
         setLoading(false);
       }
@@ -456,7 +563,9 @@ export default function ProjectReportsPage() {
     if (!projectId) return;
 
     const t = setTimeout(() => {
-      fetchReports(q, sortDir, vmFilter).catch((e: any) => alert(e?.message || String(e)));
+      fetchReports(q, sortDir, vmFilter).catch((e: any) => {
+        setLoadError(e?.message || "Failed to fetch reports");
+      });
       setSelected({});
     }, 250);
 
@@ -543,43 +652,42 @@ export default function ProjectReportsPage() {
     if (!projectId) return;
 
     try {
-      // 1) must have a route page row
-      const { data: page, error: pErr } = await supabase
-        .from("project_route_pages")
-        .select("id")
-        .eq("project_id", projectId)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (pErr) throw pErr;
+      const token =
+        typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/export?check=1`, {
+        method: "GET",
+        credentials: "include",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.error || "Failed to export");
 
-      if (!page?.id) {
+      const pageId = data?.pageId ? String(data.pageId) : null;
+      const hasSetup = Boolean(data?.hasSetup);
+      const hasImages = Boolean(data?.hasImages);
+
+      if (!hasSetup) {
         setGaSetupReason("GA drawing setup not found for this project. Please fill it before exporting.");
         setGaExistingPageId(null);
         setGaSetupOpen(true);
         return;
       }
 
-      // 2) must have at least 1 GA image
-      const { count, error: cErr } = await supabase
-        .from("project_route_page_images")
-        .select("id", { count: "exact", head: true })
-        .eq("project_id", projectId)
-        .eq("project_page_id", page.id);
-      if (cErr) throw cErr;
-
-      if (!count || count < 1) {
+      if (!hasImages) {
         setGaSetupReason("GA drawing files are not added for this project. Please upload at least 1 image or PDF.");
-        setGaExistingPageId(page.id);
+        setGaExistingPageId(pageId);
         setGaSetupOpen(true);
         return;
       }
 
-      // ✅ GA exists -> ask Edit or Skip
-      setGaExistingPageId(page.id);
+      setGaExistingPageId(pageId);
       setGaChoiceOpen(true);
     } catch (e: any) {
-      alert(e?.message || String(e));
+      console.error("[export] failed:", e);
+      setDlTitle("Export");
+      setDlError("Failed to export");
+      setDlDone(true);
+      setDlOpen(true);
     }
   };
 
@@ -634,21 +742,24 @@ export default function ProjectReportsPage() {
     const missing = filteredSortedReports.filter((r) => reportIds.includes(r.id) && !r.route_id);
     if (!missing.length) return;
 
-    const { data: latestRoute, error: rErr } = await supabase
-      .from("routes")
-      .select("id")
-      .eq("project_id", projectId)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (rErr) throw rErr;
-
-    const routeId = (latestRoute as any)?.id as string | undefined;
+    const routeData = await apiRequestJson(
+      `/api/projects/${encodeURIComponent(projectId)}/reports?sort=desc&limit=1`,
+      {
+        method: "GET",
+      }
+    );
+    const routeId = String((routeData?.reports || [])[0]?.route_id || "").trim() || undefined;
     if (!routeId) return; // no route exists
 
     const ids = missing.map((m) => m.id);
-    const { error: uErr } = await supabase.from("reports").update({ route_id: routeId }).in("id", ids);
-    if (uErr) throw uErr;
+    await Promise.all(
+      ids.map((id) =>
+        apiRequestJson(`/api/reports/${encodeURIComponent(id)}`, {
+          method: "PUT",
+          body: JSON.stringify({ route_id: routeId }),
+        })
+      )
+    );
 
     setReports((prev) => prev.map((r) => (ids.includes(r.id) ? { ...r, route_id: routeId } : r)));
   }
@@ -680,7 +791,7 @@ export default function ProjectReportsPage() {
         }
 
         if (exportMode === "all") {
-          const { blob, fileName: fn } = await generateProjectGPX(supabase, projectId, {
+          const { blob, fileName: fn } = await generateProjectGPX(dbClient, projectId, {
             name: exportName || projectName,
             fileName,
           });
@@ -691,7 +802,7 @@ export default function ProjectReportsPage() {
 
         if (exportMode === "selectedOne") {
           const ids = selectedIdsInOrder;
-          const { blob, fileName: fn } = await generateProjectGPXByReportIds(supabase, projectId, ids, {
+          const { blob, fileName: fn } = await generateProjectGPXByReportIds(dbClient, projectId, ids, {
             name: exportName || projectName,
             fileName,
           });
@@ -721,13 +832,14 @@ export default function ProjectReportsPage() {
       }
 
       const wm = watermarkOpts.enabled ? watermarkOpts : { enabled: false, text: "" };
+      void wm;
 
       if (exportMode === "all") {
         const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-ALL-REPORTS`)}.docx`;
-        const { blob } = await generateProjectDOCX(supabase, projectId, {
+        const blob = await fetchProjectExportDocx({
+          projectId,
           includePhotos,
           fileName,
-          watermark: wm as any,
         });
         setPreparedFiles([{ fileName, blob }]);
         setDlDone(true);
@@ -742,10 +854,11 @@ export default function ProjectReportsPage() {
           exportName || `${projectName}-${vmFilterLabel(vmFilter)}-${ids.length}`
         )}.docx`;
 
-        const { blob } = await generateProjectDOCXByReportIds(supabase, projectId, ids, {
+        const blob = await fetchProjectExportDocx({
+          projectId,
+          reportIds: ids,
           includePhotos,
           fileName,
-          watermark: wm as any,
         });
 
         setPreparedFiles([{ fileName, blob }]);
@@ -757,10 +870,11 @@ export default function ProjectReportsPage() {
         const ids = selectedIdsInOrder;
         const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-SELECTED-${ids.length}`)}.docx`;
 
-        const { blob } = await generateProjectDOCXByReportIds(supabase, projectId, ids, {
+        const blob = await fetchProjectExportDocx({
+          projectId,
+          reportIds: ids,
           includePhotos,
           fileName,
-          watermark: wm as any,
         });
 
         setPreparedFiles([{ fileName, blob }]);
@@ -784,10 +898,11 @@ export default function ProjectReportsPage() {
           if (!subset.length) continue;
 
           const fileName = `${base}-${st.label}.docx`;
-          const { blob } = await generateProjectDOCXByReportIds(supabase, projectId, subset, {
+          const blob = await fetchProjectExportDocx({
+            projectId,
+            reportIds: subset,
             includePhotos,
             fileName,
-            watermark: wm as any,
           });
 
           files.push({ fileName, blob });
@@ -836,19 +951,22 @@ export default function ProjectReportsPage() {
     }
     if (!parsed.length) throw new Error('No valid points found. Use format: "12.9716,77.5946" (one per line).');
 
-    const { data: lastRow, error: lErr } = await supabase
-      .from("report_path_points")
-      .select("seq")
-      .eq("report_id", reportId)
-      .order("seq", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (lErr) throw lErr;
+    const lastRowsRes = await apiRequestJson("/api/db/query", {
+      method: "POST",
+      body: JSON.stringify({
+        table: "report_path_points",
+        action: "select",
+        select: "seq",
+        filters: [{ type: "eq", column: "report_id", value: reportId }],
+        orders: [{ column: "seq", ascending: false }],
+        limit: 1,
+        maybeSingle: true,
+      }),
+    });
+    const lastRow = lastRowsRes?.data || null;
 
-    const { data: authData, error: authErr } = await supabase.auth.getUser();
-    if (authErr) throw authErr;
-    const userId = authData.user?.id;
-    if (!userId) throw new Error("Not logged in.");
+    const authUser = await getAuthUserFromApi();
+    const userId = authUser.id;
 
     const startSeq = (lastRow as any)?.seq ? Number((lastRow as any).seq) + 1 : 1;
     const nowIso = new Date().toISOString();
@@ -864,8 +982,10 @@ export default function ProjectReportsPage() {
       timestamp: nowIso,
     }));
 
-    const { error: insErr } = await supabase.from("report_path_points").insert(rows as any);
-    if (insErr) throw insErr;
+    await apiRequestJson("/api/[table]".replace("[table]", "report_path_points"), {
+      method: "POST",
+      body: JSON.stringify(rows),
+    });
   };
 
   // ✅ open insert modal after a row (between rows)
@@ -890,23 +1010,19 @@ export default function ProjectReportsPage() {
   const renumberSortOrders = async () => {
     if (!projectId) return;
 
-    const { data, error } = await supabase
-      .from("reports")
-      .select("id, sort_order, created_at")
-      .eq("project_id", projectId)
-      .order("sort_order", { ascending: true, nullsFirst: false })
-      .order("created_at", { ascending: true });
-
-    if (error) throw error;
-
-    const rows = (data || []) as ReportRow[];
+    const data = await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}/reports?sort=asc`, {
+      method: "GET",
+    });
+    const rows = ((data?.reports || []) as ReportRow[]).slice();
     for (let i = 0; i < rows.length; i++) {
       const id = rows[i].id;
       const nextOrder = (i + 1) * SORT_STEP;
       // update only if different (avoid extra writes)
       if ((rows[i].sort_order ?? null) !== nextOrder) {
-        const { error: uErr } = await supabase.from("reports").update({ sort_order: nextOrder }).eq("id", id);
-        if (uErr) throw uErr;
+        await apiRequestJson(`/api/reports/${encodeURIComponent(id)}`, {
+          method: "PUT",
+          body: JSON.stringify({ sort_order: nextOrder }),
+        });
       }
     }
   };
@@ -934,14 +1050,19 @@ export default function ProjectReportsPage() {
     }
     if (!parsed.length) return;
 
-    const { data: lastRow, error: lErr } = await supabase
-      .from("report_path_points")
-      .select("seq")
-      .eq("report_id", reportId)
-      .order("seq", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (lErr) throw lErr;
+    const lastRowsRes = await apiRequestJson("/api/db/query", {
+      method: "POST",
+      body: JSON.stringify({
+        table: "report_path_points",
+        action: "select",
+        select: "seq",
+        filters: [{ type: "eq", column: "report_id", value: reportId }],
+        orders: [{ column: "seq", ascending: false }],
+        limit: 1,
+        maybeSingle: true,
+      }),
+    });
+    const lastRow = lastRowsRes?.data || null;
 
     const startSeq = (lastRow as any)?.seq ? Number((lastRow as any).seq) + 1 : 1;
     const nowIso = new Date().toISOString();
@@ -956,8 +1077,10 @@ export default function ProjectReportsPage() {
       timestamp: nowIso,
     }));
 
-    const { error: insErr } = await supabase.from("report_path_points").insert(rows as any);
-    if (insErr) throw insErr;
+    await apiRequestJson("/api/report_path_points", {
+      method: "POST",
+      body: JSON.stringify(rows),
+    });
   }
 
   const insertReportAfter = async (afterId: string, payload: { category: string; description: string; remarksAction: string; difficulty: VehicleMovement; files: File[]; pointsText?: string }) => {
@@ -997,17 +1120,14 @@ export default function ProjectReportsPage() {
       newOrder = afterOrder + SORT_STEP;
     }
 
-    const { data: authData, error: authErr } = await supabase.auth.getUser();
-    if (authErr) throw authErr;
-    const userId = authData.user?.id;
-    if (!userId) throw new Error("Not logged in.");
+    const authUser = await getAuthUserFromApi();
+    const userId = authUser.id;
 
     const nowIso = new Date().toISOString();
 
-    const { data: ins, error: insErr } = await supabase
-      .from("reports")
-      .insert({
-        project_id: projectId,
+    const ins = await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}/reports`, {
+      method: "POST",
+      body: JSON.stringify({
         user_id: userId,
         category: payload.category || "Report",
         description: payload.description || null,
@@ -1015,13 +1135,10 @@ export default function ProjectReportsPage() {
         difficulty: payload.difficulty ? payload.difficulty : "green",
         created_at: nowIso,
         sort_order: newOrder,
-      } as any)
-      .select("id")
-      .single();
+      }),
+    });
 
-    if (insErr) throw insErr;
-
-    const newId = (ins as any)?.id as string;
+    const newId = String(ins?.report?.id || "").trim();
 
     // ✅ Photos (optional)
     if (newId && payload.files?.length) {
@@ -1538,6 +1655,8 @@ export default function ProjectReportsPage() {
         {/* ========= TABLE ========= */}
         {loading ? (
           <div style={styles.stateCard}>Loading...</div>
+        ) : loadError ? (
+          <div style={styles.stateCard}>{loadError}</div>
         ) : filteredSortedReports.length === 0 ? (
           <div style={styles.stateCard}>
             <div style={{ fontWeight: 900, color: "#101828" }}>No reports found</div>
@@ -2219,7 +2338,7 @@ function PhotoUploadModal({
 }
 
 
-/** ✅ Modal that collects Objective + Map + GA images + Locations + Conclusion and saves to Supabase */
+/** ✅ Modal that collects Objective + Map + GA images + Locations + Conclusion and saves to dbClient */
 function RouteSetupModal({
   projectId,
   reason,
@@ -2403,12 +2522,19 @@ function RouteSetupModal({
       setErr(null);
 
       try {
-        const { data: page, error: pErr } = await supabase
-          .from("project_route_pages")
-          .select("id, objective, map_mode, preset_map_key, map_file_url, conclusion_html")
-          .eq("id", existingPageId)
-          .maybeSingle();
-        if (pErr) throw pErr;
+        const token =
+          typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+        const res = await fetch(
+          `/api/projects/${encodeURIComponent(projectId)}/ga-drawing?pageId=${encodeURIComponent(existingPageId)}`,
+          {
+            method: "GET",
+            credentials: "include",
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+          }
+        );
+        const data = await res.json().catch(() => ({} as any));
+        if (!res.ok) throw new Error(data?.error || "Failed to load GA drawing");
+        const page = data?.page || null;
 
         if (page) {
           setObjective((page as any).objective || "");
@@ -2418,21 +2544,10 @@ function RouteSetupModal({
           setConclusionHtml((page as any).conclusion_html || "");
         }
 
-        // Locations table is optional; if it doesn't exist, ignore.
-        try {
-          const { data: locs } = await supabase
-            .from("project_route_page_locations")
-            .select("id, label, pin_type, sort_order")
-            .eq("project_id", projectId)
-            .eq("project_page_id", existingPageId)
-            .order("sort_order", { ascending: true });
-
-          if (locs && (locs as any[]).length) {
-            const labels = (locs as RouteLocationRow[]).map((x) => String(x.label || "").trim());
-            setRouteLocations([labels[0] || "", labels[1] || "", labels[2] || "", labels[3] || ""]);
-          }
-        } catch {
-          // ignore
+        const locs = Array.isArray(data?.locations) ? (data.locations as RouteLocationRow[]) : [];
+        if (locs.length) {
+          const labels = locs.map((x) => String(x.label || "").trim());
+          setRouteLocations([labels[0] || "", labels[1] || "", labels[2] || "", labels[3] || ""]);
         }
       } catch (e: any) {
         setErr(e?.message || String(e));
@@ -2444,14 +2559,28 @@ function RouteSetupModal({
   }, [existingPageId]);
 
   async function uploadToBucket(bucket: string, path: string, file: File) {
-    const { data, error } = await supabase.storage.from(bucket).upload(path, file, {
-      cacheControl: "3600",
-      upsert: true,
-      contentType: file.type || undefined,
+    const normalizedPath = String(path || "").replace(/^\/+/, "").replace(/\\/g, "/");
+    const slash = normalizedPath.lastIndexOf("/");
+    const folderFromPath = slash > 0 ? normalizedPath.slice(0, slash) : normalizedPath || "uploads";
+    const formData = new FormData();
+    formData.append("folder", folderFromPath);
+    formData.append("file", file);
+
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      credentials: "include",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
     });
-    if (error) throw error;
-    const { data: pub } = supabase.storage.from(bucket).getPublicUrl(data.path);
-    return { path: data.path, publicUrl: pub.publicUrl };
+    const data = await res.json().catch(() => ({} as any));
+    if (!res.ok) throw new Error(data?.error || "Failed to upload image");
+    return {
+      path: String(data?.key || data?.path || path),
+      publicUrl: String(data?.url || ""),
+    };
   }
 
   const saveAll = async () => {
@@ -2459,11 +2588,6 @@ function RouteSetupModal({
     setErr(null);
 
     try {
-      const { data: authData, error: authErr } = await supabase.auth.getUser();
-      if (authErr) throw authErr;
-      const userId = authData.user?.id;
-      if (!userId) throw new Error("Not logged in.");
-
       // Must have at least 1 GA image to proceed
       if (!gaFiles.length) {
         throw new Error("Please upload at least 1 GA drawing file (image or PDF).");
@@ -2492,82 +2616,6 @@ function RouteSetupModal({
 
       const currentConclusion = (conclusionRef.current?.getContent?.() ?? conclusionHtml ?? "").trim();
 
-      // Upsert page row (latest)
-      const { data: existing, error: exErr } = await supabase
-        .from("project_route_pages")
-        .select("id")
-        .eq("project_id", projectId)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (exErr) throw exErr;
-
-      let pageId: string;
-
-      if (existing?.id) {
-        const { error: updErr } = await supabase
-          .from("project_route_pages")
-          .update({
-            objective,
-            map_mode: mapPickMode,
-            preset_map_key,
-            map_file_url,
-            conclusion_html: currentConclusion || null,
-          })
-          .eq("id", existing.id);
-        if (updErr) throw updErr;
-        pageId = existing.id;
-      } else {
-        const { data: ins, error: insErr } = await supabase
-          .from("project_route_pages")
-          .insert({
-            project_id: projectId,
-            user_id: userId,
-            objective,
-            map_mode: mapPickMode,
-            preset_map_key,
-            map_file_url,
-            conclusion_html: currentConclusion || null,
-          })
-          .select("id")
-          .single();
-        if (insErr) throw insErr;
-        pageId = (ins as any).id;
-      }
-
-      // ✅ Save locations (best-effort; if table doesn't exist, don't fail)
-      try {
-        await supabase
-          .from("project_route_page_locations")
-          .delete()
-          .eq("project_id", projectId)
-          .eq("project_page_id", pageId);
-
-        const labels = routeLocations.map((x) => String(x || "").trim());
-        const locRows = labels
-          .map((label, idx) => ({
-            project_page_id: pageId,
-            project_id: projectId,
-            user_id: userId,
-            label,
-            pin_type: idx === 0 ? "start" : idx === 3 ? "end" : "mid",
-            sort_order: idx,
-          }))
-          .filter((r) => !!r.label);
-
-        if (locRows.length) {
-          const { error: locErr } = await supabase.from("project_route_page_locations").insert(locRows as any);
-          if (locErr) throw locErr;
-        }
-      } catch (e) {
-        console.warn("Locations save skipped (table may not exist):", e);
-      }
-
-      // Replace existing GA image rows for this page so stale PDFs/old rows do not keep breaking export
-      try {
-        await supabase.from("project_route_page_images").delete().eq("project_id", projectId).eq("project_page_id", pageId);
-      } catch {}
-
       // Upload GA files + insert rows
       // ✅ Important fix:
       // If user uploads a PDF GA drawing, convert page 1 to PNG first and store that PNG in storage + DB.
@@ -2579,27 +2627,53 @@ function RouteSetupModal({
           : originalFile;
 
         const safeName = storageFile.name.replace(/[^\w.\-]+/g, "_");
-        const storagePath = `projects/${projectId}/${pageId}/${Date.now()}_${safeName}`;
+        const storagePath = `projects/${projectId}/${Date.now()}_${safeName}`;
         const uploaded = await uploadToBucket("ga-drawings", storagePath, storageFile);
 
         rows.push({
-          project_page_id: pageId,
-          project_id: projectId,
-          user_id: userId,
-          // Store storage path for maximum reliability in export; resolver can still load it from bucket
-          file_url: uploaded.path,
+          file_url: uploaded.publicUrl,
+          imageUrl: uploaded.publicUrl,
+          imageKey: uploaded.path,
           file_name: storageFile.name,
+          fileName: storageFile.name,
           mime_type: storageFile.type || "image/png",
+          mimeType: storageFile.type || "image/png",
           file_size: storageFile.size || null,
+          fileSize: storageFile.size || null,
         });
       }
 
-      const { error: imgErr } = await supabase.from("project_route_page_images").insert(rows);
-      if (imgErr) throw imgErr;
+      const token =
+        typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+      const saveRes = await fetch(`/api/projects/${encodeURIComponent(projectId)}/ga-drawing`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          pageId: existingPageId || null,
+          objective,
+          mapMode: mapPickMode,
+          presetMapKey: preset_map_key,
+          mapFileUrl: map_file_url,
+          conclusionHtml: currentConclusion || null,
+          routeLocations,
+          gaImages: rows,
+          imageUrl: rows[0]?.file_url || null,
+          imageKey: rows[0]?.imageKey || null,
+          fileName: rows[0]?.file_name || null,
+        }),
+      });
+      const saveData = await saveRes.json().catch(() => ({} as any));
+      if (!saveRes.ok) {
+        throw new Error(saveData?.error || "Failed to save GA drawing");
+      }
 
       onSaved();
     } catch (e: any) {
-      setErr(e?.message || String(e));
+      setErr(e?.message || "Failed to save GA drawing");
     } finally {
       setSaving(false);
     }

@@ -2,11 +2,9 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabaseBrowser } from "../../lib/supabaseBrowser";
 
 export default function LoginPage() {
   const router = useRouter();
-  const supabase = supabaseBrowser();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -17,15 +15,35 @@ export default function LoginPage() {
     setErr(null);
     setLoading(true);
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password,
-    });
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          email: email.trim(),
+          password,
+        }),
+      });
 
-    setLoading(false);
+      const data = await res.json().catch(() => ({}));
 
-    if (error) return setErr(error.message);
-    router.push("/projects");
+      if (!res.ok) {
+        setErr(data?.error || "Login failed");
+        return;
+      }
+
+      if (data?.token && typeof window !== "undefined") {
+        localStorage.setItem("auth_token", data.token);
+      }
+
+      router.push("/projects");
+    } catch (error) {
+      console.error("[login] request failed:", error);
+      setErr("Login failed");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -68,7 +86,7 @@ export default function LoginPage() {
           </button>
 
           <div style={styles.footerHint}>
-            Trouble signing in? Check your credentials or Supabase Auth users.
+            Trouble signing in? Check your credentials.
           </div>
         </div>
       </div>

@@ -133,38 +133,21 @@ export default function ReportDetailPage({ params }: { params: { id: string } })
   const downloadWord = async () => {
     try {
       setExporting(true);
-
-      const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-      const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-      if (!SUPABASE_URL) throw new Error("NEXT_PUBLIC_SUPABASE_URL missing in environment (.env)");
-      if (!ANON_KEY) throw new Error("NEXT_PUBLIC_SUPABASE_ANON_KEY missing in .env.local");
-
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData.session?.access_token;
-      if (!token) throw new Error("Login required (no session token)");
-
-      const fnUrl = `${SUPABASE_URL}/functions/v1/report-docx`;
-
-      const res = await fetch(fnUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          apikey: ANON_KEY,
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ reportId, includePhotos: true }),
+      const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}/docx`, {
+        method: "GET",
+        credentials: "include",
       });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.error || "Failed to generate DOCX");
+      if (!data?.base64) throw new Error("Invalid DOCX API response");
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Edge ${res.status}: ${text}`);
-      }
-
-      const blob = await res.blob();
-      const disp = res.headers.get("content-disposition") || "";
-      const m = disp.match(/filename="([^"]+)"/);
-      const filename = m?.[1] || `report-${reportId}.docx`;
-
+      const binary = atob(data.base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+      const filename = data.filename || `report-${reportId}.docx`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;

@@ -1,21 +1,18 @@
-import { supabase } from "@/lib/supabaseBrowser";
 import { downloadBase64AsFile } from "@/utils/downloadBase64";
 
 const DOCX_MIME =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 export async function exportReportDocx(reportId: string) {
-  const { data, error } = await supabase.functions.invoke("report-docx", {
-    body: { reportId },
+  const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}/docx`, {
+    method: "GET",
+    credentials: "include",
   });
-
-  if (error) {
-    // this will show real error (500/401/CORS etc.)
-    throw new Error(error.message);
-  }
+  const data = await res.json().catch(() => ({} as any));
+  if (!res.ok) throw new Error(data?.error || "Failed to generate DOCX");
 
   if (!data?.base64) {
-    throw new Error("Edge function did not return { base64 }");
+    throw new Error("DOCX API did not return { base64 }");
   }
 
   downloadBase64AsFile(

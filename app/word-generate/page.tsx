@@ -77,6 +77,21 @@ function vmDisplayToDb(v: string): VehicleMovement {
   return "";
 }
 
+async function getAuthUserFromApi() {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+  const res = await fetch("/api/auth/me", {
+    method: "GET",
+    credentials: "include",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error("Not logged in.");
+  const data = await res.json().catch(() => ({} as any));
+  const user = data?.user;
+  if (!user?.id) throw new Error("Not logged in.");
+  return user as { id: string };
+}
+
 async function updateReportVM(reportId: string, next: VehicleMovement) {
   const payload: any = { difficulty: next ? next : null };
   const { error } = await supabase.from("reports").update(payload).eq("id", reportId);
@@ -1284,10 +1299,8 @@ function RouteSetupModal({
     setErr(null);
 
     try {
-      const { data: authData, error: authErr } = await supabase.auth.getUser();
-      if (authErr) throw authErr;
-      const userId = authData.user?.id;
-      if (!userId) throw new Error("Not logged in.");
+      const authUser = await getAuthUserFromApi();
+      const userId = authUser.id;
 
       // Must have at least 1 GA image to proceed
       if (!gaFiles.length) {

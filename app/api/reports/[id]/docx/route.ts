@@ -1,28 +1,23 @@
-import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import pool from "../../../../../lib/db";
+import { requireAuth } from "../../../../../lib/auth";
 import {
-  Document,
-  Packer,
-  Paragraph,
-  TextRun,
-  Table,
-  TableRow,
-  TableCell,
-  WidthType,
   AlignmentType,
+  Document,
   HeadingLevel,
   ImageRun,
+  Packer,
+  Paragraph,
   ShadingType,
+  Table,
+  TableCell,
+  TableRow,
+  TextRun,
   VerticalAlign,
+  WidthType,
 } from "docx";
 
-export const runtime = "nodejs"; // IMPORTANT (not edge)
-
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { persistSession: false } }
-);
+export const runtime = "nodejs";
 
 function headerCell(text: string) {
   return new TableCell({
@@ -54,115 +49,90 @@ async function fetchImageBytes(url: string): Promise<Uint8Array | null> {
   }
 }
 
-export async function GET(_: Request, { params }: { params: { id: string } }) {
+export async function GET(request: Request, { params }: { params: { id: string } }) {
   try {
+    requireAuth(request);
+
     const reportId = params.id;
 
-    const { data: report, error: repErr } = await supabaseAdmin
-      .from("reports")
-      .select("*")
-      .eq("id", reportId)
-      .single();
+    const [reportRows] = await pool.query("SELECT * FROM reports WHERE id = ? LIMIT 1", [reportId]);
+    const report = Array.isArray(reportRows) ? (reportRows[0] as any) : null;
+    if (!report) return Response.json({ error: "Report not found" }, { status: 404 });
 
-    if (repErr || !report) {
-      return NextResponse.json({ error: repErr?.message || "Report not found" }, { status: 404 });
-    }
-
-    // project
     let projectName = "";
     if (report.project_id) {
-      const { data: proj } = await supabaseAdmin.from("projects").select("*").eq("id", report.project_id).single();
-      projectName = proj?.name || "";
+      const [projRows] = await pool.query("SELECT * FROM projects WHERE id = ? LIMIT 1", [report.project_id]);
+      const proj = Array.isArray(projRows) ? (projRows[0] as any) : null;
+      projectName = proj?.name || proj?.title || proj?.project_name || "";
     }
 
-    // photos
-    const { data: photos } = await supabaseAdmin
-      .from("report_photos")
-      .select("*")
-      .eq("report_id", reportId)
-      .order("created_at", { ascending: true });
+    const [photoRows] = await pool.query(
+      "SELECT * FROM report_photos WHERE report_id = ? ORDER BY created_at ASC",
+      [reportId]
+    );
+    const photos = Array.isArray(photoRows) ? (photoRows as any[]) : [];
 
-    // points
-    const { data: points } = await supabaseAdmin
-      .from("report_path_points")
-      .select("*")
-      .eq("report_id", reportId)
-      .order("seq", { ascending: true });
+    const [pointRows] = await pool.query(
+      "SELECT * FROM report_path_points WHERE report_id = ? ORDER BY seq ASC",
+      [reportId]
+    );
+    const points = Array.isArray(pointRows) ? (pointRows as any[]) : [];
 
-    const photoUrls: string[] =
-      (photos || [])
-        .map((p: any) => p.url)
-        .filter((u: any) => typeof u === "string" && u.startsWith("http")) || [];
+    const photoUrls: string[] = photos
+      .map((p: any) => p.url || p.public_url)
+      .filter((u: any) => typeof u === "string" && /^https?:\/\//i.test(u));
 
-    // Build table rows like your sample format :contentReference[oaicite:1]{index=1}
-    const header = new TableRow({
-      children: [
-        headerCell("GPS NO"),
-        headerCell("KMS"),
-        headerCell("NE COORDINATE"),
-        headerCell("DETAILS"),
-        headerCell("LOCATION"),
-        headerCell("PHOTO"),
-        headerCell("VEHICLE MOVEMENT"),
-      ],
-    });
+    const rows: TableRow[] = [
+      new TableRow({
+        children: [
+          headerCell("GPS NO"),
+          headerCell("KMS"),
+          headerCell("NE COORDINATE"),
+          headerCell("DETAILS"),
+          headerCell("LOCATION"),
+          headerCell("PHOTO"),
+          headerCell("VEHICLE MOVEMENT"),
+        ],
+      }),
+    ];
 
-    const rows: TableRow[] = [header];
-
-    for (const pt of points || []) {
+    for (const pt of points) {
       const lat = pt.latitude ?? "";
       const lng = pt.longitude ?? "";
       const ne = lat && lng ? `N${lat} E${lng}` : "";
 
-      // attach up to 2 photos per row (simple approach)
-      // If you have photo per point mapping in DB, you can replace this logic.
       const img1 = photoUrls[0] ? await fetchImageBytes(photoUrls[0]) : null;
       const img2 = photoUrls[1] ? await fetchImageBytes(photoUrls[1]) : null;
-
       const photoCellChildren: Paragraph[] = [];
 
       if (img1) {
         photoCellChildren.push(
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            children: [
-              new ImageRun({
-                data: img1,
-                transformation: { width: 220, height: 140 },
-              }),
-            ],
+            children: [new ImageRun({ data: img1, transformation: { width: 220, height: 140 } })],
           })
         );
       }
-
       if (img2) {
         photoCellChildren.push(
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            children: [
-              new ImageRun({
-                data: img2,
-                transformation: { width: 220, height: 140 },
-              }),
-            ],
+            children: [new ImageRun({ data: img2, transformation: { width: 220, height: 140 } })],
           })
         );
       }
-
-      if (!photoCellChildren.length) {
-        photoCellChildren.push(new Paragraph("")); // empty
-      }
+      if (!photoCellChildren.length) photoCellChildren.push(new Paragraph(""));
 
       rows.push(
         new TableRow({
           children: [
             normalCell(String(pt.seq ?? "")),
-            normalCell(String(pt.km ?? "")),
+            normalCell(String(pt.km ?? pt.kms ?? "")),
             normalCell(ne),
-            normalCell(pt.details ?? ""),
-            normalCell(pt.location_text ?? ""),
+            normalCell(pt.details ?? report.description ?? ""),
+            normalCell(pt.location_text ?? report.location ?? ""),
             new TableCell({ children: photoCellChildren }),
-            normalCell(pt.vehicle_movement ?? ""),
+            normalCell(pt.vehicle_movement ?? report.vehicle_movement ?? ""),
           ],
         })
       );
@@ -206,14 +176,17 @@ export async function GET(_: Request, { params }: { params: { id: string } }) {
     });
 
     const buf = await Packer.toBuffer(doc);
-    const base64 = buf.toString("base64");
-    const filename = `${(projectName || "project").replaceAll(" ", "_")}_${(report.category || "report").replaceAll(
+    const base64 = Buffer.from(buf).toString("base64");
+    const filename = `${(projectName || "project").replaceAll(" ", "_")}_${String(report.category || "report").replaceAll(
       " ",
       "_"
     )}.docx`;
 
-    return NextResponse.json({ base64, filename });
+    return Response.json({ base64, filename });
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
+    if (e?.message === "Unauthorized") {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    return Response.json({ error: "Failed to generate DOCX" }, { status: 500 });
   }
 }

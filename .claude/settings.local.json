@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node scripts/inject-category-icon-tag.js)",
+      "Bash(rm -rf reena-after)",
+      "Bash(mkdir reena-after *)",
+      "Bash(unzip -q \"/c/Users/Dell/Downloads/lbi-web-app-master/lbi-web/templates/reena-all-template.docx\" -d reena-after)",
+      "Bash(grep -oE '.{30}\\\\{#hasCategoryIcon\\\\}.{0,300}' /tmp/reena-after/word/document.xml)"
+    ]
+  }
+}

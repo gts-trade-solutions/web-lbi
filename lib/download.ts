@@ -1373,27 +1373,68 @@ function splitLines(text: string) {
 const DETAILS_ICON_CACHE = new Map<string, Uint8Array>();
 const DOCX_ICON_CACHE = new Map<string, Uint8Array | null>();
 
+// URL-style paths because this file runs in the browser (buildIconCandidateUrls
+// fetches via window.location.origin). Do NOT switch to `public/...` here —
+// that path style only works for the server-side fs reader in
+// lib/reenaTemplateExport.ts. File numbers below match the LBI Report Drawing
+// reference order: ca-2 = Footpath Bridge … ca-16 = Railway Level Crossing.
 const CATEGORY_ICON_MAP: Record<string, string> = {
-  footpath_bridge: "/images/report-icons/image",
+  footpath_bridge: "/images/report-icons/ca-2",
+
   lt_cable: "/images/report-icons/ca-3",
-  ht_cable: "/images/report-icons/ca-3",
-  towerline_cable: "/images/report-icons/ca-4",
-  diversion: "/images/report-icons/diversion",
-  towerline: "/images/report-icons/ca-4",
-  underpass: "/images/report-icons/ca-5",
-  tree: "/images/report-icons/ca-6",
-  bridge: "/images/report-icons/ca-5",
+  low_tension_cable: "/images/report-icons/ca-3",
+
+  ht_cable: "/images/report-icons/ca-4",
+  high_tension_cable: "/images/report-icons/ca-4",
+
+  towerline_cable: "/images/report-icons/ca-5",
+  towerline: "/images/report-icons/ca-5",
+  tower_line: "/images/report-icons/ca-5",
+  tower_line_cable: "/images/report-icons/ca-5",
+
+  underpass: "/images/report-icons/ca-6",
+  underpass_bridge: "/images/report-icons/ca-6",
+
+  tree: "/images/report-icons/ca-7",
+  tree_branches: "/images/report-icons/ca-7",
+
+  river_bridge: "/images/report-icons/ca-8",
+  // Bare "bridge" is ambiguous in the source data; default it to the river
+  // bridge drawing so it doesn't fall back to the generic placeholder.
+  bridge: "/images/report-icons/ca-8",
+
+  signboard: "/images/report-icons/ca-9",
+  electric_sign: "/images/report-icons/ca-9",
+  electric_signboard: "/images/report-icons/ca-9",
+  camera_pole: "/images/report-icons/ca-9",
+
+  toll: "/images/report-icons/ca-10",
+  toll_plaza: "/images/report-icons/ca-10",
+
+  narrow_road: "/images/report-icons/ca-11",
+
+  gate: "/images/report-icons/ca-12",
+
+  side_signboard: "/images/report-icons/ca-13",
+  signal_pole: "/images/report-icons/ca-13",
+  speed_pole: "/images/report-icons/ca-13",
+  electric_side_signboard: "/images/report-icons/ca-13",
+
+  bend: "/images/report-icons/ca-14",
+
   petrol: "/images/report-icons/ca-15",
-  signboard: "/images/report-icons/ca-17",
-  electric_sign: "/images/report-icons/ca-17",
-  camera_pole: "/images/report-icons/ca-17",
-  toll: "/images/report-icons/ca-9",
-  junction_left: "/images/report-icons/ca-15",
-  bend: "/images/report-icons/ca-13",
-  junction_right: "/images/report-icons/ca-16",
-  river_bridge: "/images/report-icons/ca-7",
+  petrol_bunk: "/images/report-icons/ca-15",
+
   railway_level_crossing: "/images/report-icons/ca-16",
-  gate: "/images/report-icons/ca-11",
+
+  diversion: "/images/report-icons/diversion",
+
+  // Junctions don't have a dedicated icon in the LBI reference; route them to
+  // the generic placeholder so they show *something* but never the wrong icon.
+  junction_left: "/images/report-icons/image",
+  junction_right: "/images/report-icons/image",
+
+  fallback: "/images/report-icons/image",
 };
 
 function buildIconCandidateUrls(src: string): string[] {
@@ -1472,11 +1513,30 @@ function detectDetailKind(details: string) {
 
   if (t.includes("tree branches") || t.includes("tree branch") || t == "tree" || t.includes("branches")) return "tree";
   if (t.includes("petrol bunk") || t.includes("petrol pump") || t.includes("fuel station") || t.includes("fuel bunk")) return "petrol";
+  // Side variants must be checked BEFORE the broader signboard/camera-pole
+  // rules below; otherwise "Side Signboard" would resolve to "signboard"
+  // (ca-9) instead of the side-pole icon (ca-13).
+  if (
+    t.includes("side signboard") ||
+    t.includes("side sign board") ||
+    t.includes("electric side signboard") ||
+    t.includes("electric side sign board") ||
+    t.includes("signal pole") ||
+    t.includes("speed pole")
+  ) {
+    return "side_signboard";
+  }
+
   if (t.includes("electric sign board") || t.includes("electric signboard") || t.includes("illuminated sign")) return "electric_sign";
   if (t.includes("signboard") || t.includes("sign board") || t.includes("road sign")) return "signboard";
   if (t.includes("camera pole") || t.includes("camera") || t.includes("cctv pole") || t.includes("surveillance pole")) return "camera_pole";
   if (t.includes("toll plaza") || t == "toll" || t.includes("toll")) return "toll";
 
+  if (t.includes("railway level crossing") || t.includes("level crossing") || t.includes("railway crossing")) return "railway_level_crossing";
+  if (t.includes("narrow road") || t.includes("narrow")) return "narrow_road";
+  if (t === "gate" || t.includes("gate")) return "gate";
+
+  if (t.includes("river bridge")) return "river_bridge";
   if (t === "bridge" || t.includes(" bridge")) return "bridge";
 
   return "";

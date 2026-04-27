@@ -1,43 +1,7 @@
-import { NextResponse, type NextRequest } from "next/server";
-import { createServerClient } from "@supabase/ssr";
+import { NextResponse } from "next/server";
 
-export async function middleware(req: NextRequest) {
-  const res = NextResponse.next();
-
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll: () => req.cookies.getAll(),
-        setAll: (cookiesToSet) => {
-          cookiesToSet.forEach(({ name, value, options }) => {
-            res.cookies.set(name, value, options);
-          });
-        },
-      },
-    }
-  );
-
-  const { data } = await supabase.auth.getUser();
-  const user = data.user;
-
-  const isLogin = req.nextUrl.pathname.startsWith("/login");
-  const isApi = req.nextUrl.pathname.startsWith("/api");
-
-  if (!user && !isLogin && !isApi) {
-    const url = req.nextUrl.clone();
-    url.pathname = "/login";
-    return NextResponse.redirect(url);
-  }
-
-  if (user && isLogin) {
-    const url = req.nextUrl.clone();
-    url.pathname = "/projects";
-    return NextResponse.redirect(url);
-  }
-
-  return res;
+export async function middleware() {
+  return NextResponse.next();
 }
 
 export const config = {
