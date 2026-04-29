@@ -260,23 +260,40 @@ async function fetchProjectExportDocx(params: {
 }) {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-  const sp = new URLSearchParams();
-  if (params.reportIds?.length) {
-    sp.set("reportIds", params.reportIds.join(","));
-  }
-  if (typeof params.includePhotos === "boolean") {
-    sp.set("includePhotos", params.includePhotos ? "1" : "0");
-  }
-  if (params.fileName?.trim()) {
-    sp.set("fileName", params.fileName.trim());
-  }
+  const authHdrs: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const exportUrl = `/api/projects/${encodeURIComponent(params.projectId)}/export`;
 
-  const suffix = sp.toString() ? `?${sp.toString()}` : "";
-  const res = await fetch(`/api/projects/${encodeURIComponent(params.projectId)}/export${suffix}`, {
-    method: "GET",
-    credentials: "include",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
+  // Use POST with a JSON body so the upstream Nginx never sees a multi-KB
+  // ?reportIds=... query string (which triggers 414/431 above ~30 UUIDs).
+  // Fall back to GET only when there is no selection at all.
+  const useGet = !params.reportIds?.length;
+  let res: Response;
+  if (useGet) {
+    const sp = new URLSearchParams();
+    if (typeof params.includePhotos === "boolean") {
+      sp.set("includePhotos", params.includePhotos ? "1" : "0");
+    }
+    if (params.fileName?.trim()) {
+      sp.set("fileName", params.fileName.trim());
+    }
+    const suffix = sp.toString() ? `?${sp.toString()}` : "";
+    res = await fetch(`${exportUrl}${suffix}`, {
+      method: "GET",
+      credentials: "include",
+      headers: authHdrs,
+    });
+  } else {
+    res = await fetch(exportUrl, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...authHdrs },
+      body: JSON.stringify({
+        reportIds: params.reportIds,
+        includePhotos: params.includePhotos,
+        fileName: params.fileName?.trim() || undefined,
+      }),
+    });
+  }
 
   if (!res.ok) {
     const data = await res.json().catch(() => ({} as any));

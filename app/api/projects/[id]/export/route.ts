@@ -227,7 +227,27 @@ export async function GET(request: Request, context: Ctx) {
     }
   }
 
-  // ---- Full DOCX render path.
+  // ---- Full DOCX render path (GET).
+  return renderAndRespond({
+    projectId,
+    reportIds: normalizeReportIds(url.searchParams.get("reportIds") || ""),
+    includePhotos: String(url.searchParams.get("includePhotos") || "1") !== "0",
+    requestedFileName: String(url.searchParams.get("fileName") || "").trim(),
+  });
+}
+
+/**
+ * Render handler shared by GET (precheck + small selections) and POST (large
+ * selections - avoids 414/431 from long reportIds query strings hitting the
+ * upstream Nginx URL-length limit).
+ */
+async function renderAndRespond(args: {
+  projectId: string;
+  reportIds: string[];
+  includePhotos: boolean;
+  requestedFileName: string;
+}) {
+  const { projectId, reportIds, includePhotos, requestedFileName } = args;
   try {
     if (!fs.existsSync(TEMPLATE_PATH)) {
       console.error("[export] template missing at", TEMPLATE_PATH);
@@ -236,10 +256,6 @@ export async function GET(request: Request, context: Ctx) {
         { status: 500 }
       );
     }
-
-    const includePhotos = String(url.searchParams.get("includePhotos") || "1") !== "0";
-    const reportIds = normalizeReportIds(url.searchParams.get("reportIds") || "");
-    const requestedFileName = String(url.searchParams.get("fileName") || "").trim();
 
     const result = await generateReenaDocx({
       projectId,
@@ -281,4 +297,53 @@ export async function GET(request: Request, context: Ctx) {
       { status: 500 }
     );
   }
+}
+
+/**
+ * POST variant: same DOCX response as GET, but reads `reportIds` (and other
+ * params) from the JSON body so URL length is bounded. Use this whenever the
+ * caller has many selected reports.
+ *
+ * Body shape:
+ *   { reportIds?: string[]; includePhotos?: boolean; fileName?: string }
+ */
+export async function POST(request: Request, context: Ctx) {
+  const projectId = String(context.params?.id || "").trim();
+  console.error("[export] route started (POST)", { projectId });
+
+  try {
+    requireAuth(request);
+  } catch (err) {
+    if ((err as { message?: string })?.message === "Unauthorized") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    console.error("[export] auth error:", err);
+    return NextResponse.json({ error: "Auth check failed" }, { status: 500 });
+  }
+
+  if (!projectId) {
+    return NextResponse.json({ error: "Project id is required" }, { status: 400 });
+  }
+
+  let body: {
+    reportIds?: unknown;
+    includePhotos?: unknown;
+    fileName?: unknown;
+  } = {};
+  try {
+    body = (await request.json()) || {};
+  } catch {
+    body = {};
+  }
+
+  const reportIds = Array.isArray(body.reportIds)
+    ? body.reportIds
+        .map((v) => String(v || "").trim())
+        .filter(Boolean)
+        .slice(0, 5000)
+    : [];
+  const includePhotos = body.includePhotos !== false;
+  const requestedFileName = String(body.fileName || "").trim();
+
+  return renderAndRespond({ projectId, reportIds, includePhotos, requestedFileName });
 }
