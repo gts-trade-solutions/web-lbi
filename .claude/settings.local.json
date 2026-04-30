@@ -7,7 +7,17 @@
       "Bash(unzip -q \"/c/Users/Dell/Downloads/lbi-web-app-master/lbi-web/templates/reena-all-template.docx\" -d reena-after)",
       "Bash(grep -oE '.{30}\\\\{#hasCategoryIcon\\\\}.{0,300}' /tmp/reena-after/word/document.xml)",
       "Bash(node scripts/smoke-test-reena-template.js)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(rm -rf /tmp/tpl_check)",
+      "Bash(mkdir -p /tmp/tpl_check)",
+      "Bash(unzip -o templates/reena-all-template.docx -d /tmp/tpl_check)",
+      "Read(//tmp/tpl_check/word/**)",
+      "Bash(node scripts/rename-photo-placeholder.js)",
+      "Bash(grep -nA2 \"observationPhotoKey:\" c:/Users/Dell/Downloads/lbi-web-app-master/lbi-web/lib/reenaTemplateExport.ts)",
+      "Bash(npx tsc *)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\(JSON.stringify\\({deps:Object.keys\\(p.dependencies||{}\\).filter\\(k=>k.match\\(/sharp|image|jimp/i\\)\\), all_deps:Object.keys\\(p.dependencies||{}\\).sort\\(\\)}, null, 2\\)\\)\")",
+      "Bash(git stash *)",
+      "Bash(npm install *)"
     ]
   }
 }

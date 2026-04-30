@@ -53,6 +53,16 @@ type ImportSummary = {
   imagesSelected: number;
   imagesUploaded: number;
   photosInserted: number;
+  // Optional fields populated when the bulk-import API also performed a
+  // server-side S3 lookup. Older callers ignore these.
+  photosMatchedServer?: number;
+  photosMissingServer?: number;
+  photosMissingSamples?: string[];
+  s3IndexSize?: number;
+  totalPhotosResolved?: number;
+  masterRowsReferencingImages?: number;
+  reportsInserted?: number;
+  reportsUpdated?: number;
   noGpsImages: string[];
   missingFilesInUpload: string[];
   extraFilesNotInMap: string[];
@@ -457,8 +467,30 @@ async function parseCombinedFile(file: File): Promise<ParsedCombinedRow[]> {
   const iLon = colIndex(headers, ["longitude", "lon", "lng"]);
   const iCat = colIndex(headers, ["category", "report_category"]);
   const iDesc = colIndex(headers, ["description", "report_description", "desc", "observations"]);
-  const iFile = colIndex(headers, ["file_name", "filename", "file", "name", "image_name"]);
-  const iImgKey = colIndex(headers, ["image_key", "imagekey", "img_key", "imgkey"]);
+  // Spec: support every filename column alias the master file may carry
+  // so a customer's column heading (e.g. "photo", "image_file") still
+  // resolves to the row's image filename.
+  const iFile = colIndex(headers, [
+    "file_name",
+    "filename",
+    "file",
+    "name",
+    "image",
+    "image_name",
+    "photo",
+    "photo_name",
+    "image_file",
+    "photo_file",
+  ]);
+  // Spec: image_key column may also be labelled photo_key.
+  const iImgKey = colIndex(headers, [
+    "image_key",
+    "imagekey",
+    "img_key",
+    "imgkey",
+    "photo_key",
+    "photokey",
+  ]);
   const iAction = colIndex(headers, [
     "action",
     "actions",
@@ -533,12 +565,31 @@ async function uploadFileToS3(args: {
   reportId: string;
   width?: number | null;
   height?: number | null;
+  pointKey?: string | null;
+  imageKey?: string | null;
+  projectId?: string | null;
+  fileName?: string | null;
 }) {
+  // Spec Part 2: log BEFORE the request so we can correlate the upload
+  // attempt with whatever /api/upload reports back.
+  console.log("[bulk] calling /api/upload", {
+    projectId: args.projectId || null,
+    reportId: args.reportId,
+    pointKey: args.pointKey || null,
+    imageKey: args.imageKey || null,
+    fileName: args.fileName || args.file.name,
+  });
   const fd = new FormData();
   fd.append("file", args.file);
   fd.append("reportId", args.reportId);
   if (args.width != null) fd.append("width", String(args.width));
   if (args.height != null) fd.append("height", String(args.height));
+  if (args.pointKey) fd.append("pointKey", String(args.pointKey));
+  if (args.imageKey) fd.append("imageKey", String(args.imageKey));
+  if (args.projectId) fd.append("projectId", String(args.projectId));
+  // fileName is sent so the server has the original (unsanitised) name
+  // even if the multipart filename gets mangled by an intermediate proxy.
+  fd.append("fileName", String(args.fileName || args.file.name));
 
   const res = await fetch("/api/upload", {
     method: "POST",
@@ -553,7 +604,13 @@ async function uploadFileToS3(args: {
     url: string;
     key: string;
     fileName?: string;
-    reportPhoto?: { saved: boolean; reason?: string };
+    reportPhoto?: {
+      saved: boolean;
+      reason?: string;
+      verifiedCount?: number;
+      verifiedRows?: Array<Record<string, unknown>>;
+      verifiedProjectId?: string | null;
+    };
   };
   return { path: json.key, publicUrl: json.url, fileName: json.fileName, reportPhoto: json.reportPhoto };
 }
@@ -590,6 +647,31 @@ function getDuplicates(values: string[]) {
   return Array.from(dup).sort((a, b) => a.localeCompare(b));
 }
 
+
+/**
+ * Spec-mandated normalisation for matching master-file `file_name` against
+ * uploaded image filenames. trim → URI-decode → strip folder path → lowercase.
+ * Returns "" for empty/invalid input so callers can use the result as a Map
+ * key without false-positive matches.
+ */
+function normalizeFileName(value: unknown): string {
+  if (!value) return "";
+  let v = String(value);
+  try {
+    v = decodeURIComponent(v);
+  } catch {
+    // ignore malformed percent escapes
+  }
+  return (
+    v
+      .trim()
+      .replace(/\\/g, "/")
+      .split("/")
+      .pop()
+      ?.trim()
+      .toLowerCase() || ""
+  );
+}
 
 function normalizeFileKey(value: string) {
   return String(value || "")
@@ -1069,7 +1151,27 @@ export default function ProjectsPage() {
   const runImportSingleMaster = async () => {
     if (!bulkProjectId) return alert("Select a project.");
     if (!masterFile) return alert("Select master file.");
-    if (!imageFiles.length) return alert("Select image files (bulk).");
+    // imageFiles MAY be empty: the server-side S3 lookup will then try to
+    // resolve the master file's file_name / image_key references against
+    // images already uploaded to the bucket. The post-import summary will
+    // tell the user how many references could not be resolved.
+
+    // Spec-mandated entry log so we can verify, before anything else runs,
+    // exactly which master file + image files the user has selected for
+    // THIS project. If imageFilesCount is 0 here, the per-row /api/upload
+    // step further down will have nothing to send — the only path to
+    // report_photos for this project would then be the server-side S3
+    // lookup.
+    console.log("[BULK FRONTEND IMAGE SEND]", {
+      projectId: bulkProjectId,
+      masterFile: masterFile?.name || null,
+      imageFilesCount: imageFiles?.length || 0,
+      sampleImages: Array.from(imageFiles || []).slice(0, 10).map((f) => ({
+        name: f.name,
+        size: f.size,
+        type: f.type,
+      })),
+    });
 
     setImporting(true);
     setSummary(null);
@@ -1091,6 +1193,31 @@ export default function ProjectsPage() {
       console.log("[bulk import] parsed rows:", combinedRows.length);
       console.log("[bulk import] selected images:", imageFiles.length);
       console.log("[bulk import] importing project:", bulkProjectId);
+
+      // Spec-mandated trace: dump the first 10 parsed master rows so we can
+      // confirm point_key / file_name / image_key / category survived parse.
+      console.log("[BULK PHOTO TRACE parsed rows]", {
+        totalRows: combinedRows.length,
+        sampleRows: combinedRows.slice(0, 10).map((r: any) => ({
+          point_key: r.point_key,
+          file_name: r.file_name,
+          image_key: r.image_key,
+          category: r.category,
+        })),
+      });
+
+      // Spec-mandated trace: dump the first 20 manually selected image files
+      // so we can correlate them against master-file file_name values when
+      // matching fails.
+      console.log("[BULK PHOTO TRACE uploaded files]", {
+        uploadedFilesCount: imageFiles.length,
+        sampleFiles: imageFiles.slice(0, 20).map((f) => ({
+          name: f.name,
+          size: f.size,
+          type: f.type,
+          normalizedName: normalizeFileName(f.name),
+        })),
+      });
 
       if (!combinedRows.length) {
         throw new Error(
@@ -1193,8 +1320,24 @@ export default function ProjectsPage() {
         return a.localeCompare(b);
       });
 
+      // Build per-point image refs from imageMap so the server can do its
+      // own S3 lookup when the user did not manually select files. Multiple
+      // file rows in the master can map to one point_key.
+      const refsByPointKey = new Map<
+        string,
+        Array<{ file_name: string | null; image_key: string | null }>
+      >();
+      for (const m of imageMap) {
+        if (!m.point_key) continue;
+        if (!m.file_name && !m.image_key) continue;
+        const list = refsByPointKey.get(m.point_key) || [];
+        list.push({ file_name: m.file_name || null, image_key: m.image_key || null });
+        refsByPointKey.set(m.point_key, list);
+      }
+
       const apiRows = sortedKeys.map((key) => {
         const p = pointByKey.get(key)!;
+        const refs = refsByPointKey.get(key) || [];
         return {
           point_key: key,
           latitude: p.latitude,
@@ -1203,6 +1346,13 @@ export default function ProjectsPage() {
           description: p.description?.trim() || null,
           difficulty: normalizeDifficulty(p.difficulty || "green"),
           remarks_action: p.remarks_action?.trim() || null,
+          // Pass the master-file file/key references so the server can resolve
+          // them against S3 directly. file_name is the first ref's filename
+          // (kept for the existing manual-upload code path), image_refs[]
+          // covers all of them.
+          file_name: refs[0]?.file_name || null,
+          image_key: refs[0]?.image_key || null,
+          image_refs: refs,
         };
       });
 
@@ -1212,7 +1362,20 @@ export default function ProjectsPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
-          body: JSON.stringify({ rows: apiRows }),
+          body: JSON.stringify({
+            rows: apiRows,
+            // "S3 (configured server-side)" Storage option => always ask the
+            // server to scan the bucket for any references the user did not
+            // upload manually in this run.
+            s3Lookup: {
+              enabled: true,
+              prefixes: [
+                "reports/photos/",
+                `reports/${bulkProjectId}/`,
+                `reports/photos/${bulkProjectId}/`,
+              ],
+            },
+          }),
         }
       );
       if (!importRes.ok) {
@@ -1223,6 +1386,11 @@ export default function ProjectsPage() {
         ok: boolean;
         insertedCount: number;
         updatedCount: number;
+        photosMatched?: number;
+        photosMissing?: number;
+        photosMissingSamples?: string[];
+        s3LookupEnabled?: boolean;
+        s3IndexSize?: number;
         reports: Array<{ point_key: string; report_id: string }>;
       };
 
@@ -1276,76 +1444,272 @@ export default function ProjectsPage() {
         return noGpsReportId;
       }
 
-      // ---- Step C: match selected files to reports by file_name. Each match
-      // posts to /api/upload (multipart) which streams to S3 and inserts the
-      // report_photos row in the same call. No second photos call needed.
-      const mapByFileName = new Map<string, ParsedImageMapRow>();
-      imageMap.forEach((r) => {
-        const key = normalizeFileKey(r.file_name);
-        if (key && !mapByFileName.has(key)) mapByFileName.set(key, r);
-      });
-
-      const selectedByName = new Map<string, File>();
-      imageFiles.forEach((f) => {
-        const key = normalizeFileKey(f.name);
-        if (key && !selectedByName.has(key)) selectedByName.set(key, f);
-      });
-
-      const missingFilesInUpload: string[] = [];
-      for (const [name] of mapByFileName) {
-        if (!selectedByName.has(name)) missingFilesInUpload.push(name);
+      // ---- Step C: per-row chain. For every parsed master row:
+      //    1. resolve the saved reportId from reportIdByPointKey,
+      //    2. normalise the master row's file_name and look it up in
+      //       uploadedImageMap (keyed by normalised filename),
+      //    3. upload the matched File to S3 via /api/upload, which inserts
+      //       the report_photos row using the EXACT reportId we pass.
+      // The bulk-import API also performs server-side S3 lookup for any rows
+      // we did NOT manually upload here, so this loop only needs to handle
+      // rows whose images live in `imageFiles` for this run.
+      const uploadedImageMap = new Map<string, File>();
+      for (const file of imageFiles) {
+        const normalized = normalizeFileName(file.name);
+        if (normalized && !uploadedImageMap.has(normalized)) {
+          uploadedImageMap.set(normalized, file);
+        }
       }
 
+      // Diagnostics retained for the existing UI summary.
+      const mapByFileName = new Map<string, ParsedImageMapRow>();
+      imageMap.forEach((r) => {
+        const k = normalizeFileName(r.file_name);
+        if (k && !mapByFileName.has(k)) mapByFileName.set(k, r);
+      });
+      const missingFilesInUpload: string[] = [];
+      for (const [name] of mapByFileName) {
+        if (!uploadedImageMap.has(name)) missingFilesInUpload.push(name);
+      }
       const extraFilesNotInMap: string[] = [];
       imageFiles.forEach((f) => {
-        if (!mapByFileName.has(normalizeFileKey(f.name))) extraFilesNotInMap.push(f.name);
+        if (!mapByFileName.has(normalizeFileName(f.name))) {
+          extraFilesNotInMap.push(f.name);
+        }
       });
 
-      console.log(
-        "[bulk import] upload match sample:",
-        imageFiles.slice(0, 5).map((f) => {
-          const m = mapByFileName.get(normalizeFileKey(f.name));
-          return {
-            file: f.name,
-            mappedPoint: m?.point_key || null,
-            reportId: m?.point_key ? reportIdByPointKey.get(m.point_key) || null : null,
-          };
-        })
-      );
-
+      // Spec-required tallies.
+      let rowsWithFileName = 0;
+      let matchedImagesCount = 0;
+      let uploadedToS3Count = 0;
+      let reportPhotosInsertedClient = 0;
+      let missingImagesCount = 0;
       const noGpsImages: string[] = [];
       let imagesUploaded = 0;
-      let photosInserted = 0;
+      let photosInserted = 0; // legacy: still surfaced in the existing UI summary
 
-      await mapLimit(imageFiles, 3, async (file) => {
-        const mapping = mapByFileName.get(normalizeFileKey(file.name));
-        if (!mapping) return;
+      // Iterate the parsed master rows (one per point_key) so the chain is
+      // strictly: save report → match image → upload → insert report_photos
+      // keyed by THIS reportId. Concurrency-limited so we don't open hundreds
+      // of S3 connections at once on a 400-row import.
+      await mapLimit(combinedRows, 5, async (row) => {
+        const point_key = row.point_key;
+        // Spec Part 3: support every filename column alias the master file
+        // may carry. parseCombinedFile already collapses these into
+        // row.file_name, but we re-cascade defensively in case a row was
+        // assembled from a different parser path.
+        const r = row as Record<string, unknown>;
+        const rawFileName =
+          (r.file_name as string | null) ||
+          (r.filename as string | null) ||
+          (r.image as string | null) ||
+          (r.image_name as string | null) ||
+          (r.photo as string | null) ||
+          (r.photo_name as string | null) ||
+          (r.image_file as string | null) ||
+          (r.photo_file as string | null) ||
+          "";
+        const normalizedFileName = normalizeFileName(rawFileName);
+        if (rawFileName) rowsWithFileName += 1;
 
-        const point_key = mapping.point_key ?? null;
+        console.log("[UPLOAD parsed row]", {
+          point_key,
+          file_name: rawFileName,
+          normalizedFileName,
+          image_key: row.image_key,
+        });
 
-        let reportId = point_key ? reportIdByPointKey.get(point_key) : null;
+        const matchedFile = normalizedFileName
+          ? uploadedImageMap.get(normalizedFileName) || null
+          : null;
+
+        // Spec Part 3 log key.
+        console.log("[bulk] image match", {
+          pointKey: point_key,
+          rawFileName,
+          normalized: normalizedFileName,
+          matched: !!matchedFile,
+          matchedFileName: matchedFile?.name || null,
+        });
+
+        if (matchedFile) matchedImagesCount += 1;
+
+        // Resolve the EXACT reports.id for this point. If the master row had
+        // no GPS we fall through to the NO_GPS placeholder report so the
+        // photo still has a parent.
+        let reportId: string | undefined = reportIdByPointKey.get(point_key);
         if (!reportId) {
-          reportId = await getOrCreateNoGpsReport();
-          noGpsImages.push(file.name);
+          if (matchedFile) {
+            try {
+              reportId = await getOrCreateNoGpsReport();
+              noGpsImages.push(matchedFile.name);
+            } catch (err) {
+              console.error("[UPLOAD report saved] NO_GPS fallback failed:", err);
+              return;
+            }
+          } else {
+            // No file AND no report saved - the server-side S3 lookup will
+            // try to find this row's file_name in the bucket. Nothing more
+            // for the client to do here.
+            if (row.file_name) missingImagesCount += 1;
+            return;
+          }
         }
 
-        const { width, height } = await getImageSize(file);
+        console.log("[UPLOAD report saved]", {
+          point_key,
+          reportId,
+        });
 
-        console.log("[bulk import photo save]", { reportId, fileName: file.name });
-        try {
-          const uploaded = await uploadFileToS3({ file, reportId, width, height });
-          imagesUploaded++;
-          if (uploaded.reportPhoto?.saved) photosInserted++;
-          console.log("[bulk import photo] reportId:", reportId, "url:", uploaded.publicUrl);
-        } catch (upErr: any) {
-          errors.push(`${file.name}: upload failed - ${upErr?.message || String(upErr)}`);
+        if (!matchedFile) {
+          if (row.file_name) {
+            console.warn("[UPLOAD photo missing - no manual file]", {
+              point_key,
+              reportId,
+              file_name: row.file_name,
+            });
+            // Spec-mandated skip log: makes "no match" failures visible
+            // in the same key-space as the success path.
+            console.warn("[BULK PHOTO SKIPPED]", {
+              projectId: bulkProjectId,
+              point_key,
+              reportId,
+              rawFileName: row.file_name,
+              reason: "no matched uploaded file",
+            });
+            missingImagesCount += 1;
+          }
           return;
         }
+
+        // Spec-mandated per-row debug. Prove BEFORE the upload runs that
+        // the file we matched and the savedReportId we are about to link
+        // it to are exactly what we expect.
+        console.log("[BULK PHOTO ROW DEBUG]", {
+          point_key,
+          file_name: row.file_name,
+          normalizedFileName,
+          matchedFileName: matchedFile?.name || null,
+          reportId,
+        });
+
+        // Upload + DB insert in one /api/upload call. The route inserts
+        // report_photos with report_id = reportId we pass and stores the
+        // file_name + path columns. Its response confirms whether the DB
+        // insert actually fired AND echoes back the verify-SELECT row so
+        // we can prove the link landed on the EXACT savedReport.id.
+        const { width, height } = await getImageSize(matchedFile);
+        try {
+          const uploaded = await uploadFileToS3({
+            file: matchedFile,
+            reportId,
+            width,
+            height,
+            pointKey: point_key,
+            imageKey: row.image_key || null,
+            projectId: bulkProjectId,
+            fileName: row.file_name || matchedFile.name,
+          });
+          imagesUploaded += 1;
+          uploadedToS3Count += 1;
+          if (uploaded.reportPhoto?.saved) {
+            photosInserted += 1;
+            reportPhotosInsertedClient += 1;
+          }
+
+          console.log("[UPLOAD report_photo inserted]", {
+            report_id: reportId,
+            point_key,
+            file_name: row.file_name,
+            image_key: row.image_key,
+            url: uploaded.publicUrl,
+          });
+
+          // Spec-mandated post-insert verify trace. Echoes the verify rows
+          // /api/upload returned so the operator can confirm count > 0
+          // for THIS reportId AND that the parent report belongs to the
+          // current project (verifiedProjectId === bulkProjectId).
+          const verifiedProjectId = uploaded.reportPhoto?.verifiedProjectId ?? null;
+          const projectIdMatches =
+            verifiedProjectId !== null &&
+            String(verifiedProjectId) === String(bulkProjectId);
+          console.log("[BULK REPORT_PHOTOS VERIFY]", {
+            expectedProjectId: bulkProjectId,
+            verifiedProjectId,
+            projectIdMatches,
+            reportId,
+            point_key,
+            count: uploaded.reportPhoto?.verifiedCount ?? 0,
+            rows: uploaded.reportPhoto?.verifiedRows ?? null,
+          });
+          if (verifiedProjectId !== null && !projectIdMatches) {
+            console.error("[BULK REPORT_PHOTOS VERIFY] PROJECT MISMATCH", {
+              expectedProjectId: bulkProjectId,
+              actualProjectId: verifiedProjectId,
+              reportId,
+              point_key,
+            });
+          }
+        } catch (upErr: any) {
+          errors.push(`${matchedFile.name}: upload failed - ${upErr?.message || String(upErr)}`);
+          missingImagesCount += 1;
+          console.error("[UPLOAD photo missing - upload threw]", {
+            point_key,
+            reportId,
+            file_name: row.file_name,
+            error: upErr?.message,
+          });
+        }
+      });
+
+      console.log("[UPLOAD import summary]", {
+        totalRows: combinedRows.length,
+        rowsWithFileName,
+        uploadedImagesCount: imageFiles.length,
+        matchedImagesCount,
+        uploadedToS3Count,
+        reportPhotosInserted: reportPhotosInsertedClient,
+        missingImagesCount,
+      });
+
+      // Spec-mandated final summary in the [BULK PHOTO ...] key-space.
+      // Aggregates the per-row outcomes so a single log line tells the
+      // operator whether the import populated report_photos for THIS
+      // project. If insertedReportPhotos is 0 here, the post-import SQL
+      // JOIN check will also be 0 and the DOCX export cannot show photos.
+      console.log("[BULK PHOTO FINAL SUMMARY]", {
+        projectId: bulkProjectId,
+        totalRows: combinedRows.length,
+        imagesReceived: imageFiles.length,
+        rowsWithFileName,
+        matchedImages: matchedImagesCount,
+        uploadedToS3: uploadedToS3Count,
+        insertedReportPhotos: reportPhotosInsertedClient,
+        skippedNoMatch: missingImagesCount,
       });
 
       if (imageFiles.length > 0 && photosInserted === 0) {
         errors.push(
           "No report_photos rows were inserted. Most likely the uploaded file names do not exactly match the master file file_name values."
+        );
+      }
+
+      // Server-side S3 lookup outcome.
+      const refRows = combinedRows.filter((row) => row.file_name || row.image_key).length;
+      const photosMatchedServer = importJson.photosMatched || 0;
+      const photosMissingServer = importJson.photosMissing || 0;
+      const totalPhotosResolved = photosInserted + photosMatchedServer;
+
+      if (refRows > 0 && imageFiles.length === 0 && photosMatchedServer === 0) {
+        // Hard warning per spec: master file references images, user selected
+        // none, and the server-side S3 lookup matched none either.
+        errors.push(
+          `${refRows} rows reference image filenames, but 0 images were selected. Please select the image files or upload them to S3 first so the server-side lookup can find them.`
+        );
+      } else if (photosMissingServer > 0) {
+        const sample = (importJson.photosMissingSamples || []).slice(0, 5).join(", ");
+        errors.push(
+          `${photosMissingServer} image reference${photosMissingServer === 1 ? "" : "s"} from the master file could not be found in S3${sample ? ` (e.g. ${sample})` : ""}.`
         );
       }
 
@@ -1355,6 +1719,16 @@ export default function ProjectsPage() {
         imagesSelected: imageFiles.length,
         imagesUploaded,
         photosInserted,
+        // New diagnostic fields - rendered alongside the existing summary,
+        // never replacing it.
+        photosMatchedServer,
+        photosMissingServer,
+        photosMissingSamples: importJson.photosMissingSamples || [],
+        s3IndexSize: importJson.s3IndexSize || 0,
+        totalPhotosResolved,
+        masterRowsReferencingImages: refRows,
+        reportsInserted: importJson.insertedCount,
+        reportsUpdated: importJson.updatedCount,
         noGpsImages,
         missingFilesInUpload,
         extraFilesNotInMap,

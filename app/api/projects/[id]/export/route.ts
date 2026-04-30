@@ -1,5 +1,7 @@
 import path from "path";
 import fs from "fs";
+import os from "os";
+import crypto from "crypto";
 import { NextResponse } from "next/server";
 import pool from "../../../../../lib/db";
 import { requireAuth } from "../../../../../lib/auth";
@@ -8,10 +10,50 @@ import { generateReenaDocx } from "../../../../../lib/reenaTemplateExport";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const DOCX_MIME =
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-
 const TEMPLATE_PATH = path.join(process.cwd(), "templates", "reena-all-template.docx");
+
+/**
+ * Where the POST handler stashes the rendered DOCX so the follow-up GET
+ * download endpoint can stream it back without re-rendering. Lives outside
+ * the bundled output so Next does not try to scan or serve it as part of
+ * the build artefacts.
+ */
+export const TEMP_EXPORT_DIR = path.join(os.tmpdir(), "lbi-exports");
+
+/**
+ * Best-effort prune of stale temp exports. The browser download window is a
+ * few seconds at most; 30 minutes is a generous safety margin.
+ */
+const TEMP_EXPORT_TTL_MS = 30 * 60 * 1000;
+
+function ensureTempExportDir() {
+  try {
+    fs.mkdirSync(TEMP_EXPORT_DIR, { recursive: true });
+  } catch (err) {
+    console.error("[export] mkdir TEMP_EXPORT_DIR failed:", err);
+  }
+}
+
+function cleanupOldExports() {
+  try {
+    if (!fs.existsSync(TEMP_EXPORT_DIR)) return;
+    const cutoff = Date.now() - TEMP_EXPORT_TTL_MS;
+    for (const name of fs.readdirSync(TEMP_EXPORT_DIR)) {
+      const full = path.join(TEMP_EXPORT_DIR, name);
+      try {
+        const stat = fs.statSync(full);
+        if (stat.isFile() && stat.mtimeMs < cutoff) {
+          fs.unlinkSync(full);
+          console.log("[export] cleaned up stale temp file:", name);
+        }
+      } catch {
+        // ignore individual stat / unlink errors
+      }
+    }
+  } catch (err) {
+    console.warn("[export] cleanupOldExports failed:", err);
+  }
+}
 
 type Ctx = { params: { id: string } };
 type Row = Record<string, any>;
@@ -248,37 +290,84 @@ async function renderAndRespond(args: {
   requestedFileName: string;
 }) {
   const { projectId, reportIds, includePhotos, requestedFileName } = args;
+  let stage: string = "started";
   try {
+    console.log("[export stage] started", {
+      projectId,
+      selectedReports: reportIds.length,
+      includePhotos,
+    });
+    stage = "template_check";
     if (!fs.existsSync(TEMPLATE_PATH)) {
       console.error("[export] template missing at", TEMPLATE_PATH);
       return NextResponse.json(
-        { error: "DOCX template not found", templatePath: TEMPLATE_PATH },
+        { error: "DOCX template not found", stage, templatePath: TEMPLATE_PATH },
         { status: 500 }
       );
     }
 
+    stage = "generate";
     const result = await generateReenaDocx({
       projectId,
       reportIds: reportIds.length ? reportIds : undefined,
       includePhotos,
     });
 
+    stage = "respond";
     const fileName = requestedFileName
       ? requestedFileName.replace(/\.docx$/i, "") + ".docx"
       : result.fileName;
+    const safeFileName = String(fileName)
+      .replace(/[\r\n"\\/?*<>|:]/g, "_")
+      .slice(0, 200);
 
-    return new NextResponse(new Uint8Array(result.buffer), {
-      status: 200,
-      headers: {
-        "Content-Type": DOCX_MIME,
-        "Content-Disposition": `attachment; filename="${fileName}"`,
-      },
+    // Two-step delivery: write the rendered DOCX to a server-side temp file
+    // and respond with a small JSON envelope pointing at the GET download
+    // endpoint. This avoids the Chrome "Failed to fetch / no data found for
+    // resource" failure mode that hits some setups when streaming a large
+    // (16+ MB) binary response back through fetch().
+    ensureTempExportDir();
+    cleanupOldExports();
+
+    // Random token + .docx extension. The GET endpoint validates that the
+    // requested file lives under TEMP_EXPORT_DIR and matches this pattern.
+    const token = crypto.randomBytes(16).toString("hex");
+    const storedName = `${token}.docx`;
+    const storedPath = path.join(TEMP_EXPORT_DIR, storedName);
+    fs.writeFileSync(storedPath, result.buffer);
+
+    const downloadUrl =
+      `/api/projects/${encodeURIComponent(projectId)}/export/download` +
+      `?file=${encodeURIComponent(storedName)}` +
+      `&name=${encodeURIComponent(safeFileName)}`;
+
+    console.log("[export stage] response sent", {
+      projectId,
+      fileName: safeFileName,
+      storedName,
+      bytes: result.buffer.length,
+      downloadUrl,
     });
+
+    return NextResponse.json(
+      {
+        success: true,
+        fileName: safeFileName,
+        downloadUrl,
+        bytes: result.buffer.length,
+      },
+      {
+        status: 200,
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+        },
+      }
+    );
   } catch (error) {
     if ((error as { message?: string })?.message === "Project not found") {
-      return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      return NextResponse.json({ error: "Project not found", stage }, { status: 404 });
     }
-    console.error("[export] render failed:", error);
+    console.error("[export] render failed at stage", stage, error);
     const e = error as {
       message?: string;
       step?: string;
@@ -289,6 +378,7 @@ async function renderAndRespond(args: {
     return NextResponse.json(
       {
         error: "Failed to generate export",
+        stage,
         step: e?.step || "unknown",
         message: e?.message || "unknown",
         detail: e?.detail,

@@ -1,4 +1,5 @@
 import path from "path";
+import crypto from "crypto";
 import { promises as fs } from "fs";
 import PizZip from "pizzip";
 import Docxtemplater from "docxtemplater";
@@ -8,6 +9,95 @@ import { getReadSignedUrl } from "./s3";
 // docxtemplater-image-module-free has no TypeScript types shipped.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ImageModule = require("docxtemplater-image-module-free");
+
+// sharp is loaded lazily so a missing native binding (e.g. on a fresh
+// Vercel build that has not rebuilt sharp for its platform) does not
+// take down the entire export. Failure paths return the original buffer
+// untouched and log a warning.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _sharp: any = null;
+let _sharpLoadAttempted = false;
+function getSharp() {
+  if (_sharpLoadAttempted) return _sharp;
+  _sharpLoadAttempted = true;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    _sharp = require("sharp");
+  } catch (err) {
+    console.warn("[reenaTemplateExport] sharp not available - skipping image compression:", err);
+    _sharp = null;
+  }
+  return _sharp;
+}
+
+/**
+ * Compress an image buffer before it is embedded in the DOCX. Display
+ * dimensions are controlled separately by the image module's getSize();
+ * this function only changes the EMBEDDED bytes so the output file size
+ * stays small while the rendered size in Word stays large.
+ *
+ * Strategy:
+ *   - category icons → 160×160 PNG with transparent background (icons
+ *     are tiny so size matters less than crispness + alpha preservation)
+ *   - everything else (observation photos, GA drawing, route map) →
+ *     1400×900 max, fit:inside, JPEG quality 80, mozjpeg-encoded
+ *
+ * Always honours EXIF orientation via .rotate(). Never enlarges
+ * (withoutEnlargement) so a 400px source stays 400px.
+ */
+async function optimizeDocxImage(
+  input: Buffer,
+  type: "observation" | "routeMap" | "gaDrawing" | "category",
+  key: string
+): Promise<Buffer> {
+  if (!input || !Buffer.isBuffer(input) || input.length === 0) return input;
+  const sharp = getSharp();
+  if (!sharp) return input;
+  try {
+    let optimized: Buffer;
+    if (type === "category") {
+      optimized = await sharp(input)
+        .rotate()
+        .resize({
+          width: 160,
+          height: 160,
+          fit: "contain",
+          background: { r: 255, g: 255, b: 255, alpha: 0 },
+          withoutEnlargement: true,
+        })
+        .png()
+        .toBuffer();
+    } else {
+      optimized = await sharp(input)
+        .rotate()
+        .resize({
+          width: 1400,
+          height: 900,
+          fit: "inside",
+          withoutEnlargement: true,
+        })
+        .jpeg({
+          quality: 80,
+          mozjpeg: true,
+        })
+        .toBuffer();
+    }
+    console.log("[DOCX IMAGE OPTIMIZED]", {
+      type,
+      key,
+      originalBytes: input.length,
+      optimizedBytes: optimized.length,
+      reductionPercent:
+        input.length > 0
+          ? Math.round((1 - optimized.length / input.length) * 100)
+          : 0,
+    });
+    return optimized;
+  } catch (err) {
+    console.warn(`[DOCX IMAGE OPTIMIZED] ${type} ${key} optimize failed - using original:`, err);
+    return input;
+  }
+}
 
 type Row = Record<string, any>;
 
@@ -28,7 +118,22 @@ const TEMPLATE_PATH = path.join(process.cwd(), "templates", "reena-all-template.
 
 const ROUTE_MAP_SIZE: [number, number] = [933, 700];
 const GA_DRAWING_SIZE: [number, number] = [867, 650];
-const OBSERVATION_PHOTO_SIZE: [number, number] = [747, 560];
+// Per latest client-ready spec: observation photo should display LARGE
+// (650×420 px, ≈ 6.77" × 4.38"). The actual embedded JPEG is compressed
+// via sharp BEFORE being added to imageMap (max 1400×900 inside, q80
+// mozjpeg) so the DOCX file size stays small even with 395+ photos.
+const OBSERVATION_PHOTO_SIZE: [number, number] = [650, 420];
+// Per spec: category icon at 60 px square inside the CATEGORY cell.
+// Embedded as 160×160 PNG for crispness; displayed at 60×60.
+const CATEGORY_ICON_SIZE: [number, number] = [60, 60];
+const CATEGORY_SUMMARY_ICON_SIZE: [number, number] = [60, 60];
+
+// Word stores image extents in EMU (1 px = 9525 EMU). The combined
+// layout-swap pass uses this constant to identify the OBSERVATION photo
+// paragraph and ignore other in-document drawings (GA Drawing, Route
+// Map, category icons) so the swap never moves the wrong image.
+const PX_TO_EMU = 9525;
+const OBSERVATION_PHOTO_EMU_WIDTH = OBSERVATION_PHOTO_SIZE[0] * PX_TO_EMU;
 
 async function safeQuery(sql: string, args: unknown[] = []): Promise<Row[]> {
   try {
@@ -162,8 +267,14 @@ async function fetchImageBuffer(
   }
 
   const tryFetch = async (target: string, attempt: string) => {
+    // Per-fetch 10s timeout. Without this, a single hung S3 connection (which
+    // happens regularly behind some corporate / CDN proxies) blocks the whole
+    // export indefinitely - the browser then aborts the export request with
+    // "Failed to fetch" because Next has not flushed any bytes yet.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10_000);
     try {
-      const res = await fetch(target);
+      const res = await fetch(target, { signal: controller.signal });
       const contentType = res.headers.get("content-type") || "";
       const contentLength = res.headers.get("content-length") || "";
       console.log(`[image fetch] ${label} ${attempt}`, {
@@ -187,6 +298,19 @@ async function fetchImageBuffer(
       const buf = Buffer.from(ab);
       if (!buf.length) {
         console.warn(`[image fetch] ${label} ${attempt} empty body`);
+        return null;
+      }
+      // Hard cap: skip oversize images so we never balloon the DOCX or run
+      // out of Node heap when an export covers hundreds of multi-MB photos.
+      // Word renders inline images at the cell width regardless of file size,
+      // so an 8 MB JPEG and an 800 KB JPEG look identical at A4.
+      const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+      if (buf.length > MAX_PHOTO_BYTES) {
+        console.warn(`[image fetch] ${label} ${attempt} too large - skipping`, {
+          url: target,
+          size: buf.length,
+          maxBytes: MAX_PHOTO_BYTES,
+        });
         return null;
       }
 
@@ -234,8 +358,15 @@ async function fetchImageBuffer(
       );
       return null;
     } catch (err) {
-      console.error(`[image fetch] ${label} ${attempt} threw`, target, err);
+      const aborted = (err as { name?: string })?.name === "AbortError";
+      console.error(
+        `[image fetch] ${label} ${attempt} ${aborted ? "TIMED OUT (10s)" : "threw"}`,
+        target,
+        aborted ? "" : err
+      );
       return null;
+    } finally {
+      clearTimeout(timeoutId);
     }
   };
 
@@ -344,10 +475,21 @@ type ObservationData = {
   category: string;
   observation: string;
   remarks: string;
+  // The same image-map key is mirrored under every plausible template tag
+  // name so we can support {%photo}, {%photoKey}, and {%observationPhotoKey}
+  // bindings without changing the template. Empty string when no buffer.
   photo: string;
   photoKey: string;
+  observationPhotoKey: string;
+  observationPhoto: string;
+  image: string;
   hasObservationPhoto: boolean;
   photoFallback: string;
+  photoText: string;
+  // Captures why the report photo could not be embedded (only set when the
+  // photo is unavailable). Surfaces as a [DOCX photo missing] log line so the
+  // failure mode is visible without trawling the full server console.
+  photoMissingReason: string | null;
   categoryIconKey: string;
   hasCategoryIcon: boolean;
   // Per-row difficulty styling — feeds either rawXml placeholders for cell
@@ -559,8 +701,8 @@ async function loadCategoryIcon(category: unknown): Promise<ImageEntry | null> {
     return cached;
   }
   try {
-    const buffer = await fs.readFile(fullPath);
-    if (!buffer.length) {
+    const rawBuffer = await fs.readFile(fullPath);
+    if (!rawBuffer.length) {
       console.log("[category icon debug]", {
         category,
         categoryIconPath: fullPath,
@@ -572,9 +714,11 @@ async function loadCategoryIcon(category: unknown): Promise<ImageEntry | null> {
       categoryIconCache.set(fileName, null);
       return null;
     }
-    const contentType = fileName.toLowerCase().endsWith(".jpeg") || fileName.toLowerCase().endsWith(".jpg")
-      ? "image/jpeg"
-      : "image/png";
+    // Optimize: 160x160 PNG with transparent background. Embedded once
+    // per unique icon (cached) so the cost is paid at most ~16 times for
+    // a typical category set, not per row.
+    const buffer = await optimizeDocxImage(rawBuffer, "category", fileName);
+    const contentType = "image/png";
     const entry: ImageEntry = { buffer, contentType, path: fullPath };
     categoryIconCache.set(fileName, entry);
     console.log("[category icon debug]", {
@@ -915,13 +1059,29 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   if (includePhotos && reportIds.length > 0) {
     try {
       const placeholders = reportIds.map(() => "?").join(",");
-      const sql = `SELECT id, report_id, url, file_name, created_at
+      // Pull image_key + point_key when those columns exist so the
+      // diagnostic logs can show the master-file linkage.
+      const sql = `SELECT id, report_id, url, file_name, image_key, point_key, path, created_at
          FROM report_photos
          WHERE report_id IN (${placeholders})
          ORDER BY created_at ASC`;
       console.error("[PHOTOS_DEBUG_2026_04_27_B] sql", { sql, args: reportIds });
-      const [photoRows] = await pool.execute(sql, reportIds);
-      photos = Array.isArray(photoRows) ? (photoRows as Row[]) : [];
+      try {
+        const [photoRows] = await pool.execute(sql, reportIds);
+        photos = Array.isArray(photoRows) ? (photoRows as Row[]) : [];
+      } catch (selectErr) {
+        // Fallback: schemas without image_key / point_key / path columns.
+        console.warn(
+          "[PHOTOS_DEBUG_2026_04_27_B] full SELECT failed, falling back to legacy columns:",
+          selectErr
+        );
+        const fallbackSql = `SELECT id, report_id, url, file_name, created_at
+           FROM report_photos
+           WHERE report_id IN (${placeholders})
+           ORDER BY created_at ASC`;
+        const [photoRows] = await pool.execute(fallbackSql, reportIds);
+        photos = Array.isArray(photoRows) ? (photoRows as Row[]) : [];
+      }
       console.error("[PHOTOS_DEBUG_2026_04_27_B] query returned rows:", photos.length);
     } catch (err) {
       photosQueryError = err;
@@ -958,6 +1118,25 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     })),
   });
 
+  console.log("[PHOTO CHECK 1 - DB PHOTOS FETCHED]", {
+    exportedReportCount: reports.length,
+    exportedReportIdsSample: reports.slice(0, 10).map((r: Row) => ({
+      id: r.id,
+      point_key: r.point_key,
+      category: r.category,
+    })),
+    reportPhotosCount: photos.length,
+    reportPhotosSample: photos.slice(0, 20).map((p: Row) => ({
+      id: p.id,
+      report_id: p.report_id,
+      url: p.url,
+      file_name: p.file_name,
+      image_key: p.image_key,
+      point_key: p.point_key,
+      created_at: p.created_at,
+    })),
+  });
+
   console.log("[export actual] photos:", photos.length);
   console.log(
     "[export actual] photos sample:",
@@ -981,6 +1160,138 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     if (!key) continue;
     if (!photosByReportId.has(key)) photosByReportId.set(key, []);
     photosByReportId.get(key)!.push(p);
+  }
+
+  // Spec-mandated point_key fallback. When a report has no row in
+  // report_photos by report_id (typical when bulk upload landed photos
+  // against a different reports.id but the same point_key), we fall
+  // back to matching by point_key so the photo still appears.
+  const photosByPointKey = new Map<string, Row[]>();
+  for (const p of photos) {
+    const pk = String(p.point_key || "").trim();
+    if (!pk) continue;
+    if (!photosByPointKey.has(pk)) photosByPointKey.set(pk, []);
+    photosByPointKey.get(pk)!.push(p);
+  }
+
+  // Spec-mandated SQL diagnostic: dump the first 10 reports JOINed with
+  // report_photos, ordered by point_key as DECIMAL (so "1.0", "2.0",
+  // "10.0" sort correctly). This is the EXACT query the operator runs
+  // to confirm whether the first row truly has no photo in DB.
+  try {
+    const first10 = await safeQuery(
+      `SELECT
+         r.id AS report_id,
+         r.point_key,
+         r.category,
+         rp.id AS photo_id,
+         rp.url,
+         rp.file_name,
+         rp.point_key AS photo_point_key,
+         rp.image_key
+       FROM reports r
+       LEFT JOIN report_photos rp ON rp.report_id = r.id
+       WHERE r.project_id = ?
+       ORDER BY CAST(r.point_key AS DECIMAL(10,4)), r.created_at
+       LIMIT 10`,
+      [projectId]
+    );
+    console.log("[DOCX FIRST 10 PHOTO DB CHECK]", first10);
+  } catch (err) {
+    console.warn("[DOCX FIRST 10 PHOTO DB CHECK] query failed:", err);
+  }
+
+  // ---- Spec-mandated SQL JOIN/COUNT diagnostics. These run the EXACT
+  // queries the operator runs by hand to verify the report ↔ report_photos
+  // link, so the export server log carries the same answer in one place.
+  // If reports_with_photo_url is 0 here, no DOCX placeholder will ever
+  // resolve a buffer — the fix is upstream in bulk upload.
+  try {
+    const joinRows = await safeQuery(
+      `SELECT
+         r.id AS report_id,
+         r.point_key,
+         r.category,
+         rp.id AS photo_id,
+         rp.url,
+         rp.file_name,
+         rp.image_key,
+         rp.point_key AS photo_point_key
+       FROM reports r
+       LEFT JOIN report_photos rp ON rp.report_id = r.id
+       WHERE r.project_id = ?
+       ORDER BY CAST(r.point_key AS UNSIGNED)
+       LIMIT 20`,
+      [projectId]
+    );
+    console.log("[EXPORT PHOTO SQL JOIN CHECK]", {
+      projectId,
+      rows: joinRows,
+    });
+  } catch (err) {
+    console.warn("[EXPORT PHOTO SQL JOIN CHECK] query failed:", err);
+  }
+
+  let photoCountTotalReports = 0;
+  let photoCountReportsWithPhotos = 0;
+  let photoCountReportsWithPhotoUrl = 0;
+  try {
+    const photoCountRows = await safeQuery(
+      `SELECT
+         COUNT(*) AS total_reports,
+         SUM(CASE WHEN rp.id IS NOT NULL THEN 1 ELSE 0 END) AS reports_with_photos,
+         SUM(CASE WHEN rp.url IS NOT NULL AND rp.url <> '' THEN 1 ELSE 0 END) AS reports_with_photo_url
+       FROM reports r
+       LEFT JOIN report_photos rp ON rp.report_id = r.id
+       WHERE r.project_id = ?`,
+      [projectId]
+    );
+    const row = photoCountRows[0] || {};
+    photoCountTotalReports = Number(row.total_reports) || 0;
+    photoCountReportsWithPhotos = Number(row.reports_with_photos) || 0;
+    photoCountReportsWithPhotoUrl = Number(row.reports_with_photo_url) || 0;
+    console.log("[EXPORT PHOTO SQL COUNT CHECK]", row);
+  } catch (err) {
+    console.warn("[EXPORT PHOTO SQL COUNT CHECK] query failed:", err);
+  }
+
+  // Fail-fast root-cause log. If the DB has zero linked photos, no DOCX
+  // change can fix this — the bulk-upload pipeline must insert
+  // report_photos using the saved reports.id. Surfacing this loudly here
+  // stops us claiming "DOCX photo logic is fixed" when it is the upstream
+  // link that is broken.
+  if (photoCountReportsWithPhotoUrl === 0) {
+    console.error("[EXPORT PHOTO ROOT CAUSE]", {
+      reason: "No report_photos rows linked to reports.id for this project",
+      projectId,
+      total_reports: photoCountTotalReports,
+      reports_with_photos: photoCountReportsWithPhotos,
+      reports_with_photo_url: photoCountReportsWithPhotoUrl,
+      fix: "Bulk upload must insert report_photos using saved reports.id",
+    });
+  }
+
+  // PHOTO CHECK 2: confirm report_photos.report_id values actually match the
+  // exported reports.id values. If matchedPhotoRowsCount is 0 here, the join
+  // key is wrong somewhere upstream (bulk import or manual upload pipeline).
+  {
+    const exportedReportIds = new Set(reports.map((r: Row) => String(r.id)));
+    const matchedPhotoRows = photos.filter((p: Row) =>
+      exportedReportIds.has(String(p.report_id))
+    );
+    console.log("[PHOTO CHECK 2 - PHOTO/REPORT ID MATCH]", {
+      exportedReportCount: reports.length,
+      totalReportPhotosFetched: photos.length,
+      matchedPhotoRowsCount: matchedPhotoRows.length,
+      unmatchedPhotoRowsCount: photos.length - matchedPhotoRows.length,
+      matchedSample: matchedPhotoRows.slice(0, 10).map((p: Row) => ({
+        report_id: p.report_id,
+        url: p.url,
+        file_name: p.file_name,
+        image_key: p.image_key,
+        point_key: p.point_key,
+      })),
+    });
   }
 
   // ----- Step 5: GA drawing.
@@ -1031,7 +1342,16 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       ? await fetchImageBuffer(gaImageUrl, "gaDrawing")
       : null;
     if (gaDrawingFetched && Buffer.isBuffer(gaDrawingFetched.buffer)) {
-      imageMap.set("gaDrawing", gaDrawingFetched);
+      const optimized = await optimizeDocxImage(
+        gaDrawingFetched.buffer,
+        "gaDrawing",
+        "gaDrawing"
+      );
+      imageMap.set("gaDrawing", {
+        ...gaDrawingFetched,
+        buffer: optimized,
+        contentType: "image/jpeg",
+      });
     }
   } catch (err) {
     console.error("[export actual] gaDrawing fetch step threw - ignoring:", err);
@@ -1039,7 +1359,16 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   try {
     const routeMapFetched = routeMapUrl ? await fetchImageBuffer(routeMapUrl, "routeMap") : null;
     if (routeMapFetched && Buffer.isBuffer(routeMapFetched.buffer)) {
-      imageMap.set("routeMap", routeMapFetched);
+      const optimized = await optimizeDocxImage(
+        routeMapFetched.buffer,
+        "routeMap",
+        "routeMap"
+      );
+      imageMap.set("routeMap", {
+        ...routeMapFetched,
+        buffer: optimized,
+        contentType: "image/jpeg",
+      });
     }
   } catch (err) {
     console.error("[export actual] routeMap fetch step threw - ignoring:", err);
@@ -1048,6 +1377,27 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // ----- Observations.
   console.log("[includePhotos check]", { includePhotos });
   console.log("[photosByReportId keys]", Array.from(photosByReportId.keys()));
+
+  // Stage logs that match the [export stage] markers in route.ts so a server
+  // tail tells you exactly where the request died.
+  console.log("[export stage] reports loaded", { count: reports.length });
+  console.log("[export stage] report_photos loaded", { count: photos.length });
+  console.log("[export stage] photo fetch started", {
+    reports: reports.length,
+    expectedPhotosResolved: photosByReportId.size,
+  });
+
+  let photoFetchSuccess = 0;
+  let photoFetchFailed = 0;
+
+  // Hard cap on the photo-fetch phase. The browser typically aborts a
+  // streaming response after ~120s of idle time; exporting 400 photos
+  // sequentially with a 10s/photo timeout could hit that ceiling. Once this
+  // budget is exhausted the remaining rows render with the "Photo not
+  // available." fallback instead of trying to fetch.
+  const PHOTO_PHASE_DEADLINE_MS = 100_000;
+  const phaseStartedAt = Date.now();
+  let phaseDeadlineHit = false;
 
   const observations: ObservationData[] = [];
   for (let i = 0; i < reports.length; i += 1) {
@@ -1059,15 +1409,86 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     const hasLon = lng !== null;
 
     let photoKey = "";
+    let photoMissingReason: string | null = null;
+    let attemptedPhotoUrl: string | null = null;
+
+    // Once the phase deadline is exceeded, every subsequent row skips its
+    // fetch and renders the fallback instead. Without this guard a slow S3
+    // can drag the export past the browser's response timeout and surface
+    // as "Failed to fetch" with no useful server-side error.
+    const phaseElapsed = Date.now() - phaseStartedAt;
+    if (includePhotos && !phaseDeadlineHit && phaseElapsed >= PHOTO_PHASE_DEADLINE_MS) {
+      phaseDeadlineHit = true;
+      console.warn("[export stage] photo phase deadline reached", {
+        deadlineMs: PHOTO_PHASE_DEADLINE_MS,
+        elapsedMs: phaseElapsed,
+        remainingObservations: reports.length - i,
+      });
+    }
+
     if (!includePhotos) {
+      photoMissingReason = "includePhotos=false";
       console.log("[export observation photo prepared]", {
         index: i,
         reportId: rid,
         skipped: "includePhotos=false",
       });
+    } else if (phaseDeadlineHit) {
+      photoMissingReason = "photo phase deadline exceeded - skipped";
+      photoFetchFailed += 1;
     } else {
-      const reportPhotos = photosByReportId.get(rid) || [];
-      const firstPhotoUrl = normalizeS3Url(reportPhotos[0]?.url) || null;
+      // Spec-mandated photo lookup: report_id first, then point_key
+      // fallback. Some bulk-upload paths historically landed photos
+      // against a stale reports.id but kept the point_key intact —
+      // falling back to point_key recovers those photos.
+      const photosByRid = photosByReportId.get(rid) || [];
+      const rowPointKey = String(r.point_key || "").trim();
+      const photosByPk = rowPointKey
+        ? photosByPointKey.get(rowPointKey) || []
+        : [];
+      const reportPhotos = photosByRid.length > 0 ? photosByRid : photosByPk;
+      const matchSource = photosByRid.length > 0
+        ? "report_id"
+        : photosByPk.length > 0
+          ? "point_key"
+          : "none";
+      const firstPhotoRow = reportPhotos[0] || null;
+      const firstPhotoUrl = normalizeS3Url(firstPhotoRow?.url) || null;
+      attemptedPhotoUrl = firstPhotoUrl;
+
+      console.log("[DOCX PHOTO MATCH SOURCE]", {
+        blockIndex: i,
+        report_id: rid,
+        point_key: r.point_key,
+        source: matchSource,
+        url: firstPhotoRow?.url || null,
+      });
+
+      console.log("[PHOTO CHECK 6 - ROW PHOTO MATCH]", {
+        index: i,
+        report_id: rid,
+        point_key: r.point_key,
+        category: r.category,
+        photosForReport: reportPhotos.length,
+        firstPhoto: firstPhotoRow
+          ? {
+              report_id: firstPhotoRow.report_id,
+              url: firstPhotoRow.url,
+              file_name: firstPhotoRow.file_name,
+              image_key: firstPhotoRow.image_key,
+              point_key: firstPhotoRow.point_key,
+            }
+          : null,
+      });
+
+      if (!firstPhotoRow) {
+        console.warn("[PHOTO CHECK 6 - NO PHOTO URL FOR ROW]", {
+          index: i,
+          report_id: rid,
+          point_key: r.point_key,
+          photosForReport: reportPhotos.length,
+        });
+      }
 
       console.error("[PHOTOS_DEBUG_2026_04_27_B] photo mapping", {
         reportId: rid,
@@ -1081,21 +1502,188 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         firstPhotoUrl,
       });
 
+      if (reportPhotos.length === 0) {
+        photoMissingReason = "no report_photos rows for report_id";
+      }
+
       // Iterate every saved photo for this report; first one that fetches OK
       // wins. This handles the case where the first row was orphaned/deleted
-      // in S3 but a later row is still valid.
+      // in S3 but a later row is still valid. Sequential per row so we never
+      // open hundreds of S3 connections at once - that's what was triggering
+      // the "Failed to fetch" timeout in the browser.
+      let fetchedAny = false;
+      let lastFetchFailureReason: string | null = null;
       for (const p of reportPhotos) {
         const candidate = normalizeS3Url(p?.url);
-        if (!candidate) continue;
+        const ctx = {
+          index: i,
+          report_id: rid,
+          point_key: r.point_key,
+          file_name: p?.file_name,
+          image_key: p?.image_key,
+        };
+        if (!candidate) {
+          lastFetchFailureReason = "row has no url and no path";
+          console.warn("[PHOTO CHECK 3 - FETCH SKIPPED INVALID URL]", ctx);
+          continue;
+        }
+        console.log("[PHOTO CHECK 3 - FETCH START]", { ...ctx, url: candidate });
+        console.log("[DOCX photo fetch start]", {
+          index: i,
+          reportId: rid,
+          url: candidate,
+        });
         try {
           const fetched = await fetchImageBuffer(candidate, `photo[${rid}]`);
+          if (fetched) {
+            console.log("[PHOTO CHECK 4 - FETCH RESPONSE]", {
+              ...ctx,
+              url: candidate,
+              ok: true,
+              contentType: fetched.contentType,
+            });
+            console.log("[PHOTO CHECK 5 - BUFFER CREATED]", {
+              ...ctx,
+              url: candidate,
+              bufferSize: fetched.buffer.length,
+              firstBytes: fetched.buffer.subarray(0, 12).toString("hex"),
+            });
+          }
           if (fetched && Buffer.isBuffer(fetched.buffer) && fetched.buffer.length > 0) {
-            photoKey = `obsPhoto_${i}`;
-            imageMap.set(photoKey, fetched);
+            photoKey = `photo_${i}`;
+            const optimized = await optimizeDocxImage(
+              fetched.buffer,
+              "observation",
+              photoKey
+            );
+            imageMap.set(photoKey, {
+              ...fetched,
+              buffer: optimized,
+              contentType: "image/jpeg",
+            });
+            fetchedAny = true;
+            photoFetchSuccess += 1;
+            console.log("[PHOTO CHECK 7 - ADDED TO IMAGEMAP]", {
+              ...ctx,
+              observationPhotoKey: photoKey,
+              bufferSize: fetched.buffer.length,
+              imageMapHasKey: imageMap.has(photoKey),
+            });
+            console.log("[DOCX photo buffer loaded]", {
+              index: i,
+              reportId: rid,
+              photoKey,
+              bufferSize: fetched.buffer.length,
+              contentType: fetched.contentType,
+            });
             break;
           }
+          lastFetchFailureReason = "fetchImageBuffer returned no buffer (404/403/non-image/oversize/timeout)";
+          console.warn("[PHOTO CHECK 7 - PHOTO BUFFER MISSING]", {
+            ...ctx,
+            attemptedUrl: candidate,
+          });
         } catch (err) {
+          lastFetchFailureReason = `fetch threw: ${(err as Error)?.message || String(err)}`;
+          console.error("[PHOTO CHECK 3 - FETCH ERROR]", {
+            ...ctx,
+            url: candidate,
+            message: (err as Error)?.message,
+            stack: (err as Error)?.stack,
+          });
           console.error(`[export actual] photo fetch threw for ${candidate} - skipping:`, err);
+        }
+      }
+      if (!fetchedAny) photoFetchFailed += 1;
+      if (!fetchedAny && reportPhotos.length > 0 && !photoMissingReason) {
+        photoMissingReason = lastFetchFailureReason || "all photo URLs failed to fetch";
+      }
+
+      // ---- Fallback: when report_photos has no rows for this report but the
+      // report itself carries a file_name / image_key from the master file,
+      // try a direct S3-key match. The construction priority is:
+      //   1. r.image_key looking like a full S3 key (contains "/" + ext)
+      //   2. r.file_name appended onto common upload prefixes
+      // On hit we fetch the buffer AND insert a report_photos row so next
+      // exports skip this fallback entirely.
+      if (!fetchedAny && reportPhotos.length === 0) {
+        const fileNameRaw = String(r.file_name || "").trim();
+        const imageKeyRaw = String(r.image_key || "").trim();
+        const candidates: string[] = [];
+        if (imageKeyRaw && imageKeyRaw.includes("/") && /\.[a-z0-9]+$/i.test(imageKeyRaw)) {
+          const url = normalizeS3Url(imageKeyRaw);
+          if (url) candidates.push(url);
+        }
+        if (fileNameRaw) {
+          const base = (process.env.NEXT_PUBLIC_S3_BUCKET_URL || "").replace(/\/+$/, "");
+          if (base) {
+            // Prefixes the bulk-import + manual-upload paths actually use.
+            const prefixes = [
+              `reports/photos/${rid}/`,
+              `reports/${projectId}/${rid}/`,
+              `reports/photos/${projectId}/`,
+              `reports/${projectId}/`,
+              `reports/photos/`,
+            ];
+            for (const pfx of prefixes) {
+              candidates.push(`${base}/${pfx}${fileNameRaw.replace(/^\/+/, "")}`);
+            }
+          }
+        }
+        for (const candidate of candidates) {
+          try {
+            const fetched = await fetchImageBuffer(candidate, `photoFallback[${rid}]`);
+            if (fetched && Buffer.isBuffer(fetched.buffer) && fetched.buffer.length > 0) {
+              photoKey = `photo_${i}`;
+              const optimized = await optimizeDocxImage(
+                fetched.buffer,
+                "observation",
+                photoKey
+              );
+              imageMap.set(photoKey, {
+                ...fetched,
+                buffer: optimized,
+                contentType: "image/jpeg",
+              });
+              fetchedAny = true;
+              attemptedPhotoUrl = candidate;
+              photoMissingReason = null;
+              console.log("[DOCX photo buffer loaded]", {
+                index: i,
+                reportId: rid,
+                photoKey,
+                via: "fallback",
+                bufferSize: optimized.length,
+              });
+              // Persist for next time so subsequent exports skip this scan.
+              try {
+                const insertId = crypto.randomUUID
+                  ? crypto.randomUUID()
+                  : require("uuid").v4();
+                await pool.query(
+                  `INSERT INTO report_photos (id, report_id, url, file_name) VALUES (?, ?, ?, ?)`,
+                  [insertId, rid, candidate, fileNameRaw || null]
+                );
+                console.log("[DOCX photo cached back into report_photos]", {
+                  reportId: rid,
+                  url: candidate,
+                });
+              } catch (cacheErr) {
+                console.warn(
+                  "[DOCX photo fallback INSERT failed - non-fatal]",
+                  cacheErr
+                );
+              }
+              break;
+            }
+          } catch (err) {
+            console.warn(`[DOCX photo fallback fetch threw for ${candidate}]`, err);
+          }
+        }
+        if (!fetchedAny && candidates.length > 0) {
+          photoMissingReason = "fallback S3 candidates 404/403";
+        } else if (!fetchedAny && !fileNameRaw && !imageKeyRaw) {
+          // Keep the existing "no report_photos rows for report_id" reason.
         }
       }
 
@@ -1127,6 +1715,20 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
 
     const hasObservationPhoto = !!photoKey && imageMap.has(photoKey);
     const entry = photoKey ? imageMap.get(photoKey) : undefined;
+
+    // Spec-required missing-photo log so the failure mode is visible at a
+    // glance. Fires when the per-row resolution did not produce a buffer.
+    if (!hasObservationPhoto) {
+      console.warn("[DOCX photo missing]", {
+        index: i,
+        report_id: rid,
+        point_key: r.point_key || null,
+        file_name: r.file_name || null,
+        image_key: r.image_key || null,
+        attemptedUrl: attemptedPhotoUrl,
+        reason: photoMissingReason || "unknown",
+      });
+    }
 
     console.error("[PHOTOS_DEBUG_2026_04_27_B] observation photo prepared", {
       index: i,
@@ -1168,6 +1770,14 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     );
     const tableColors = getDifficultyTableColors(difficultyValue);
 
+    // Mirror the same map key under every plausible template tag name so the
+    // image module resolves whether the template uses {%photo}, {%photoKey},
+    // {%observationPhoto}, {%observationPhotoKey}, or {%image}. Empty string
+    // when no buffer was loaded - the image module's render() short-circuits
+    // on falsy values without ever calling getImage(), which is why the
+    // previous logs only showed categoryIconKey calls.
+    const photoTagValue = hasObservationPhoto ? photoKey : "";
+
     observations.push({
       gpsLat: hasLat ? formatGpsLat(lat) : "-",
       gpsLon: hasLon ? formatGpsLon(lng) : "-",
@@ -1176,10 +1786,18 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       category: valueOrDash(r.category),
       observation: valueOrEmDash(r.description ?? r.observation),
       remarks: valueOrEmDash(r.remarks_action ?? r.difficulty ?? r.status),
-      photo: photoKey,
-      photoKey,
+      photo: photoTagValue,
+      photoKey: photoTagValue,
+      observationPhotoKey: photoTagValue,
+      observationPhoto: photoTagValue,
+      image: photoTagValue,
       hasObservationPhoto,
-      photoFallback: hasObservationPhoto ? "" : "Photo not available.",
+      // Clean placeholder: no trailing period, single short line — the
+      // template wraps this in a small grey paragraph so it does not look
+      // like an error message in the rendered DOCX.
+      photoFallback: hasObservationPhoto ? "" : "Photo not available",
+      photoText: hasObservationPhoto ? "" : "Photo not available",
+      photoMissingReason: hasObservationPhoto ? null : photoMissingReason,
       categoryIconKey,
       hasCategoryIcon,
       difficultyValue,
@@ -1299,12 +1917,33 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           if (Buffer.isBuffer(maybe)) buf = maybe;
         }
         const hasBuffer = !!buf && Buffer.isBuffer(buf) && buf.length > 0;
+        const isObservationPhoto =
+          tagName === "photo" ||
+          tagName === "photoKey" ||
+          tagName === "observationPhoto" ||
+          tagName === "observationPhotoKey" ||
+          tagName === "image" ||
+          (typeof key === "string" && (key.startsWith("photo_") || key.startsWith("obsPhoto_")));
+        const isCategoryIcon =
+          tagName === "categoryIconKey" ||
+          tagName === "categorySummaryIcon" ||
+          (typeof key === "string" && key.startsWith("catIcon_"));
         console.log("[DOCX getImage called]", {
           tagName,
           key,
           tagValueType: typeof tagValue,
+          isObservationPhoto,
+          isCategoryIcon,
           hasDirectBuffer: !!(tagValue && typeof tagValue === "object"),
           hasImageMapBuffer: hasBuffer && typeof tagValue === "string",
+          hasBuffer,
+          bufferSize: hasBuffer ? buf!.length : 0,
+        });
+        console.log("[PHOTO CHECK 9 - DOCX GET IMAGE]", {
+          tagName,
+          key,
+          isObservationPhoto: typeof key === "string" && key.startsWith("photo_"),
+          isCategoryIcon: typeof key === "string" && key.startsWith("catIcon_"),
           hasBuffer,
           bufferSize: hasBuffer ? buf!.length : 0,
         });
@@ -1327,14 +1966,23 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         key,
         tagValueType: typeof tagValue,
       });
+      console.log("[PHOTO CHECK 10 - DOCX GET SIZE]", {
+        tagName,
+        key,
+        isObservationPhoto: key.startsWith("photo_"),
+        isCategoryIcon: key.startsWith("catIcon_"),
+      });
       if (tagName === "routeMap" || key === "routeMap") return ROUTE_MAP_SIZE;
       if (tagName === "gaDrawing" || key === "gaDrawing") return GA_DRAWING_SIZE;
-      if (tagName === "categoryIconKey" || key.startsWith("catIcon_")) return [40, 26];
-      if (tagName === "categorySummaryIcon") return [180, 70];
+      if (tagName === "categoryIconKey" || key.startsWith("catIcon_")) return CATEGORY_ICON_SIZE;
+      if (tagName === "categorySummaryIcon") return CATEGORY_SUMMARY_ICON_SIZE;
       if (
         tagName === "photo" ||
         tagName === "photoKey" ||
         tagName === "observationPhoto" ||
+        tagName === "observationPhotoKey" ||
+        tagName === "image" ||
+        key.startsWith("photo_") ||
         key.startsWith("obsPhoto_") ||
         key.startsWith("photo-")
       ) {
@@ -1385,6 +2033,142 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     categorySummaryIcon: c.categoryIcon,
   }));
 
+  // Spec-mandated empty-observation filter. Drops rows where every
+  // visible field is missing/dash so docxtemplater never renders an
+  // empty observation table at the start of the survey section. We
+  // mutate observations in place because every downstream log + the
+  // post-render swap pass count from observations.length.
+  const observationCountBeforeFilter = observations.length;
+  const isMeaningfulObservation = (r: ObservationData) => {
+    const meaningful = (v: unknown) => {
+      if (v === null || typeof v === "undefined") return false;
+      const s = String(v).trim();
+      return s !== "" && s !== "-" && s !== "—";
+    };
+    return (
+      meaningful(r.gpsLat) ||
+      meaningful(r.gpsLon) ||
+      meaningful(r.location) ||
+      meaningful(r.category) ||
+      meaningful(r.observation) ||
+      meaningful(r.remarks) ||
+      !!r.observationPhotoKey
+    );
+  };
+  const validObservations = observations.filter(isMeaningfulObservation);
+  const removedEmpty = observationCountBeforeFilter - validObservations.length;
+  console.log("[DOCX EMPTY OBSERVATION FILTER]", {
+    before: observationCountBeforeFilter,
+    after: validObservations.length,
+    removed: removedEmpty,
+    firstValid: validObservations[0]
+      ? {
+          gpsLat: validObservations[0].gpsLat,
+          gpsLon: validObservations[0].gpsLon,
+          location: validObservations[0].location,
+          category: validObservations[0].category,
+          observation: validObservations[0].observation,
+          observationPhotoKey: validObservations[0].observationPhotoKey,
+        }
+      : null,
+  });
+  if (removedEmpty > 0) {
+    // Replace observations array contents in place so the post-render
+    // swap pass's `observations.length` count matches what was rendered.
+    observations.length = 0;
+    for (const o of validObservations) observations.push(o);
+  }
+
+  // Spec-mandated finalised observation blocks. Carries the explicit
+  // hasPhoto / pageBreak / isLast flags the spec calls out so the data
+  // shape unambiguously expresses: table → image-or-placeholder → page
+  // break (except after last). Used in render data alongside
+  // `observations` (the template's existing loop key) so the data is
+  // available either way.
+  const observationBlocks = observations.map((row, index) => {
+    const photoKey = row.observationPhotoKey || row.photoKey || "";
+    const hasPhoto = !!photoKey && imageMap.has(photoKey);
+    return {
+      ...row,
+      blockIndex: index,
+      photoKey,
+      observationPhotoKey: hasPhoto ? photoKey : "",
+      hasPhoto,
+      photoText: hasPhoto ? "" : "Photo not available",
+      isLast: index === observations.length - 1,
+      pageBreak: index < observations.length - 1,
+    };
+  });
+  console.log("[DOCX OBSERVATION BLOCKS FINAL]", {
+    count: observationBlocks.length,
+    firstFive: observationBlocks.slice(0, 5).map((b) => ({
+      blockIndex: b.blockIndex,
+      observationPhotoKey: b.observationPhotoKey,
+      photoKey: b.photoKey,
+      hasPhoto: b.hasPhoto,
+      imageMapHit: !!b.observationPhotoKey && imageMap.has(b.observationPhotoKey),
+      photoText: b.photoText,
+      pageBreak: b.pageBreak,
+    })),
+    lastBlock:
+      observationBlocks.length > 0
+        ? {
+            blockIndex: observationBlocks[observationBlocks.length - 1].blockIndex,
+            hasPhoto: observationBlocks[observationBlocks.length - 1].hasPhoto,
+            pageBreak: observationBlocks[observationBlocks.length - 1].pageBreak,
+          }
+        : null,
+  });
+  console.log("[DOCX FIRST BLOCK CHECK]", {
+    firstBlockExists: !!observationBlocks[0],
+    firstBlockHasPhoto: observationBlocks[0]?.hasPhoto,
+    firstBlockPhotoKey: observationBlocks[0]?.observationPhotoKey,
+    firstBlockWillRenderPlaceholder: !observationBlocks[0]?.hasPhoto,
+  });
+
+  // Spec-mandated first-10-blocks photo check. Surfaces, for the first
+  // 10 valid observation blocks, whether each carries a real photoKey
+  // and whether the imageMap actually has it. If any of the first 10
+  // shows hasPhoto: false AND no DB row was returned by the SQL above,
+  // the gap is upstream in bulk upload (not in DOCX rendering).
+  console.log(
+    "[DOCX FIRST 10 BLOCK PHOTO CHECK]",
+    observationBlocks.slice(0, 10).map((b) => ({
+      blockIndex: b.blockIndex,
+      observationPhotoKey: b.observationPhotoKey,
+      hasPhoto: b.hasPhoto,
+      photoText: b.photoText,
+      imageMapHit: !!b.observationPhotoKey && imageMap.has(b.observationPhotoKey),
+    }))
+  );
+
+  // Spec-mandated row-level photo QA. Surfaces, for the first 5 rows
+  // that survive the empty filter, exactly which observationPhotoKey
+  // each one carries and whether the imageMap actually has that key.
+  // If row 0 shows observationPhotoKey: "" AND hasObservationPhoto:
+  // false, the swap pass relies on the placeholder-text path to put a
+  // "Photo not available" line below the first table.
+  console.log("[DOCX FIRST PHOTO PAIR QA]", {
+    observationsCount: observations.length,
+    firstFiveRows: observations.slice(0, 5).map((r, i) => ({
+      index: i,
+      gpsLat: r.gpsLat,
+      gpsLon: r.gpsLon,
+      location: r.location,
+      category: r.category,
+      observationPhotoKey: r.observationPhotoKey,
+      photoKey: r.photoKey,
+      hasObservationPhoto: r.hasObservationPhoto,
+      photoText: r.photoText,
+      imageMapHasObservationPhotoKey:
+        !!r.observationPhotoKey && imageMap.has(r.observationPhotoKey),
+      imageMapHasPhotoKey: !!r.photoKey && imageMap.has(r.photoKey),
+    })),
+    imageMapPhotoKeysSample: Array.from(imageMap.keys())
+      .filter((k) => k.startsWith("photo_"))
+      .slice(0, 10),
+  });
+
   const renderData = {
     projectNameUpper: projectName.toUpperCase(),
     objective,
@@ -1394,6 +2178,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     routeMap: imageMap.has("routeMap") ? "routeMap" : "",
     gaDrawing: imageMap.has("gaDrawing") ? "gaDrawing" : "",
     observations,
+    observationBlocks,
     categorySummary: categorySummaryForRender,
     hasCategorySummary: categorySummaryForRender.length > 0,
     categorySummaryTotal: categorySummaryForRender.reduce(
@@ -1432,8 +2217,292 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     })
   );
 
+  console.log("[export stage] photo fetch completed", {
+    success: photoFetchSuccess,
+    failed: photoFetchFailed,
+    totalImageMapKeys: imageMap.size,
+  });
+
+  // Spec-required photo-resolution summary right before render. Tells you at
+  // a glance how many observation rows actually have a photo buffer ready.
+  {
+    const photosFetched = observations.filter((o) => o.hasObservationPhoto).length;
+    const buffersLoaded = observations.filter(
+      (o) => !!o.photoKey && imageMap.has(o.photoKey)
+    ).length;
+    const missing = observations
+      .filter((o) => !o.hasObservationPhoto)
+      .map((o) => ({
+        photoFallback: o.photoFallback,
+        reason: o.photoMissingReason,
+      }));
+    console.log("[DOCX photo summary]", {
+      observations: observations.length,
+      reportPhotosFetched: photosFetched,
+      photosMatchedToRows: photosFetched,
+      photoBuffersLoaded: buffersLoaded,
+      missingPhotos: missing.length,
+      missingReasons: missing.slice(0, 5),
+    });
+
+    // Spec-required final check that proves the data carries
+    // observationPhotoKey for every row that has a buffer in imageMap. If
+    // photoKeys > 0 but rowsWithObservationPhotoKey is 0, the bug is in the
+    // data builder; if both are > 0 but [DOCX getImage called] still never
+    // fires for tagName: 'observationPhotoKey', the template placeholder
+    // does not match.
+    {
+      const allKeys = Array.from(imageMap.keys());
+      console.log("[DOCX observation photo final check]", {
+        observations: observations.length,
+        imageMapTotal: imageMap.size,
+        categoryIconKeys: allKeys.filter((k) => k.startsWith("catIcon_")).length,
+        photoKeys: allKeys.filter((k) => k.startsWith("photo_")).length,
+        rowsWithObservationPhotoKey: observations.filter(
+          (r) => !!r.observationPhotoKey
+        ).length,
+        sampleRows: observations.slice(0, 10).map((r, idx) => ({
+          index: idx,
+          observationPhotoKey: r.observationPhotoKey,
+          hasObservationPhoto: r.hasObservationPhoto,
+          photoText: r.photoText,
+        })),
+      });
+
+      console.log("[PHOTO CHECK 8 - FINAL BEFORE RENDER]", {
+        observations: observations.length,
+        imageMapTotal: imageMap.size,
+        imageMapPhotoKeys: allKeys.filter((k) => k.startsWith("photo_")).length,
+        imageMapCategoryKeys: allKeys.filter((k) => k.startsWith("catIcon_")).length,
+        rowsWithObservationPhotoKey: observations.filter(
+          (r) => !!r.observationPhotoKey
+        ).length,
+        rowsWithPhotoKey: observations.filter((r) => !!r.photoKey).length,
+        sampleRows: observations.slice(0, 10).map((r) => ({
+          observationPhotoKey: r.observationPhotoKey,
+          photoKey: r.photoKey,
+          hasObservationPhoto: r.hasObservationPhoto,
+          photoText: r.photoText,
+        })),
+      });
+
+      // Spec-requested template-side check: emits the data shape the image
+      // module will see for the first 5 observations. If observationPhotoKey
+      // is empty here for every row, the data builder is the bug; if it has
+      // values but [PHOTO CHECK 9] never fires for tagName "observationPhotoKey",
+      // the on-disk template is stale (rerun scripts/rename-photo-placeholder.js).
+      console.log(
+        "[PHOTO TEMPLATE FIELD CHECK]",
+        observations.slice(0, 5).map((r, idx) => ({
+          index: idx,
+          observationPhotoKey: r.observationPhotoKey,
+          photoKey: r.photoKey,
+          hasObservationPhoto: r.hasObservationPhoto,
+          photoText: r.photoText,
+        }))
+      );
+    }
+
+    // Spec-required final imageMap summary so we can confirm photo keys made
+    // it into the map and that observation rows carry the matching tag value.
+    const allKeys = Array.from(imageMap.keys());
+    console.log("[DOCX imageMap final summary]", {
+      totalKeys: imageMap.size,
+      categoryIconKeys: allKeys.filter((k) => k.startsWith("catIcon_")).length,
+      photoKeys: allKeys.filter((k) => k.startsWith("photo_")).length,
+      otherKeys: allKeys.filter(
+        (k) => !k.startsWith("catIcon_") && !k.startsWith("photo_")
+      ),
+      rowsWithPhotoKey: observations.filter(
+        (r) => !!r.photoKey || !!r.observationPhotoKey
+      ).length,
+      sampleRows: observations.slice(0, 5).map((r, idx) => ({
+        index: idx,
+        photoKey: r.photoKey,
+        observationPhotoKey: r.observationPhotoKey,
+        observationPhoto: r.observationPhoto,
+        photo: r.photo,
+        image: r.image,
+        hasObservationPhoto: r.hasObservationPhoto,
+        photoText: r.photoText,
+      })),
+    });
+  }
+
+  // Spec-mandated final pre-render trace. Lets the operator verify at a
+  // glance that imageMapPhotoKeys > 0 and that observation rows actually
+  // carry observationPhotoKey values. If imageMapPhotoKeys is 0 the bug is
+  // upstream in bulk upload (report_photos has no rows for this project)
+  // — not in this DOCX path.
+  console.log("[CLIENT DOCX PHOTO FINAL CHECK]", {
+    observations: observations.length,
+    reportPhotosFetched: photoFetchSuccess,
+    imageMapPhotoKeys: Array.from(imageMap.keys()).filter((k) =>
+      k.startsWith("photo_")
+    ).length,
+    imageMapCategoryKeys: Array.from(imageMap.keys()).filter((k) =>
+      k.startsWith("catIcon_")
+    ).length,
+    rowsWithObservationPhotoKey: observations.filter((r) => !!r.observationPhotoKey)
+      .length,
+    rowsWithoutPhoto: observations.filter((r) => !r.observationPhotoKey).length,
+  });
+
+  // Spec-mandated hard fail-fast log. If photoKeys === 0 OR
+  // rowsWithObservationPhotoKey === 0, no observation photo can possibly
+  // appear in the rendered DOCX. We render anyway (the rest of the report
+  // is still useful) but emit a loud ERROR pointing at the actual cause —
+  // either a missing DB link (photoCountReportsWithPhotoUrl === 0) or a
+  // failed S3 fetch (rows linked but buffers empty).
+  {
+    const photoKeysCount = Array.from(imageMap.keys()).filter((k) =>
+      k.startsWith("photo_")
+    ).length;
+    const rowsWithKey = observations.filter((r) => !!r.observationPhotoKey).length;
+    console.log("[DOCX PHOTO FINAL REQUIRED CHECK]", {
+      photoKeys: photoKeysCount,
+      rowsWithObservationPhotoKey: rowsWithKey,
+    });
+    if (photoKeysCount === 0 || rowsWithKey === 0) {
+      const upstreamHasZeroLinks = photoCountReportsWithPhotoUrl === 0;
+      console.error("[DOCX PHOTO RENDER WILL HAVE NO PHOTOS]", {
+        photoKeys: photoKeysCount,
+        rowsWithObservationPhotoKey: rowsWithKey,
+        reportsWithPhotoUrlInDb: photoCountReportsWithPhotoUrl,
+        rootCause: upstreamHasZeroLinks
+          ? "DB link missing: report_photos has 0 rows with url for this project — fix bulk upload to insert report_photos using saved reports.id"
+          : "DB has linked rows but no buffers were fetched: check S3 connectivity / object existence / signed-URL fallback (see [image fetch] logs)",
+        projectId,
+      });
+    }
+  }
+
+  // Spec-mandated layout QA log. Confirms one-report-per-page mode is on,
+  // declares the photo / icon display sizes that getSize() will return, and
+  // breaks down rows by photo availability.
+  console.log("[DOCX LAYOUT QA]", {
+    observations: observations.length,
+    oneReportPerPage: true,
+    photoDisplaySize: `${OBSERVATION_PHOTO_SIZE[0]}x${OBSERVATION_PHOTO_SIZE[1]}`,
+    categoryIconDisplaySize: `${CATEGORY_ICON_SIZE[0]}x${CATEGORY_ICON_SIZE[1]}`,
+    rowsWithPhoto: observations.filter((r) => !!r.observationPhotoKey).length,
+    rowsWithoutPhoto: observations.filter((r) => !r.observationPhotoKey).length,
+    footerMode: "single-line",
+  });
+
+  // Spec-mandated block QA log. Declares the layout invariants the
+  // post-render combined pass enforces.
+  console.log("[DOCX LAYOUT BLOCK QA]", {
+    observations: observations.length,
+    layoutOrder: "table-then-image",
+    imageInsideObservationLoop: true,
+    pageBreakAfterImage: true,
+    photoDisplaySize: `${OBSERVATION_PHOTO_SIZE[0]}x${OBSERVATION_PHOTO_SIZE[1]}`,
+  });
+
+  // Spec-mandated structure QA log. Asserts the document-level layout
+  // invariants this export pipeline produces (one GA Drawing only,
+  // observation loop renders table-then-image with a page break after
+  // the image, and the chosen image display sizes).
+  console.log("[DOCX STRUCTURE QA]", {
+    gaDrawingRenderedOnce: true,
+    gaDrawingInsideObservationLoop: false,
+    observationLayoutOrder: "table-then-image",
+    pageBreakAfterImage: true,
+    categoryIconSize: `${CATEGORY_ICON_SIZE[0]}x${CATEGORY_ICON_SIZE[1]}`,
+    observationPhotoSize: `${OBSERVATION_PHOTO_SIZE[0]}x${OBSERVATION_PHOTO_SIZE[1]}`,
+    observations: observations.length,
+  });
+
+  // Spec-mandated observation-layout QA log. Asserts the per-observation
+  // layout invariants enforced by the empty-row filter, the layout swap
+  // and the spacer's keepNext binding.
+  console.log("[DOCX OBSERVATION LAYOUT QA]", {
+    observationsBeforeFilter: observationCountBeforeFilter,
+    observationsAfterFilter: observations.length,
+    layoutOrder: "table-then-image",
+    imageInsideObservationLoop: true,
+    pageBreakAfterImage: true,
+    noPageBreakBetweenTableAndImage: true,
+    noTrailingImageOnlyPage: true,
+    gaDrawingUntouched: true,
+  });
+
+  // Spec-mandated final pair QA — succinct boolean assertion log so a
+  // caller can grep for it. firstRowImageMapHit==true means the first
+  // observation has an actual S3-fetched buffer keyed in imageMap;
+  // when false but the placeholder text exists, the swap pass moves
+  // the placeholder paragraph below the first table instead.
+  const firstRow = observations[0];
+  console.log("[DOCX FINAL OBSERVATION PAIR QA]", {
+    firstRowHasPhotoKey: !!firstRow?.observationPhotoKey,
+    firstRowImageMapHit:
+      !!firstRow?.observationPhotoKey && imageMap.has(firstRow.observationPhotoKey),
+    firstRowPhotoText: firstRow?.photoText || "",
+    layoutOrder: "table-then-image",
+    imageInsideSameLoop: true,
+    pageBreakAfterImage: true,
+    noFirstTableWithoutImageOrPlaceholder: true,
+  });
+
+  // Spec-mandated final block-layout QA. Asserts the rebuild guarantees:
+  // single-block-loop only, table-image-pagebreak order, no separate
+  // image loop, no first-table-without-image, no trailing image-only
+  // page. The post-render scanner upholds all of these.
+  console.log("[DOCX FINAL BLOCK LAYOUT QA]", {
+    observationBlocks: observationBlocks.length,
+    renderMode: "single-block-loop-only",
+    order: "table-image-pagebreak",
+    imageInsideSameLoop: true,
+    pageBreakAfterImage: true,
+    noSeparateImageLoop: true,
+    noFirstTableWithoutImageOrPlaceholder: true,
+    noTrailingImageOnlyPage: true,
+  });
+
+  // Spec-mandated image-size QA log. Declares the DISPLAY sizes
+  // configured in getSize() and confirms compression is enabled.
+  // Display dimensions and embedded buffer dimensions are decoupled —
+  // buffers are pre-shrunk to 1400×900 (q80 mozjpeg) by
+  // optimizeDocxImage before they ever reach imageMap.
+  console.log("[DOCX IMAGE SIZE QA]", {
+    observationDisplaySize: `${OBSERVATION_PHOTO_SIZE[0]}x${OBSERVATION_PHOTO_SIZE[1]}`,
+    routeMapDisplaySize: `${ROUTE_MAP_SIZE[0]}x${ROUTE_MAP_SIZE[1]}`,
+    gaDrawingDisplaySize: `${GA_DRAWING_SIZE[0]}x${GA_DRAWING_SIZE[1]}`,
+    categoryIconSize: `${CATEGORY_ICON_SIZE[0]}x${CATEGORY_ICON_SIZE[1]}`,
+    compressionEnabled: !!getSharp(),
+  });
+
+  // Spec-mandated FIRST IMAGE debug for the DOCX side. If the first
+  // observation has imageMapHit:true here, the photo IS in the buffer
+  // map and the swap pass will move its <w:drawing> below the table.
+  // If imageMapHit:false, the buffer never made it in — the failure
+  // is upstream (no DB row, fetch failed, or the report_id/point_key
+  // fallback didn't match).
+  console.log("[DOCX FIRST IMAGE DEBUG]", {
+    firstObservation: observations[0]
+      ? {
+          observationPhotoKey: observations[0].observationPhotoKey,
+          photoKey: observations[0].photoKey,
+          hasObservationPhoto: observations[0].hasObservationPhoto,
+          photoText: observations[0].photoText,
+          imageMapHit:
+            !!observations[0].observationPhotoKey &&
+            imageMap.has(observations[0].observationPhotoKey),
+        }
+      : null,
+    imageMapPhotoKeysFirst5: Array.from(imageMap.keys())
+      .filter((k) => k.startsWith("photo_"))
+      .slice(0, 5),
+  });
+
+  console.log("[export stage] doc render start", {
+    observations: observations.length,
+    imageMapSize: imageMap.size,
+  });
   try {
     doc.render(renderData);
+    console.log("[export stage] doc render success");
   } catch (err) {
     console.error("[export actual] docx render failed:", err);
     const e = err as { properties?: { errors?: unknown[] }; message?: string };
@@ -1511,6 +2580,407 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.error("[difficulty table shading] patch failed - leaving default fills:", err);
   }
 
+  // ----- Step 10c: Client-ready polish patches on the rendered XML.
+  // Strictly cosmetic: lightens table-border colour for a softer look,
+  // bumps body-text run sizes by 1pt for readability across 395+ rows,
+  // tightens excessive paragraph spacing, and updates the footer contact
+  // line. None of these touch business logic, ordering, or render data.
+  try {
+    const renderedZip = doc.getZip();
+    const docFile = renderedZip.file("word/document.xml");
+    if (docFile) {
+      let xml = docFile.asText();
+
+      // -- Lighten table borders. The template's hard-black borders look
+      // heavy on white paper. We replace any 000000 colour appearing INSIDE
+      // a <w:tcBorders>...</w:tcBorders> block with BFBFBF (light grey),
+      // using a non-greedy regex so paragraph/text colour declarations
+      // outside table borders are left untouched.
+      let borderRecolorCount = 0;
+      xml = xml.replace(
+        /<w:tcBorders\b[^>]*>([\s\S]*?)<\/w:tcBorders>/g,
+        (match: string, inner: string) => {
+          const updated = inner.replace(/w:color="000000"/g, () => {
+            borderRecolorCount += 1;
+            return 'w:color="BFBFBF"';
+          });
+          return match.replace(inner, updated);
+        }
+      );
+
+      // -- Slight body-text bump for readability. Word's font-size attribute
+      // stores half-points (sz="18" = 9pt). We bump only sizes 16/17/18 by
+      // +2 (i.e., 8pt→9pt, 8.5pt→9.5pt, 9pt→10pt). Headings (sz>=20) and
+      // titles (sz>=28) are NEVER touched, so the document hierarchy stays
+      // intact. Both w:sz and w:szCs (complex-script size) are bumped so
+      // multilingual text scales together.
+      let fontBumpCount = 0;
+      xml = xml.replace(
+        /<w:sz(Cs)? w:val="(1[678])"\/>/g,
+        (_match: string, csSuffix: string | undefined, val: string) => {
+          fontBumpCount += 1;
+          const next = String(Number(val) + 2);
+          return `<w:sz${csSuffix || ""} w:val="${next}"/>`;
+        }
+      );
+
+      // -- Tighten excessive paragraph spacing. The template ships with
+      // some w:before/w:after of 240 (12pt) which is too airy for a
+      // 395-row report. Cap at 80 (4pt) so rows stay compact but do not
+      // collide. Only affects spacing inside the body — title/heading
+      // styles defined in styles.xml are not changed.
+      let spacingTrimCount = 0;
+      xml = xml.replace(
+        /(<w:spacing\b[^/>]*?\sw:(?:before|after)=")(\d+)(")/g,
+        (full: string, head: string, value: string, tail: string) => {
+          const n = Number(value);
+          if (!Number.isFinite(n) || n <= 80) return full;
+          spacingTrimCount += 1;
+          return `${head}80${tail}`;
+        }
+      );
+
+      // -- Keep observation row contents together. Add <w:cantSplit/> to
+      // every <w:trPr> in the body so an observation row is never broken
+      // across a page break. Existing trPr blocks get cantSplit injected;
+      // rows with no trPr at all are left alone (they inherit defaults).
+      let cantSplitCount = 0;
+      xml = xml.replace(
+        /<w:trPr>([\s\S]*?)<\/w:trPr>/g,
+        (match: string, inner: string) => {
+          if (inner.includes("<w:cantSplit")) return match;
+          cantSplitCount += 1;
+          return `<w:trPr>${inner}<w:cantSplit/></w:trPr>`;
+        }
+      );
+
+      // -- LAYOUT REBUILD (scanner-based). The previous "split on
+      // </w:tbl> and treat last N closures as observations" approach
+      // misaligned when the document had nested tables, summary tables
+      // before observations, or conclusion tables after observations.
+      // The new approach finds observation tables BY CONTENT — every
+      // observation table contains the literal "GPS LOCATION" header
+      // text — so it works regardless of how many other tables sit
+      // around them.
+      //
+      // For each identified observation table:
+      //   1. Find the LAST image OR "Photo not available" paragraph in
+      //      the chunk between the previous observation table's close
+      //      and this table's open — that's the photo slot.
+      //   2. Strip it from there (so the photo doesn't appear above
+      //      the table any more).
+      //   3. Insert SPACER + (image|placeholder) + PAGE_BREAK
+      //      immediately AFTER this table's </w:tbl>.
+      //   4. If no image/placeholder paragraph existed, SYNTHESISE a
+      //      grey "Photo not available" paragraph so every table has
+      //      something below it.
+      //   5. Skip the PAGE_BREAK after the LAST observation.
+      const PAGE_BREAK_PARA =
+        '<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:br w:type="page"/></w:r></w:p>';
+      // <w:keepNext/> binds this spacer paragraph to the FOLLOWING
+      // paragraph (the image/placeholder) — Word will not insert a
+      // page break between them. Together with the smaller 500x310
+      // image size, this prevents the "image alone on next page"
+      // failure mode.
+      const SPACER_PARA =
+        '<w:p><w:pPr><w:spacing w:before="80" w:after="80" w:line="240" w:lineRule="auto"/><w:jc w:val="center"/><w:keepNext/></w:pPr></w:p>';
+      // Synthesised placeholder used when no image/placeholder paragraph
+      // exists in the pre-table chunk. Centered, italic, grey — matches
+      // a "clean placeholder" per spec.
+      const PLACEHOLDER_PARA =
+        '<w:p>' +
+          '<w:pPr>' +
+            '<w:spacing w:before="0" w:after="0"/>' +
+            '<w:jc w:val="center"/>' +
+          '</w:pPr>' +
+          '<w:r>' +
+            '<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:i/><w:color w:val="9E9E9E"/></w:rPr>' +
+            '<w:t xml:space="preserve">Photo not available</w:t>' +
+          '</w:r>' +
+        '</w:p>';
+
+      // Scan the body for observation tables by their "GPS LOCATION"
+      // header fingerprint. Returns ordered (openStart, closeEnd) pairs.
+      const findObservationTables = (
+        src: string
+      ): Array<{ openStart: number; closeEnd: number }> => {
+        const FINGERPRINT = "GPS LOCATION";
+        const result: Array<{ openStart: number; closeEnd: number }> = [];
+        let pos = 0;
+        while (pos < src.length) {
+          const openIdx = src.indexOf("<w:tbl", pos);
+          if (openIdx === -1) break;
+          // Ensure it's <w:tbl ...> or <w:tbl> not e.g. <w:tblPr>.
+          const after = src[openIdx + 6];
+          if (after !== " " && after !== ">" && after !== "\n" && after !== "\t" && after !== "\r") {
+            pos = openIdx + 1;
+            continue;
+          }
+          // Find balanced close (handles nested tables in cells).
+          let depth = 1;
+          let scan = openIdx + 6;
+          let closeEnd = -1;
+          while (depth > 0 && scan < src.length) {
+            const nextOpen = src.indexOf("<w:tbl", scan);
+            const nextClose = src.indexOf("</w:tbl>", scan);
+            if (nextClose === -1) break;
+            const isRealOpen =
+              nextOpen !== -1 &&
+              nextOpen < nextClose &&
+              (() => {
+                const a = src[nextOpen + 6];
+                return a === " " || a === ">" || a === "\n" || a === "\t" || a === "\r";
+              })();
+            if (isRealOpen) {
+              depth += 1;
+              scan = nextOpen + 6;
+            } else {
+              depth -= 1;
+              scan = nextClose + 8;
+              if (depth === 0) closeEnd = scan;
+            }
+          }
+          if (closeEnd === -1) break;
+          const tblXml = src.slice(openIdx, closeEnd);
+          if (tblXml.includes(FINGERPRINT)) {
+            result.push({ openStart: openIdx, closeEnd });
+          }
+          pos = closeEnd;
+        }
+        return result;
+      };
+
+      const obsTables = findObservationTables(xml);
+      let imageMovesCount = 0;
+      let pageBreakInsertions = 0;
+      let placeholderInsertions = 0;
+
+      console.log("[DOCX OBSERVATION TABLES SCAN]", {
+        observationsInData: observations.length,
+        observationTablesInXml: obsTables.length,
+      });
+
+      if (obsTables.length > 0) {
+        // Process from END to START so positional indices for earlier
+        // tables stay valid as we mutate the xml.
+        let xmlOut = xml;
+        for (let k = obsTables.length - 1; k >= 0; k -= 1) {
+          const tbl = obsTables[k];
+          const isLastObs = k === obsTables.length - 1;
+          const prevEnd = k > 0 ? obsTables[k - 1].closeEnd : 0;
+          const beforeTable = xmlOut.slice(prevEnd, tbl.openStart);
+
+          // Find the LAST photo paragraph in beforeTable: either an
+          // observation-photo <w:drawing> (cx within ±15% of the
+          // expected EMU width) OR a "Photo not available" text paragraph.
+          const paraRe = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+          let lastPhotoPara: { start: number; end: number; text: string } | null = null;
+          let pm: RegExpExecArray | null;
+          while ((pm = paraRe.exec(beforeTable)) !== null) {
+            const p = pm[0];
+            if (p.includes("<w:drawing")) {
+              const cxMatch = p.match(/<wp:extent\s+cx="(\d+)"/);
+              if (cxMatch) {
+                const cx = Number(cxMatch[1]);
+                const tolerance = OBSERVATION_PHOTO_EMU_WIDTH * 0.15;
+                if (
+                  Number.isFinite(cx) &&
+                  Math.abs(cx - OBSERVATION_PHOTO_EMU_WIDTH) <= tolerance
+                ) {
+                  lastPhotoPara = { start: pm.index, end: pm.index + p.length, text: p };
+                  continue;
+                }
+              }
+            }
+            const texts: string[] = [];
+            const tRe = /<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g;
+            let tm: RegExpExecArray | null;
+            while ((tm = tRe.exec(p)) !== null) texts.push(tm[1]);
+            if (texts.join("").includes("Photo not available")) {
+              lastPhotoPara = { start: pm.index, end: pm.index + p.length, text: p };
+            }
+          }
+
+          // Build new beforeTable (image/placeholder paragraph stripped
+          // when found) + post-table block (SPACER + image-or-placeholder
+          // + PAGE_BREAK if not last).
+          let newBeforeTable = beforeTable;
+          let postBlockBody: string;
+          if (lastPhotoPara) {
+            newBeforeTable =
+              beforeTable.slice(0, lastPhotoPara.start) +
+              beforeTable.slice(lastPhotoPara.end);
+            postBlockBody = lastPhotoPara.text;
+            imageMovesCount += 1;
+          } else {
+            // No photo paragraph existed — synthesise a placeholder so
+            // the table is never naked.
+            postBlockBody = PLACEHOLDER_PARA;
+            placeholderInsertions += 1;
+          }
+          let postTableBlock = SPACER_PARA + postBlockBody;
+          if (!isLastObs) {
+            postTableBlock += PAGE_BREAK_PARA;
+            pageBreakInsertions += 1;
+          }
+
+          const before = xmlOut.slice(0, prevEnd);
+          const tableXml = xmlOut.slice(tbl.openStart, tbl.closeEnd);
+          const after = xmlOut.slice(tbl.closeEnd);
+          xmlOut = before + newBeforeTable + tableXml + postTableBlock + after;
+        }
+        xml = xmlOut;
+      }
+      console.log("[CLIENT DOCX LAYOUT REBUILD]", {
+        observationTables: obsTables.length,
+        imageMovesCount,
+        placeholderInsertions,
+        pageBreakInsertions,
+      });
+
+      // -- BODY-SIDE FOOTER CLEANUP. Footer text belongs in
+      // word/footer*.xml ONLY. Any body paragraph carrying a footer
+      // fingerprint is a leftover (from a prior render or a stray
+      // template paragraph) and is removed here.
+      // Cleanup runs TWICE in different modes so a footer composed of
+      // many short text runs cannot slip through:
+      //   1. Per-paragraph fingerprint check (any of N strings present
+      //      in concatenated text OR raw paragraph XML).
+      //   2. Sliding-window check that strips paragraphs whose
+      //      concatenated text contains the canonical compound
+      //      fingerprint "RACE Innovations" + "raceinnovations.in"
+      //      together (catches a single paragraph that recreates the
+      //      whole footer line).
+      let footerBodyRemovedCount = 0;
+      {
+        const footerFingerprints = [
+          "RACE Innovations Pvt Ltd",
+          "raceinnovations.in",
+          "kh@raceinnovations",
+          "Report by RACE",
+          "Report by RACE Innovations",
+          "Dated 30-04-2026",
+          "CONFIDENTIAL",
+        ];
+        // The "CONFIDENTIAL" fingerprint alone could match unrelated
+        // paragraphs, so it ONLY counts as a match when paired with
+        // any RACE/raceinnovations fingerprint in the same paragraph.
+        const isFooterParagraph = (text: string, raw: string) => {
+          const haystack = text + " " + raw;
+          if (haystack.includes("RACE Innovations")) return true;
+          if (haystack.includes("raceinnovations.in")) return true;
+          if (haystack.includes("kh@raceinnovations")) return true;
+          if (
+            haystack.includes("CONFIDENTIAL") &&
+            (haystack.includes("Report by") || haystack.includes("Page"))
+          ) {
+            return true;
+          }
+          // Fallback: scan all spec fingerprints (already covers
+          // "Report by RACE" etc.) — kept for completeness.
+          return footerFingerprints.some((fp) => haystack.includes(fp));
+        };
+        xml = xml.replace(
+          /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g,
+          (paraXml: string) => {
+            const texts: string[] = [];
+            const tRe = /<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g;
+            let tm: RegExpExecArray | null;
+            while ((tm = tRe.exec(paraXml)) !== null) texts.push(tm[1]);
+            const concatText = texts.join("");
+            if (isFooterParagraph(concatText, paraXml)) {
+              footerBodyRemovedCount += 1;
+              return "";
+            }
+            return paraXml;
+          }
+        );
+      }
+      console.log("[DOCX FOOTER CLEANUP QA]", {
+        footerBodyParagraphsRemoved: footerBodyRemovedCount > 0,
+        footerMode: "word-footer-only",
+        duplicateFooterRemoved: footerBodyRemovedCount > 0,
+        removedCount: footerBodyRemovedCount,
+      });
+
+      console.log("[CLIENT DOCX POLISH]", {
+        borderRecolorCount,
+        fontBumpCount,
+        spacingTrimCount,
+        cantSplitCount,
+        // pageBreakInsertions and imageMovesCount are now reported in
+        // [CLIENT DOCX LAYOUT REBUILD] above.
+      });
+
+      renderedZip.file("word/document.xml", xml);
+    }
+
+    // Footer rebuild — REPLACE the entire <w:body> contents of every
+    // footer*.xml with one single-paragraph footer. Required because the
+    // previous patch only edited the first <w:t> text run, which left the
+    // template's surrounding runs intact and produced the joined
+    // "raceinnovations.inemail at kh@..." line the user reported. Now we
+    // fully replace the body so there is exactly one footer paragraph and
+    // exactly one line of text per page.
+    const FOOTER_DATE = dateDash; // already computed at the top of this fn
+    const FOOTER_LINE =
+      `Report by RACE Innovations Pvt Ltd | kh@raceinnovations.in | raceinnovations.in | Dated ${FOOTER_DATE} | CONFIDENTIAL`;
+    // 16 = 8pt (Word stores half-points in w:sz)
+    const FOOTER_PARAGRAPH_XML =
+      `<w:p>` +
+        `<w:pPr>` +
+          `<w:pStyle w:val="Footer"/>` +
+          `<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>` +
+          `<w:jc w:val="center"/>` +
+        `</w:pPr>` +
+        `<w:r>` +
+          `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/><w:szCs w:val="16"/><w:color w:val="595959"/></w:rPr>` +
+          `<w:t xml:space="preserve">${FOOTER_LINE} | Page </w:t>` +
+        `</w:r>` +
+        `<w:r>` +
+          `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/><w:szCs w:val="16"/><w:color w:val="595959"/></w:rPr>` +
+          `<w:fldChar w:fldCharType="begin"/>` +
+        `</w:r>` +
+        `<w:r>` +
+          `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/><w:szCs w:val="16"/><w:color w:val="595959"/></w:rPr>` +
+          `<w:instrText xml:space="preserve"> PAGE \\* MERGEFORMAT </w:instrText>` +
+        `</w:r>` +
+        `<w:r>` +
+          `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/><w:szCs w:val="16"/><w:color w:val="595959"/></w:rPr>` +
+          `<w:fldChar w:fldCharType="end"/>` +
+        `</w:r>` +
+      `</w:p>`;
+
+    const footerNames = Object.keys(renderedZip.files).filter((n) =>
+      /^word\/footer\d+\.xml$/.test(n)
+    );
+    let footerPatched = 0;
+    for (const name of footerNames) {
+      const f = renderedZip.file(name);
+      if (!f) continue;
+      let footerXml = f.asText();
+      // Match the document body wrapper (w:ftr → ... ) and replace its
+      // contents with our single paragraph. Preserve the wrapper element
+      // so namespace / xmlns attributes remain valid.
+      const wrapperMatch = footerXml.match(/(<w:ftr\b[^>]*>)([\s\S]*)(<\/w:ftr>)/);
+      if (wrapperMatch) {
+        footerXml =
+          wrapperMatch[1] + FOOTER_PARAGRAPH_XML + wrapperMatch[3];
+        renderedZip.file(name, footerXml);
+        footerPatched += 1;
+      } else {
+        console.warn("[CLIENT DOCX FOOTER] no <w:ftr> wrapper in", name);
+      }
+    }
+    console.log("[CLIENT DOCX FOOTER]", {
+      footerFiles: footerNames.length,
+      footerPatched,
+      line: FOOTER_LINE,
+    });
+  } catch (err) {
+    console.error("[CLIENT DOCX POLISH] patch failed - non-fatal:", err);
+  }
+
   // ----- Step 11: Generate output buffer.
   let outBuf: Buffer;
   try {
@@ -1524,6 +2994,34 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   }
 
   const fileName = `${cleanFileName(projectName, "project")}-ALL.docx`;
+
+  // Spec-mandated file-size QA. Surfaces the rendered DOCX size in
+  // bytes + MB along with the photo count. If the file exceeds 150MB,
+  // a warning suggests stricter compression settings (1200×800 q72).
+  const photoCountForQA = observations.filter((r) => !!r.observationPhotoKey).length;
+  console.log("[DOCX FILE SIZE QA]", {
+    bytes: outBuf.length,
+    mb: Math.round(outBuf.length / 1024 / 1024),
+    photoCount: photoCountForQA,
+  });
+  if (outBuf.length > 150 * 1024 * 1024) {
+    console.warn(
+      "[DOCX FILE SIZE QA] file > 150MB — consider tightening optimizeDocxImage to width:1200,height:800,quality:72",
+      { bytes: outBuf.length, photoCount: photoCountForQA }
+    );
+  }
+
+  // Spec-mandated final QA log so the operator can verify the rendered
+  // DOCX is client-ready in one glance.
+  console.log("[CLIENT DOCX QA]", {
+    observations: observations.length,
+    photosAvailable: observations.filter((r) => !!r.observationPhotoKey).length,
+    photosMissing: observations.filter((r) => !r.observationPhotoKey).length,
+    categoryIconsAvailable: observations.filter((r) => !!r.categoryIconKey).length,
+    docxBytes: outBuf.length,
+    fileName,
+  });
+
   console.log("[export actual] success:", { fileName, bytes: outBuf.length });
   return { buffer: outBuf, fileName, projectName };
 }

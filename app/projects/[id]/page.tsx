@@ -49,7 +49,7 @@ type ManualPointRow = {
   accuracy?: number | null;
   timestamp?: string | null;
 };
-type PreparedFile = { fileName: string; blob: Blob };
+type PreparedFile = { fileName: string; blob: Blob | null; downloadUrl?: string };
 
 // ========= ROUTE SURVEY TYPES =========
 type PresetMap = { id: string; label: string; src: string };
@@ -252,55 +252,201 @@ function downloadBlob(blob: Blob, fileName: string) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
+/**
+ * Re-download a previously-prepared file. Prefers the local Blob (legacy
+ * paths) but falls back to the server-side downloadUrl returned by the
+ * two-step export flow, since the new export pipeline does not keep the
+ * binary in memory on the client.
+ */
+function downloadPreparedFile(f: PreparedFile) {
+  if (f.blob) {
+    downloadBlob(f.blob, f.fileName);
+    return;
+  }
+  if (f.downloadUrl) {
+    const a = document.createElement("a");
+    a.href = f.downloadUrl;
+    a.download = f.fileName;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return;
+  }
+  console.warn("[downloadPreparedFile] no blob and no downloadUrl");
+}
+
+/**
+ * Result returned by fetchProjectExportDocx.
+ *
+ * Two-step delivery: the POST returns JSON with a downloadUrl that the
+ * browser then GETs directly via a temporary <a download> click. `blob`
+ * is left as null so the modal's existing `URL.createObjectURL(blob)`
+ * download path is bypassed - the browser downloads the file from the
+ * server URL natively, which sidesteps Chrome's "Failed to fetch / no
+ * data found for resource" failure mode on large fetch responses.
+ */
+type ExportDocxResult = { blob: Blob | null; fileName: string; downloadUrl?: string };
+
+const DOCX_MIME =
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+/**
+ * Parse the filename out of a Content-Disposition header. Handles both the
+ * RFC-5987 `filename*=UTF-8''...` form (which the route does not currently
+ * emit but might in future) and the common `filename="..."` form.
+ */
+function parseContentDispositionFilename(headerValue: string | null): string | null {
+  if (!headerValue) return null;
+  const m = headerValue.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+  const raw = m?.[1] || m?.[2];
+  if (!raw) return null;
+  try {
+    return decodeURIComponent(raw.trim());
+  } catch {
+    return raw.trim();
+  }
+}
+
 async function fetchProjectExportDocx(params: {
   projectId: string;
   reportIds?: string[];
   includePhotos?: boolean;
   fileName?: string;
-}) {
+}): Promise<ExportDocxResult> {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
   const authHdrs: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
   const exportUrl = `/api/projects/${encodeURIComponent(params.projectId)}/export`;
+
+  console.log("[EXPORT frontend start]", {
+    projectId: params.projectId,
+    selectedCount: params.reportIds?.length || 0,
+    includePhotos: params.includePhotos,
+  });
 
   // Use POST with a JSON body so the upstream Nginx never sees a multi-KB
   // ?reportIds=... query string (which triggers 414/431 above ~30 UUIDs).
   // Fall back to GET only when there is no selection at all.
   const useGet = !params.reportIds?.length;
   let res: Response;
-  if (useGet) {
-    const sp = new URLSearchParams();
-    if (typeof params.includePhotos === "boolean") {
-      sp.set("includePhotos", params.includePhotos ? "1" : "0");
+  try {
+    if (useGet) {
+      const sp = new URLSearchParams();
+      if (typeof params.includePhotos === "boolean") {
+        sp.set("includePhotos", params.includePhotos ? "1" : "0");
+      }
+      if (params.fileName?.trim()) {
+        sp.set("fileName", params.fileName.trim());
+      }
+      const suffix = sp.toString() ? `?${sp.toString()}` : "";
+      res = await fetch(`${exportUrl}${suffix}`, {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        headers: { Accept: DOCX_MIME, ...authHdrs },
+      });
+    } else {
+      res = await fetch(exportUrl, {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: DOCX_MIME,
+          ...authHdrs,
+        },
+        body: JSON.stringify({
+          reportIds: params.reportIds,
+          includePhotos: params.includePhotos,
+          fileName: params.fileName?.trim() || undefined,
+        }),
+      });
     }
-    if (params.fileName?.trim()) {
-      sp.set("fileName", params.fileName.trim());
-    }
-    const suffix = sp.toString() ? `?${sp.toString()}` : "";
-    res = await fetch(`${exportUrl}${suffix}`, {
-      method: "GET",
-      credentials: "include",
-      headers: authHdrs,
+  } catch (err: any) {
+    // Network-level abort (TLS, DNS, browser tab loss). Re-throw with the
+    // full diagnostic so the catch in the modal logs it.
+    console.error("[EXPORT frontend failed]", {
+      name: err?.name,
+      message: err?.message,
+      stack: err?.stack,
     });
-  } else {
-    res = await fetch(exportUrl, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json", ...authHdrs },
-      body: JSON.stringify({
-        reportIds: params.reportIds,
-        includePhotos: params.includePhotos,
-        fileName: params.fileName?.trim() || undefined,
-      }),
-    });
+    throw err;
   }
+
+  console.log("[EXPORT frontend response]", {
+    ok: res.ok,
+    status: res.status,
+    contentType: res.headers.get("content-type"),
+    contentLength: res.headers.get("content-length"),
+    contentDisposition: res.headers.get("content-disposition"),
+  });
 
   if (!res.ok) {
-    const data = await res.json().catch(() => ({} as any));
-    throw new Error(data?.error || "Failed to export");
+    // The route returns JSON on error; read it as text so we surface the
+    // full body even if the server omitted Content-Type.
+    const text = await res.text().catch(() => "");
+    let parsedMessage: string | null = null;
+    try {
+      const j = JSON.parse(text);
+      parsedMessage = j?.error || j?.message || null;
+    } catch {
+      // not JSON; fall through to raw text
+    }
+    throw new Error(parsedMessage || text || `Export failed with status ${res.status}`);
   }
 
-  return res.blob();
+  // Two-step delivery: parse the JSON envelope and trigger a native browser
+  // download from the GET URL. We never read the DOCX body via fetch().
+  let envelope: {
+    success?: boolean;
+    fileName?: string;
+    downloadUrl?: string;
+    bytes?: number;
+    error?: string;
+  } = {};
+  try {
+    envelope = await res.json();
+  } catch (err) {
+    throw new Error("Export response was not JSON: " + (err as Error)?.message);
+  }
+  console.log("[EXPORT frontend envelope]", envelope);
+
+  if (!envelope?.downloadUrl) {
+    throw new Error(envelope?.error || "Export completed but download URL missing");
+  }
+
+  const fileName =
+    envelope.fileName ||
+    (params.fileName?.trim() ? `${params.fileName.trim().replace(/\.docx$/i, "")}.docx` : "export.docx");
+
+  // Trigger native browser download. The browser fetches the binary itself
+  // from the GET endpoint - no fetch() blob handling, no
+  // ERR_CONTENT_LENGTH_MISMATCH, no "no data found for resource" race.
+  if (typeof window !== "undefined") {
+    try {
+      const a = document.createElement("a");
+      a.href = envelope.downloadUrl;
+      a.download = fileName;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      console.log("[EXPORT frontend download triggered]", {
+        downloadUrl: envelope.downloadUrl,
+        fileName,
+        bytes: envelope.bytes,
+      });
+    } catch (err) {
+      console.error("[EXPORT frontend download click failed]", err);
+      // Fall back to navigating the current window. The server sets
+      // Content-Disposition: attachment so the browser will save the file
+      // rather than navigate away from the app.
+      window.location.href = envelope.downloadUrl;
+    }
+  }
+
+  return { blob: null, fileName, downloadUrl: envelope.downloadUrl };
 }
 
 function clamp(n: number, a: number, b: number) {
@@ -853,12 +999,12 @@ export default function ProjectReportsPage() {
 
       if (exportMode === "all") {
         const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-ALL-REPORTS`)}.docx`;
-        const blob = await fetchProjectExportDocx({
+        const { blob, fileName: serverFileName, downloadUrl } = await fetchProjectExportDocx({
           projectId,
           includePhotos,
           fileName,
         });
-        setPreparedFiles([{ fileName, blob }]);
+        setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
         setDlDone(true);
         return;
       }
@@ -871,14 +1017,14 @@ export default function ProjectReportsPage() {
           exportName || `${projectName}-${vmFilterLabel(vmFilter)}-${ids.length}`
         )}.docx`;
 
-        const blob = await fetchProjectExportDocx({
+        const { blob, fileName: serverFileName, downloadUrl } = await fetchProjectExportDocx({
           projectId,
           reportIds: ids,
           includePhotos,
           fileName,
         });
 
-        setPreparedFiles([{ fileName, blob }]);
+        setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
         setDlDone(true);
         return;
       }
@@ -887,14 +1033,14 @@ export default function ProjectReportsPage() {
         const ids = selectedIdsInOrder;
         const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-SELECTED-${ids.length}`)}.docx`;
 
-        const blob = await fetchProjectExportDocx({
+        const { blob, fileName: serverFileName, downloadUrl } = await fetchProjectExportDocx({
           projectId,
           reportIds: ids,
           includePhotos,
           fileName,
         });
 
-        setPreparedFiles([{ fileName, blob }]);
+        setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
         setDlDone(true);
         return;
       }
@@ -915,14 +1061,14 @@ export default function ProjectReportsPage() {
           if (!subset.length) continue;
 
           const fileName = `${base}-${st.label}.docx`;
-          const blob = await fetchProjectExportDocx({
+          const { blob, fileName: serverFileName, downloadUrl } = await fetchProjectExportDocx({
             projectId,
             reportIds: subset,
             includePhotos,
             fileName,
           });
 
-          files.push({ fileName, blob });
+          files.push({ fileName: serverFileName || fileName, blob, downloadUrl });
         }
 
         if (!files.length) throw new Error("No stage files generated (check your stage ranges).");
@@ -931,6 +1077,11 @@ export default function ProjectReportsPage() {
         setDlDone(true);
       }
     } catch (e: any) {
+      console.error("[EXPORT frontend failed]", {
+        name: e?.name,
+        message: e?.message,
+        stack: e?.stack,
+      });
       setDlError(e?.message || String(e));
       setDlDone(true);
     }
@@ -1531,7 +1682,7 @@ export default function ProjectReportsPage() {
                       <button
                         key={f.fileName}
                         style={styles.btnPrimary}
-                        onClick={() => downloadBlob(f.blob, f.fileName)}
+                        onClick={() => downloadPreparedFile(f)}
                         title="Download now"
                       >
                         Download: {f.fileName}
