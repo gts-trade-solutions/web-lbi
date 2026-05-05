@@ -649,6 +649,20 @@ function getDuplicates(values: string[]) {
 
 
 /**
+ * Spec-mandated multi-image splitter. A single Excel cell may carry
+ * `IMG_001.jpg, IMG_002.jpg, IMG_003.jpg` for one observation row.
+ * This helper splits on comma, trims, and drops empty entries so the
+ * downstream uploader can iterate every filename and insert a separate
+ * `report_photos` row for each.
+ */
+function splitMultiImageRefs(value: unknown): string[] {
+  return String(value || "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+/**
  * Spec-mandated normalisation for matching master-file `file_name` against
  * uploaded image filenames. trim → URI-decode → strip folder path → lowercase.
  * Returns "" for empty/invalid input so callers can use the result as a Map
@@ -1257,11 +1271,26 @@ export default function ProjectsPage() {
         }
 
         if (row.file_name) {
-          imageMap.push({
-            file_name: row.file_name,
-            point_key: row.point_key,
-            image_key: row.image_key || null,
-          });
+          // Spec: one Excel cell may carry comma-separated filenames.
+          // Expand into one imageMap entry per filename so multi-image
+          // rows produce one report_photos row per file.
+          const splitNames = splitMultiImageRefs(row.file_name);
+          const splitKeys = splitMultiImageRefs(row.image_key || "");
+          if (splitNames.length === 0) {
+            imageMap.push({
+              file_name: row.file_name,
+              point_key: row.point_key,
+              image_key: row.image_key || null,
+            });
+          } else {
+            for (let nIdx = 0; nIdx < splitNames.length; nIdx += 1) {
+              imageMap.push({
+                file_name: splitNames[nIdx],
+                point_key: row.point_key,
+                image_key: splitKeys[nIdx] || splitKeys[0] || null,
+              });
+            }
+          }
         }
       });
 
@@ -1519,20 +1548,58 @@ export default function ProjectsPage() {
           image_key: row.image_key,
         });
 
-        const matchedFile = normalizedFileName
-          ? uploadedImageMap.get(normalizedFileName) || null
-          : null;
+        // Spec: split comma-separated filenames so multi-image rows
+        // upload one file per piece.
+        const splitFileNames = splitMultiImageRefs(rawFileName);
+        const splitImageKeys = splitMultiImageRefs(row.image_key || "");
+        const fileNamesToTry = splitFileNames.length > 0 ? splitFileNames : [rawFileName];
 
-        // Spec Part 3 log key.
-        console.log("[bulk] image match", {
-          pointKey: point_key,
-          rawFileName,
-          normalized: normalizedFileName,
-          matched: !!matchedFile,
-          matchedFileName: matchedFile?.name || null,
-        });
+        // Match each split filename against the uploaded files map.
+        const matches: Array<{
+          rawName: string;
+          normName: string;
+          file: File;
+          imageKey: string | null;
+        }> = [];
+        for (let mIdx = 0; mIdx < fileNamesToTry.length; mIdx += 1) {
+          const candidateRaw = fileNamesToTry[mIdx];
+          const candidateNorm = normalizeFileName(candidateRaw);
+          const candidateFile = candidateNorm
+            ? uploadedImageMap.get(candidateNorm) || null
+            : null;
 
-        if (matchedFile) matchedImagesCount += 1;
+          // Spec Part 3 log key — fires per split filename.
+          console.log("[bulk] image match", {
+            pointKey: point_key,
+            rawFileName: candidateRaw,
+            normalized: candidateNorm,
+            matched: !!candidateFile,
+            matchedFileName: candidateFile?.name || null,
+          });
+
+          // Spec-mandated multi-image match log.
+          console.log("[BULK MULTI IMAGE MATCH]", {
+            projectId: bulkProjectId,
+            point_key,
+            imgIndex: mIdx,
+            rawFileName: candidateRaw,
+            rawImageKey: splitImageKeys[mIdx] || splitImageKeys[0] || null,
+            matched: !!candidateFile,
+            matchedFileName: candidateFile?.name || null,
+          });
+
+          if (candidateFile) {
+            matches.push({
+              rawName: candidateRaw,
+              normName: candidateNorm,
+              file: candidateFile,
+              imageKey: splitImageKeys[mIdx] || splitImageKeys[0] || null,
+            });
+          }
+        }
+
+        if (matches.length > 0) matchedImagesCount += matches.length;
+        const matchedFile = matches[0]?.file || null;
 
         // Resolve the EXACT reports.id for this point. If the master row had
         // no GPS we fall through to the NO_GPS placeholder report so the
@@ -1561,7 +1628,7 @@ export default function ProjectsPage() {
           reportId,
         });
 
-        if (!matchedFile) {
+        if (matches.length === 0) {
           if (row.file_name) {
             console.warn("[UPLOAD photo missing - no manual file]", {
               point_key,
@@ -1582,34 +1649,37 @@ export default function ProjectsPage() {
           return;
         }
 
-        // Spec-mandated per-row debug. Prove BEFORE the upload runs that
-        // the file we matched and the savedReportId we are about to link
-        // it to are exactly what we expect.
-        console.log("[BULK PHOTO ROW DEBUG]", {
-          point_key,
-          file_name: row.file_name,
-          normalizedFileName,
-          matchedFileName: matchedFile?.name || null,
-          reportId,
-        });
-
-        // Upload + DB insert in one /api/upload call. The route inserts
-        // report_photos with report_id = reportId we pass and stores the
-        // file_name + path columns. Its response confirms whether the DB
-        // insert actually fired AND echoes back the verify-SELECT row so
-        // we can prove the link landed on the EXACT savedReport.id.
-        const { width, height } = await getImageSize(matchedFile);
-        try {
-          const uploaded = await uploadFileToS3({
-            file: matchedFile,
+        // Upload every matched file. /api/upload dedups by
+        // (report_id, file_name) so distinct filenames produce distinct
+        // report_photos rows for the same report — multi-image support
+        // without losing previously uploaded files.
+        for (let upIdx = 0; upIdx < matches.length; upIdx += 1) {
+          const m = matches[upIdx];
+          // Spec-mandated per-row debug. Prove BEFORE the upload runs that
+          // the file we matched and the savedReportId we are about to link
+          // it to are exactly what we expect.
+          console.log("[BULK PHOTO ROW DEBUG]", {
+            point_key,
+            file_name: m.rawName,
+            normalizedFileName: m.normName,
+            matchedFileName: m.file.name,
             reportId,
-            width,
-            height,
-            pointKey: point_key,
-            imageKey: row.image_key || null,
-            projectId: bulkProjectId,
-            fileName: row.file_name || matchedFile.name,
+            multiImageIndex: upIdx,
+            multiImageTotal: matches.length,
           });
+
+          const { width, height } = await getImageSize(m.file);
+          try {
+            const uploaded = await uploadFileToS3({
+              file: m.file,
+              reportId,
+              width,
+              height,
+              pointKey: point_key,
+              imageKey: m.imageKey,
+              projectId: bulkProjectId,
+              fileName: m.rawName || m.file.name,
+            });
           imagesUploaded += 1;
           uploadedToS3Count += 1;
           if (uploaded.reportPhoto?.saved) {
@@ -1651,15 +1721,17 @@ export default function ProjectsPage() {
             });
           }
         } catch (upErr: any) {
-          errors.push(`${matchedFile.name}: upload failed - ${upErr?.message || String(upErr)}`);
+          errors.push(`${m.file.name}: upload failed - ${upErr?.message || String(upErr)}`);
           missingImagesCount += 1;
           console.error("[UPLOAD photo missing - upload threw]", {
             point_key,
             reportId,
-            file_name: row.file_name,
+            file_name: m.rawName,
+            multiImageIndex: upIdx,
             error: upErr?.message,
           });
         }
+        } // end for matches
       });
 
       console.log("[UPLOAD import summary]", {

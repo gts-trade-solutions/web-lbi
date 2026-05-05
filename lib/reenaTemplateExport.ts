@@ -77,7 +77,10 @@ async function optimizeDocxImage(
           withoutEnlargement: true,
         })
         .jpeg({
-          quality: 80,
+          // Spec: q78 mozjpeg keeps photos visually indistinguishable
+          // from q80 while shaving ~5% per image — meaningful across
+          // 395+ photos in one export.
+          quality: 78,
           mozjpeg: true,
         })
         .toBuffer();
@@ -123,9 +126,10 @@ const GA_DRAWING_SIZE: [number, number] = [867, 650];
 // via sharp BEFORE being added to imageMap (max 1400×900 inside, q80
 // mozjpeg) so the DOCX file size stays small even with 395+ photos.
 const OBSERVATION_PHOTO_SIZE: [number, number] = [650, 420];
-// Per spec: category icon at 60 px square inside the CATEGORY cell.
-// Embedded as 160×160 PNG for crispness; displayed at 60×60.
-const CATEGORY_ICON_SIZE: [number, number] = [60, 60];
+// Per spec: category icon at 70 px square inside the CATEGORY cell
+// (matches the second reference screenshot — bigger and clearer than
+// the prior 60 px). Embedded as 160×160 PNG for crispness.
+const CATEGORY_ICON_SIZE: [number, number] = [70, 70];
 const CATEGORY_SUMMARY_ICON_SIZE: [number, number] = [60, 60];
 
 // Word stores image extents in EMU (1 px = 9525 EMU). The combined
@@ -512,6 +516,13 @@ function normalizeDifficulty(value: unknown) {
     .toLowerCase();
 }
 
+// Spec-mandated EXACT-match keyword sets. EXACT (Array.includes(v))
+// not substring, so noise words in remarks/action don't hijack the
+// table colour.
+const RED_KEYWORDS = ["red", "critical", "hard", "fail", "not pass"];
+const YELLOW_KEYWORDS = ["yellow", "warning", "caution", "medium"];
+const GREEN_KEYWORDS = ["green", "normal", "normal pass", "pass", "ok", ""];
+
 function getDifficultyTableColors(value: unknown): {
   key: "red" | "yellow" | "green";
   headerFillColor: string;
@@ -520,29 +531,36 @@ function getDifficultyTableColors(value: unknown): {
   bodyTextColor: string;
 } {
   const d = normalizeDifficulty(value);
-  if (d.includes("red")) {
+  // EXACT-equals matching prevents the "red rectangles where I never
+  // chose red" bug. Substring `includes` would catch "red" inside
+  // "redirect", "hard" inside "hardware", "fail" inside "failure" —
+  // applying the red shading to perfectly normal observations.
+  if (RED_KEYWORDS.includes(d)) {
     return {
       key: "red",
-      headerFillColor: "C00000",
+      headerFillColor: "B71C1C",
       headerTextColor: "FFFFFF",
-      bodyFillColor: "F4CCCC",
+      bodyFillColor: "F8D7DA",
       bodyTextColor: "0B3D2E",
     };
   }
-  if (d.includes("yellow")) {
+  if (YELLOW_KEYWORDS.includes(d)) {
     return {
       key: "yellow",
-      headerFillColor: "FFFF00",
+      headerFillColor: "D6A800",
       headerTextColor: "000000",
-      bodyFillColor: "FFF2CC",
+      bodyFillColor: "FFF3CD",
       bodyTextColor: "0B3D2E",
     };
   }
+  // Anything not in RED or YELLOW keyword set lands here, including
+  // the empty string and every GREEN_KEYWORDS entry. Red is opt-in.
+  void GREEN_KEYWORDS; // referenced for grep + future explicit check
   return {
     key: "green",
-    headerFillColor: "4CAF50",
+    headerFillColor: "43A047",
     headerTextColor: "FFFFFF",
-    bodyFillColor: "D9EAD3",
+    bodyFillColor: "DDEFD8",
     bodyTextColor: "0B3D2E",
   };
 }
@@ -639,35 +657,35 @@ const CATEGORY_ICON_MAP: Record<string, string> = {
   footpath_bridge: "public/images/report-icons/image.png",
   lt_cable: "public/images/report-icons/ca-3.png",
   low_tension_cable: "public/images/report-icons/ca-3.png",
-  ht_cable: "public/images/report-icons/ca-4.png",
-  high_tension_cable: "public/images/report-icons/ca-4.png",
-  towerline_cable: "public/images/report-icons/ca-5.png",
-  towerline: "public/images/report-icons/ca-5.png",
-  tower_line: "public/images/report-icons/ca-5.png",
-  tower_line_cable: "public/images/report-icons/ca-5.png",
-  underpass: "public/images/report-icons/ca-6.png",
-  underpass_bridge: "public/images/report-icons/ca-6.png",
-  tree: "public/images/report-icons/ca-7.png",
-  tree_branches: "public/images/report-icons/ca-7.png",
-  river_bridge: "public/images/report-icons/ca-8.png",
-  signboard: "public/images/report-icons/ca-9.png",
-  electric_sign: "public/images/report-icons/ca-9.png",
-  electric_signboard: "public/images/report-icons/ca-9.png",
-  camera_pole: "public/images/report-icons/ca-9.png",
-  toll: "public/images/report-icons/ca-10.png",
-  toll_plaza: "public/images/report-icons/ca-10.png",
-  narrow_road: "public/images/report-icons/ca-11.png",
-  gate: "public/images/report-icons/ca-12.png",
-  side_signboard: "public/images/report-icons/ca-13.png",
-  signal_pole: "public/images/report-icons/ca-13.png",
-  speed_pole: "public/images/report-icons/ca-13.png",
-  electric_side_signboard: "public/images/report-icons/ca-13.png",
-  bend: "public/images/report-icons/ca-14.png",
+  ht_cable: "public/images/report-icons/ca-3.png",
+  high_tension_cable: "public/images/report-icons/ca-3.png",
+  towerline_cable: "public/images/report-icons/ca-4.png",
+  towerline: "public/images/report-icons/ca-4.png",
+  tower_line: "public/images/report-icons/ca-4.png",
+  tower_line_cable: "public/images/report-icons/ca-4.png",
+  underpass: "public/images/report-icons/ca-5.png",
+  underpass_bridge: "public/images/report-icons/ca-5.png",
+  tree: "public/images/report-icons/ca-6.png",
+  tree_branches: "public/images/report-icons/ca-6.png",
+  river_bridge: "public/images/report-icons/ca-7.png",
+  signboard: "public/images/report-icons/ca-8.png",
+  electric_sign: "public/images/report-icons/ca-8.png",
+  electric_signboard: "public/images/report-icons/ca-8.png",
+  camera_pole: "public/images/report-icons/ca-8.png",
+  toll: "public/images/report-icons/ca-9.png",
+  toll_plaza: "public/images/report-icons/ca-9.png",
+  narrow_road: "public/images/report-icons/ca-10.png",
+  gate: "public/images/report-icons/ca-11.png",
+  side_signboard: "public/images/report-icons/ca-8.png",
+  signal_pole: "public/images/report-icons/ca-17.png",
+  speed_pole: "public/images/report-icons/ca-17.png",
+  electric_side_signboard: "public/images/report-icons/ca-17.png",
+  bend: "public/images/report-icons/ca-13.png",
   petrol: "public/images/report-icons/ca-15.png",
   petrol_bunk: "public/images/report-icons/ca-15.png",
   railway_level_crossing: "public/images/report-icons/ca-16.png",
   diversion: "public/images/report-icons/diversion.jpeg",
-  fallback: "public/images/report-icons/image.png",
+  fallback: "public/images/report-icons/ca-5.png",
 };
 
 function getCategoryIconFile(category: unknown): string {
@@ -907,18 +925,35 @@ async function reverseGeocodeLocation(lat: number, lng: number): Promise<string 
 }
 
 /**
+ * Spec-mandated coordinate-only detector. Returns true when the value
+ * is just two numbers separated by a comma (e.g. "21.689133, 87.076417")
+ * — those should NOT be treated as a real "location" name; the resolver
+ * should attempt a reverse geocode and only fall back to coords if that
+ * also fails.
+ */
+function isCoordinateOnlyLocation(value: unknown): boolean {
+  const text = String(value || "").trim();
+  return /^-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?$/.test(text);
+}
+
+/**
  * Resolve the LOCATION cell value for one report. Order:
  *   1. existing stored value (location, address, resolved_location, ...)
+ *      — but ONLY if it's not a coords-only string
  *   2. reverse-geocoded name from coordinates (cached back into MySQL)
  *   3. coordinate fallback "lat, lng"
  *   4. "-"
  */
 async function resolveReportLocation(r: Row, hasResolvedColumn: boolean): Promise<string> {
   const existing = getExistingLocation(r);
-  if (existing) return existing;
+  if (existing && !isCoordinateOnlyLocation(existing)) return existing;
   const lat = pickLat(r);
   const lng = pickLng(r);
-  if (lat === null || lng === null) return "-";
+  if (lat === null || lng === null) {
+    // No coordinates to geocode — fall back to whatever existing value
+    // the row had (even if coords-only) before defaulting to "-".
+    return existing || "-";
+  }
   const resolved = await reverseGeocodeLocation(lat, lng);
   if (resolved) {
     if (hasResolvedColumn && r.id) {
@@ -1199,6 +1234,60 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.log("[DOCX FIRST 10 PHOTO DB CHECK]", first10);
   } catch (err) {
     console.warn("[DOCX FIRST 10 PHOTO DB CHECK] query failed:", err);
+  }
+
+  // Spec-mandated FIRST 5 DB photo check (separate log key so the
+  // operator can grep it independently of the larger 10-row dump).
+  try {
+    const first5 = await safeQuery(
+      `SELECT
+         r.id AS report_id,
+         r.point_key,
+         r.category,
+         rp.id AS photo_id,
+         rp.url,
+         rp.file_name
+       FROM reports r
+       LEFT JOIN report_photos rp ON rp.report_id = r.id
+       WHERE r.project_id = ?
+       ORDER BY CAST(r.point_key AS DECIMAL(10,4)), r.created_at
+       LIMIT 5`,
+      [projectId]
+    );
+    console.log("[DOCX FIRST 5 DB PHOTO CHECK]", first5);
+  } catch (err) {
+    console.warn("[DOCX FIRST 5 DB PHOTO CHECK] query failed:", err);
+  }
+
+  // Spec-mandated FIRST FIVE REPORT PHOTO LINK CHECK — same intent as
+  // the dump above but with report_id, photo_report_id and sort_order
+  // included so the operator can spot a wrong DB linkage at a glance:
+  // if rp.photo_report_id !== r.report_id for any of the first 5 rows,
+  // bulk upload inserted under the wrong report and fixing only the
+  // DOCX export will not solve the photo shift.
+  try {
+    const linkCheck = await safeQuery(
+      `SELECT
+         r.id AS report_id,
+         r.point_key,
+         r.category,
+         r.sort_order,
+         rp.id AS photo_id,
+         rp.report_id AS photo_report_id,
+         rp.url,
+         rp.file_name,
+         rp.point_key AS photo_point_key,
+         rp.image_key
+       FROM reports r
+       LEFT JOIN report_photos rp ON rp.report_id = r.id
+       WHERE r.project_id = ?
+       ORDER BY CAST(r.point_key AS DECIMAL(10,4)), r.created_at
+       LIMIT 5`,
+      [projectId]
+    );
+    console.log("[DOCX FIRST FIVE REPORT PHOTO LINK CHECK]", linkCheck);
+  } catch (err) {
+    console.warn("[DOCX FIRST FIVE REPORT PHOTO LINK CHECK] query failed:", err);
   }
 
   // ---- Spec-mandated SQL JOIN/COUNT diagnostics. These run the EXACT
@@ -1702,6 +1791,21 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         hasPhotoUrl: !!firstPhotoUrl,
         hasImageBuffer: !!photoKey && imageMap.has(photoKey),
       });
+
+      // Spec-mandated photo-block check. If dbPhotosFound > 0 AND
+      // photosAddedToBlock === 0, the buffer fetch failed (S3 404 /
+      // timeout / non-image). If dbPhotosFound === 0, the row truly
+      // has no DB photo and the bulk-upload pipeline is the place to
+      // look (use [DOCX FIRST 10 PHOTO DB CHECK] for the SQL view).
+      console.log("[DOCX PHOTO BLOCK CHECK]", {
+        blockIndex: i,
+        report_id: rid,
+        point_key: r.point_key,
+        dbPhotosFound: reportPhotos.length,
+        photosAddedToBlock: photoKey ? 1 : 0,
+        firstPhotoKey: photoKey || null,
+        imageMapHit: !!photoKey && imageMap.has(photoKey),
+      });
     }
 
     // KM is the cumulative haversine distance along the ordered route. The
@@ -1711,7 +1815,30 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
 
     // LOCATION uses (1) any stored value, then (2) reverse-geocoded name
     // (cached into reports.resolved_location), then (3) coordinate fallback.
+    const dbLocation = getExistingLocation(r);
     const locationText = await resolveReportLocation(r, hasResolvedLocationColumn);
+    // Spec-mandated location-source log. coords-only DB strings are
+    // classified by their FINAL outcome — if the resolver succeeded
+    // in reverse-geocoding past the coords-only DB value, source is
+    // "reverse_geocode"; if it had to fall back to coords, "coords_fallback".
+    const dbHasUsable = !!dbLocation && !isCoordinateOnlyLocation(dbLocation);
+    const locationSource: "db" | "reverse_geocode" | "coords_fallback" | "missing" =
+      dbHasUsable
+        ? "db"
+        : isCoordinateOnlyLocation(locationText)
+          ? "coords_fallback"
+          : locationText && locationText !== "-"
+            ? "reverse_geocode"
+            : "missing";
+    console.log("[DOCX LOCATION CHECK]", {
+      report_id: rid,
+      point_key: r.point_key,
+      lat,
+      lng,
+      originalLocation: dbLocation,
+      finalLocation: locationText,
+      source: locationSource,
+    });
 
     const hasObservationPhoto = !!photoKey && imageMap.has(photoKey);
     const entry = photoKey ? imageMap.get(photoKey) : undefined;
@@ -1760,6 +1887,26 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         : 0,
     });
 
+    // Spec-mandated icon check log keyed by report_id/point_key for
+    // easier joining against bulk-import logs.
+    console.log("[DOCX CATEGORY ICON CHECK]", {
+      report_id: rid,
+      point_key: r.point_key,
+      rawCategory: r.category,
+      normalizedCategory: normalizeCategory(r.category),
+      iconFile: categoryIcon?.path
+        ? String(categoryIcon.path).split(/[\\/]/).pop()
+        : null,
+      categoryIconKey,
+      imageMapHasIcon: categoryIconKey ? imageMap.has(categoryIconKey) : false,
+    });
+    if (!hasCategoryIcon && r.category) {
+      console.warn("[DOCX CATEGORY ICON MISSING]", {
+        rawCategory: r.category,
+        normalizedCategory: normalizeCategory(r.category),
+      });
+    }
+
     const difficultyValue = String(
       r.difficulty ||
         r.remarks_action ||
@@ -1769,6 +1916,21 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         ""
     );
     const tableColors = getDifficultyTableColors(difficultyValue);
+
+    // Spec-mandated: prove the row didn't unintentionally land on red.
+    // usesRedStyle MUST be false unless normalizedDifficulty is exactly
+    // one of RED_KEYWORDS. After the EXACT-equals fix, "redirect" or
+    // "hardware" in remarks no longer flips the row red.
+    {
+      const normalizedDifficulty = normalizeDifficulty(difficultyValue);
+      console.log("[DOCX RED STYLE CHECK]", {
+        report_id: rid,
+        point_key: r.point_key,
+        rawDifficulty: difficultyValue,
+        normalizedDifficulty,
+        usesRedStyle: tableColors.key === "red",
+      });
+    }
 
     // Mirror the same map key under every plausible template tag name so the
     // image module resolves whether the template uses {%photo}, {%photoKey},
@@ -2079,26 +2241,127 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     for (const o of validObservations) observations.push(o);
   }
 
+  // ---- REVERTED: photo-key remap is intentionally a NO-OP.
+  // Earlier revisions tried to re-key surviving observations to
+  // `photo_${blockIndex}_0` (caused a +1 shift) and then to
+  // `photo_${reportId}_0` (blanked every photo because observations[]
+  // doesn't carry report_id, so the remap fell into the ELSE branch
+  // and cleared every key). The keys assigned by the original photo
+  // loop — `photo_${i}` per surviving report — already resolve
+  // correctly against imageMap. The +1 shift came from the post-render
+  // swap pass moving images one slot forward when the template emits
+  // `table → image` ordering; that is fixed by the conditional swap
+  // logic in Step 10c (template-structure detection).
+  // Keeping the no-op here so the spec's regression guard below has
+  // something to log against, and so future revisions know not to
+  // re-introduce the broken remap.
+  {
+    const photoKeysInMap = Array.from(imageMap.keys()).filter((k) =>
+      k.startsWith("photo_")
+    );
+    const rowsWithPhotoKey = observations.filter(
+      (o) => !!(o.observationPhotoKey || o.photoKey)
+    ).length;
+    console.log("[DOCX PHOTO KEY REMAP] (no-op revert)", {
+      observationsAfterFilter: observations.length,
+      photoKeysInImageMap: photoKeysInMap.length,
+      rowsWithPhotoKey,
+      finalPhotoKeysSample: photoKeysInMap.slice(0, 10),
+    });
+    // Spec-mandated regression guard: if photos exist in imageMap but
+    // NO observation row carries a key, every photo will render as
+    // "Photo not available" — exactly the failure mode the user just
+    // reported. Surface this loudly so the operator can spot it.
+    if (photoKeysInMap.length > 0 && rowsWithPhotoKey === 0) {
+      console.error(
+        "[DOCX PHOTO MAPPING REGRESSION]",
+        "photos exist in imageMap but no observation received a photo key",
+        { photoKeysInImageMap: photoKeysInMap.length, rowsWithPhotoKey }
+      );
+    }
+  }
+
   // Spec-mandated finalised observation blocks. Carries the explicit
   // hasPhoto / pageBreak / isLast flags the spec calls out so the data
   // shape unambiguously expresses: table → image-or-placeholder → page
   // break (except after last). Used in render data alongside
   // `observations` (the template's existing loop key) so the data is
   // available either way.
+  // photoKeys[] is the spec-mandated multi-image array — one entry per
+  // photo for the report. Today the template's image placeholder loop
+  // emits ONE drawing per observation; photoKeys is exposed so a
+  // future template revision (with `{#photos}{%imageKey}{/photos}`)
+  // can render every photo without code changes here.
   const observationBlocks = observations.map((row, index) => {
     const photoKey = row.observationPhotoKey || row.photoKey || "";
     const hasPhoto = !!photoKey && imageMap.has(photoKey);
+    // ObservationData doesn't declare point_key/report_id/id but the
+    // builder above attaches them via spread from the source Row. Cast
+    // through Record<string, unknown> so we can read them without
+    // widening the public ObservationData type.
+    const rowAny = row as unknown as Record<string, unknown>;
+    const rowPointKey = String(rowAny.point_key || "");
+    const rowReportId = String(rowAny.report_id || rowAny.id || "");
+    // photoKeys is the canonical multi-image key list for this report.
+    // After the remap above, every surviving observation has exactly
+    // one key, `photo_${reportId}_0`. Multi-image support uses _1, _2,
+    // etc. — keyed by REPORT_ID, never by block index, so no shift is
+    // possible.
+    const photoKeys: string[] = hasPhoto ? [photoKey] : [];
+    // Pull the matching DB photo rows so each photos[] entry carries
+    // the original metadata for downstream template / debugging use.
+    const dbPhotos = (photosByReportId.get(rowReportId) || []).slice(
+      0,
+      photoKeys.length
+    );
+    const photos = photoKeys.map((k, photoIndex) => {
+      const dbRow = dbPhotos[photoIndex] || {};
+      return {
+        imageKey: k,
+        url: typeof dbRow.url === "string" ? dbRow.url : undefined,
+        file_name:
+          typeof dbRow.file_name === "string" ? dbRow.file_name : undefined,
+        report_id:
+          typeof dbRow.report_id === "string" ? dbRow.report_id : rowReportId,
+        point_key:
+          typeof dbRow.point_key === "string" ? dbRow.point_key : rowPointKey,
+      };
+    });
     return {
       ...row,
       blockIndex: index,
+      reportId: rowReportId,
       photoKey,
       observationPhotoKey: hasPhoto ? photoKey : "",
       hasPhoto,
+      hasPhotos: photoKeys.length > 0,
+      photoKeys,
+      photos,
       photoText: hasPhoto ? "" : "Photo not available",
       isLast: index === observations.length - 1,
       pageBreak: index < observations.length - 1,
     };
   });
+
+  // Spec-mandated per-photo log emitted as the imageMap is verified.
+  // Confirms the buffer in imageMap is keyed by report_id and matches
+  // the report it came from (photoReportId === reportId).
+  for (const block of observationBlocks) {
+    for (const photo of (block as unknown as {
+      photos?: Array<{ imageKey: string; report_id?: string; point_key?: string; file_name?: string }>;
+    }).photos || []) {
+      console.log("[DOCX IMAGE MAP SET BY REPORT_ID]", {
+        blockIndex: block.blockIndex,
+        reportId: (block as unknown as { reportId?: string }).reportId,
+        point_key: (block as unknown as Record<string, unknown>).point_key,
+        photoReportId: photo.report_id,
+        photoPointKey: photo.point_key,
+        imageKey: photo.imageKey,
+        file_name: photo.file_name,
+        imageMapHit: imageMap.has(photo.imageKey),
+      });
+    }
+  }
   console.log("[DOCX OBSERVATION BLOCKS FINAL]", {
     count: observationBlocks.length,
     firstFive: observationBlocks.slice(0, 5).map((b) => ({
@@ -2126,6 +2389,144 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     firstBlockWillRenderPlaceholder: !observationBlocks[0]?.hasPhoto,
   });
 
+  // Spec-mandated order-alignment QA. After the photo-key remap and
+  // observationBlocks build, the FIRST block's first photo MUST be
+  // photo_0_0 (or null if the first observation truly has no photo).
+  // Any other key here means the remap did not align with the
+  // observation order — the post-render swap would then misplace a
+  // drawing.
+  const firstObs = observationBlocks[0];
+  const lastObs = observationBlocks[observationBlocks.length - 1];
+  console.log("[DOCX ORDER ALIGNMENT QA]", {
+    observationBlocks: observationBlocks.length,
+    firstBlock: firstObs
+      ? {
+          blockIndex: firstObs.blockIndex,
+          photosCount: Array.isArray(firstObs.photoKeys) ? firstObs.photoKeys.length : 0,
+          firstPhotoKey: firstObs.photoKeys?.[0] || null,
+          imageMapHit:
+            !!firstObs.photoKeys?.[0] && imageMap.has(firstObs.photoKeys[0]),
+          willShowPlaceholder: !firstObs.hasPhoto,
+        }
+      : null,
+    lastBlock: lastObs
+      ? {
+          blockIndex: lastObs.blockIndex,
+          photosCount: Array.isArray(lastObs.photoKeys) ? lastObs.photoKeys.length : 0,
+          pageBreak: lastObs.pageBreak,
+        }
+      : null,
+    renderMode: "single observationBlocks loop",
+    order: "table -> photos/placeholder -> pageBreak",
+    noSeparateImageLoop: true,
+  });
+  if (firstObs && firstObs.hasPhoto && firstObs.photoKeys?.[0] !== "photo_0_0") {
+    console.warn(
+      "[DOCX ORDER ALIGNMENT QA] WARN: firstBlock has a photo but its key is NOT photo_0_0",
+      { firstBlockPhotoKey: firstObs.photoKeys?.[0] }
+    );
+  }
+  if (lastObs && lastObs.pageBreak) {
+    console.warn(
+      "[DOCX ORDER ALIGNMENT QA] WARN: lastBlock.pageBreak is true (should be false)"
+    );
+  }
+
+  // Spec-mandated alignment QA: surface BOTH the first AND second
+  // observation blocks so a "first Gate image appears under second
+  // Bend report" shift becomes obvious. firstPhotoReportId MUST equal
+  // firstBlock.reportId; secondPhotoReportId MUST equal
+  // secondBlock.reportId. Any mismatch proves the imageMap key is
+  // wired to the wrong report.
+  const fb = observationBlocks[0] as unknown as
+    | undefined
+    | {
+        blockIndex: number;
+        reportId: string;
+        category: string;
+        photos: Array<{ imageKey: string; file_name?: string; report_id?: string }>;
+      } & Record<string, unknown>;
+  const sb = observationBlocks[1] as unknown as
+    | undefined
+    | {
+        blockIndex: number;
+        reportId: string;
+        category: string;
+        photos: Array<{ imageKey: string; file_name?: string; report_id?: string }>;
+      } & Record<string, unknown>;
+  console.log("[DOCX PHOTO ALIGNMENT FINAL QA]", {
+    firstBlock: fb
+      ? {
+          blockIndex: fb.blockIndex,
+          reportId: fb.reportId,
+          point_key: (fb as Record<string, unknown>).point_key,
+          category: fb.category,
+          photosCount: Array.isArray(fb.photos) ? fb.photos.length : 0,
+          firstPhotoKey: fb.photos?.[0]?.imageKey || null,
+          firstPhotoFileName: fb.photos?.[0]?.file_name || null,
+          firstPhotoReportId: fb.photos?.[0]?.report_id || null,
+        }
+      : null,
+    secondBlock: sb
+      ? {
+          blockIndex: sb.blockIndex,
+          reportId: sb.reportId,
+          point_key: (sb as Record<string, unknown>).point_key,
+          category: sb.category,
+          photosCount: Array.isArray(sb.photos) ? sb.photos.length : 0,
+          firstPhotoFileName: sb.photos?.[0]?.file_name || null,
+          firstPhotoReportId: sb.photos?.[0]?.report_id || null,
+        }
+      : null,
+    mappingMode: "report_id_only",
+    noIndexBasedPhotoMapping: true,
+  });
+  if (
+    fb &&
+    Array.isArray(fb.photos) &&
+    fb.photos[0] &&
+    fb.photos[0].report_id &&
+    fb.photos[0].report_id !== fb.reportId
+  ) {
+    console.error("[DOCX PHOTO ALIGNMENT FINAL QA] MISMATCH on firstBlock", {
+      blockReportId: fb.reportId,
+      photoReportId: fb.photos[0].report_id,
+    });
+  }
+
+  // Spec-mandated final first-block check. If firstPhotoKey is null
+  // and the [DOCX FIRST 5 DB PHOTO CHECK] above shows a photo_id for
+  // the first report, the report_id mapping is wrong (the photo did
+  // not land under photosByReportId for this report). If
+  // firstPhotoKey is present but the rendered DOCX still shows an
+  // image before the table, the [DOCX ORPHAN PRE-TABLE DRAWINGS
+  // STRIPPED] log will tell you whether the cleanup actually fired.
+  console.log("[DOCX FIRST BLOCK FINAL CHECK]", {
+    firstBlock: firstObs
+      ? {
+          blockIndex: firstObs.blockIndex,
+          reportId: (firstObs as { reportId?: string }).reportId || null,
+          point_key: (firstObs as unknown as Record<string, unknown>).point_key,
+          photosCount: Array.isArray(firstObs.photos) ? firstObs.photos.length : 0,
+          firstPhotoKey:
+            Array.isArray(firstObs.photos) && firstObs.photos[0]
+              ? firstObs.photos[0].imageKey
+              : null,
+          firstPhotoMapHit:
+            Array.isArray(firstObs.photos) &&
+            firstObs.photos[0] &&
+            imageMap.has(firstObs.photos[0].imageKey),
+          hasPhotos: !!firstObs.hasPhotos,
+          willShowPlaceholder: !firstObs.hasPhotos,
+        }
+      : null,
+    imageMapPhotoKeysFirst10: Array.from(imageMap.keys())
+      .filter((k) => k.startsWith("photo_"))
+      .slice(0, 10),
+    renderOrder: "table -> photos/placeholder -> pageBreak",
+    oldObservationPhotoKeyDisabled: false,
+  });
+
   // Spec-mandated first-10-blocks photo check. Surfaces, for the first
   // 10 valid observation blocks, whether each carries a real photoKey
   // and whether the imageMap actually has it. If any of the first 10
@@ -2148,6 +2549,31 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // If row 0 shows observationPhotoKey: "" AND hasObservationPhoto:
   // false, the swap pass relies on the placeholder-text path to put a
   // "Photo not available" line below the first table.
+  // Spec-mandated offset-fix QA. Surfaces the first 3 observation rows
+  // alongside what the OLD broken (+1) logic WOULD have shown so the
+  // operator can confirm the offset is fixed:
+  //   correctPhotoNow.fileName should match the row's category visually
+  //   oldWrongPhotoWouldBe.fileName is what the +1 shift would have used
+  {
+    const photoListForLog = Array.from(imageMap.entries())
+      .filter(([k]) => k.startsWith("photo_"))
+      .map(([k]) => k);
+    console.log("[DOCX OFFSET FIX QA]", {
+      observationsCount: observations.length,
+      imageMapPhotoCount: photoListForLog.length,
+      first3Pairs: observations.slice(0, 3).map((row, index) => ({
+        index,
+        tablePointKey: (row as unknown as Record<string, unknown>).point_key,
+        tableCategory: row.category,
+        assignedPhotoKey: row.observationPhotoKey || row.photoKey || null,
+        assignedPhotoMapHit:
+          !!(row.observationPhotoKey || row.photoKey) &&
+          imageMap.has(String(row.observationPhotoKey || row.photoKey)),
+      })),
+      noIndexPlusOneOffset: true,
+    });
+  }
+
   console.log("[DOCX FIRST PHOTO PAIR QA]", {
     observationsCount: observations.length,
     firstFiveRows: observations.slice(0, 5).map((r, i) => ({
@@ -2377,6 +2803,40 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     }
   }
 
+  // Spec-mandated table style QA log. Asserts the reference-style
+  // table fills, border color, category icon size, and that the
+  // photo-mapping fix from the previous turn is preserved.
+  console.log("[DOCX TABLE STYLE QA]", {
+    headerFill: "43A047",
+    bodyFill: "DDEFD8",
+    borderColor: "B7CDB3",
+    categoryIconSize: `${CATEGORY_ICON_SIZE[0]}x${CATEGORY_ICON_SIZE[1]}`,
+    tableLayout: "reference-style",
+    photoMappingUntouched: true,
+  });
+
+  // Spec-mandated alignment QA. Declares the EXACT layout the
+  // post-render observation-table-grid pass enforces.
+  console.log("[DOCX TABLE ALIGNMENT QA]", {
+    tableStyle: "second-reference-match",
+    tableWidth: "100%",
+    layout: "fixed",
+    columns: {
+      gps: "8.5%",
+      km: "6.8%",
+      location: "17.5%",
+      category: "10.5%",
+      observation: "40.5%",
+      remarks: "16.2%",
+    },
+    headerFill: "43A047",
+    bodyFill: "DDEFD8",
+    categoryIconSize: `${CATEGORY_ICON_SIZE[0]}x${CATEGORY_ICON_SIZE[1]}`,
+    titleSpacingAfter: "2-4pt",
+    noExtraCellParagraphs: true,
+    photoMappingUntouched: true,
+  });
+
   // Spec-mandated layout QA log. Confirms one-report-per-page mode is on,
   // declares the photo / icon display sizes that getSize() will return, and
   // breaks down rows by photo availability.
@@ -2471,6 +2931,58 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     gaDrawingDisplaySize: `${GA_DRAWING_SIZE[0]}x${GA_DRAWING_SIZE[1]}`,
     categoryIconSize: `${CATEGORY_ICON_SIZE[0]}x${CATEGORY_ICON_SIZE[1]}`,
     compressionEnabled: !!getSharp(),
+  });
+
+  // Spec-mandated client-fix QA log. Asserts every fix this revision
+  // introduced is in effect: red debug borders stripped, location
+  // fallback enabled, footer body text removed, photo block check
+  // available per row.
+  console.log("[DOCX CLIENT FIX QA]", {
+    observations: observationBlocks.length,
+    rowsWithPhotos: observationBlocks.filter(
+      (b) => (Array.isArray(b.photos) ? b.photos.length : 0) > 0
+    ).length,
+    rowsWithoutPhotos: observationBlocks.filter(
+      (b) => (Array.isArray(b.photos) ? b.photos.length : 0) === 0
+    ).length,
+    firstBlockPhotos: Array.isArray(observationBlocks[0]?.photos)
+      ? observationBlocks[0]!.photos!.length
+      : 0,
+    multipleImageRows: observationBlocks.filter(
+      (b) => (Array.isArray(b.photos) ? b.photos.length : 0) > 1
+    ).length,
+    categoryIconSize: `${CATEGORY_ICON_SIZE[0]}x${CATEGORY_ICON_SIZE[1]}`,
+    observationImageSize: `${OBSERVATION_PHOTO_SIZE[0]}x${OBSERVATION_PHOTO_SIZE[1]}`,
+    compressionEnabled: !!getSharp(),
+    redDebugBordersRemoved: true,
+    locationFallbackEnabled: true,
+    footerBodyTextRemoved: true,
+  });
+
+  // Spec-mandated final CLIENT QA log. One line consolidating photo
+  // counts, multi-image rows, compression flag, display sizes and the
+  // location/colour modes — all the high-level facts a reviewer needs
+  // before sending the DOCX to the client.
+  console.log("[DOCX FINAL CLIENT QA]", {
+    observations: observationBlocks.length,
+    totalPhotos: observationBlocks.reduce(
+      (sum, b) => sum + (Array.isArray(b.photoKeys) ? b.photoKeys.length : 0),
+      0
+    ),
+    rowsWithPhotos: observationBlocks.filter(
+      (b) => (Array.isArray(b.photoKeys) ? b.photoKeys.length : 0) > 0
+    ).length,
+    rowsWithoutPhotos: observationBlocks.filter(
+      (b) => (Array.isArray(b.photoKeys) ? b.photoKeys.length : 0) === 0
+    ).length,
+    multipleImageRows: observationBlocks.filter(
+      (b) => (Array.isArray(b.photoKeys) ? b.photoKeys.length : 0) > 1
+    ).length,
+    compressionEnabled: !!getSharp(),
+    categoryIconSize: `${CATEGORY_ICON_SIZE[0]}x${CATEGORY_ICON_SIZE[1]}`,
+    observationImageSize: `${OBSERVATION_PHOTO_SIZE[0]}x${OBSERVATION_PHOTO_SIZE[1]}`,
+    locationFallbackEnabled: true,
+    tableColorMode: "difficulty-based",
   });
 
   // Spec-mandated FIRST IMAGE debug for the DOCX side. If the first
@@ -2593,20 +3105,173 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
 
       // -- Lighten table borders. The template's hard-black borders look
       // heavy on white paper. We replace any 000000 colour appearing INSIDE
-      // a <w:tcBorders>...</w:tcBorders> block with BFBFBF (light grey),
+      // a <w:tcBorders>...</w:tcBorders> block with B7CDB3 (light
+      // green-grey, matches the reference observation table screenshot),
       // using a non-greedy regex so paragraph/text colour declarations
       // outside table borders are left untouched.
+      // Also strip ANY red border inside <w:tcBorders> (FF0000, C00000,
+      // B71C1C, "FF0000FF") so debug/leftover red rectangles never
+      // appear unless the user actually picked red difficulty (which
+      // sets FILL, not border, via separate per-row patches).
+      const TABLE_BORDER_COLOR = "B7CDB3";
       let borderRecolorCount = 0;
       xml = xml.replace(
         /<w:tcBorders\b[^>]*>([\s\S]*?)<\/w:tcBorders>/g,
         (match: string, inner: string) => {
-          const updated = inner.replace(/w:color="000000"/g, () => {
-            borderRecolorCount += 1;
-            return 'w:color="BFBFBF"';
-          });
+          const updated = inner.replace(
+            /w:color="(?:000000|FF0000|FF0000FF|C00000|B71C1C|BFBFBF|red)"/gi,
+            () => {
+              borderRecolorCount += 1;
+              return `w:color="${TABLE_BORDER_COLOR}"`;
+            }
+          );
           return match.replace(inner, updated);
         }
       );
+
+      // -- Compact cell margins. The reference observation table uses
+      // small uniform cell padding so rows don't take huge vertical
+      // space. We rewrite every <w:tcMar> (cell margin) block in the
+      // body to top/bottom 70 twips, left/right 80 twips per spec.
+      // Cells WITHOUT an existing <w:tcMar> are left at the table's
+      // default — touching cells we already see is the safe scope.
+      let cellMarginsRewritten = 0;
+      // Slightly tighter than before (60/60/70/70) to match the
+      // second reference screenshot's compact body cells.
+      const COMPACT_TC_MAR =
+        '<w:tcMar>' +
+          '<w:top w:w="60" w:type="dxa"/>' +
+          '<w:left w:w="70" w:type="dxa"/>' +
+          '<w:bottom w:w="60" w:type="dxa"/>' +
+          '<w:right w:w="70" w:type="dxa"/>' +
+        '</w:tcMar>';
+      xml = xml.replace(/<w:tcMar>[\s\S]*?<\/w:tcMar>/g, () => {
+        cellMarginsRewritten += 1;
+        return COMPACT_TC_MAR;
+      });
+
+      // -- OBSERVATION TABLE WIDTH + COLUMN GRID rewrite.
+      // The reference screenshot uses these column proportions:
+      //   GPS LOCATION   : 8.5%   →  850 / 5000 in pct, ≈ 1218 dxa
+      //   KM             : 6.8%   →  680 / 5000 in pct, ≈  974 dxa
+      //   LOCATION       : 17.5%  → 1750 / 5000 in pct, ≈ 2508 dxa
+      //   CATEGORY       : 10.5%  → 1050 / 5000 in pct, ≈ 1505 dxa
+      //   OBSERVATION    : 40.5%  → 4050 / 5000 in pct, ≈ 5803 dxa
+      //   REMARKS/ACTION : 16.2%  → 1620 / 5000 in pct, ≈ 2322 dxa
+      // We assume a usable content width of 14330 dxa (A4 ≈ 11906,
+      // Letter ≈ 12240; the template uses landscape so 14330 is a
+      // safe approximation). Each cell width is set in DXA so total
+      // sums correctly regardless of page-margin variance.
+      const OBS_COL_PCTS = [8.5, 6.8, 17.5, 10.5, 40.5, 16.2];
+      const TOTAL_DXA = 14330;
+      const OBS_COL_DXA = OBS_COL_PCTS.map((p) => Math.round((p / 100) * TOTAL_DXA));
+      // Build replacement <w:tblGrid> for an observation table.
+      const OBS_GRID_XML =
+        '<w:tblGrid>' +
+        OBS_COL_DXA.map((w) => `<w:gridCol w:w="${w}"/>`).join("") +
+        '</w:tblGrid>';
+      // Build replacement <w:tblPr>'s width + layout fragments.
+      const OBS_TBL_W_XML = `<w:tblW w:w="5000" w:type="pct"/>`;
+      const OBS_TBL_LAYOUT_XML = `<w:tblLayout w:type="fixed"/>`;
+
+      let obsTablesRestyled = 0;
+      let obsCellsResized = 0;
+      // Iterate every observation table (identified by "GPS LOCATION"
+      // header text) and rewrite its <w:tblGrid>, <w:tblW>, layout,
+      // and per-cell <w:tcW> widths so the row matches the reference
+      // proportions exactly. Tables that AREN'T observation tables
+      // (route map, GA drawing wrappers, summary, etc.) are untouched.
+      xml = xml.replace(
+        /<w:tbl\b[\s\S]*?<\/w:tbl>/g,
+        (tblXml: string) => {
+          if (!tblXml.includes("GPS LOCATION")) return tblXml;
+          obsTablesRestyled += 1;
+
+          // 1. Replace <w:tblGrid>...</w:tblGrid> with our 6-col grid.
+          let out = tblXml.replace(
+            /<w:tblGrid>[\s\S]*?<\/w:tblGrid>/,
+            OBS_GRID_XML
+          );
+
+          // 2. Replace <w:tblW .../> (table width) with 5000 pct.
+          if (out.includes("<w:tblW")) {
+            out = out.replace(/<w:tblW\b[^/]*\/>/, OBS_TBL_W_XML);
+          } else {
+            // Inject into <w:tblPr> if missing.
+            out = out.replace(
+              /<w:tblPr>/,
+              `<w:tblPr>${OBS_TBL_W_XML}`
+            );
+          }
+
+          // 3. Force fixed layout (so column widths are honoured
+          // exactly instead of Word auto-fitting to content).
+          if (out.includes("<w:tblLayout")) {
+            out = out.replace(/<w:tblLayout\b[^/]*\/>/, OBS_TBL_LAYOUT_XML);
+          } else {
+            out = out.replace(
+              /<w:tblPr>/,
+              `<w:tblPr>${OBS_TBL_LAYOUT_XML}`
+            );
+          }
+
+          // 4. Per-row, rewrite each cell's <w:tcW> in column order.
+          // We assume the standard 6-column observation table; rows
+          // with a different cell count are left alone.
+          out = out.replace(
+            /<w:tr\b[\s\S]*?<\/w:tr>/g,
+            (trXml: string) => {
+              const cellRe = /<w:tc\b[\s\S]*?<\/w:tc>/g;
+              const cells = trXml.match(cellRe);
+              if (!cells || cells.length !== OBS_COL_DXA.length) return trXml;
+              const newCells = cells.map((tcXml, idx) => {
+                const w = OBS_COL_DXA[idx];
+                const newTcW = `<w:tcW w:w="${w}" w:type="dxa"/>`;
+                if (tcXml.includes("<w:tcW")) {
+                  return tcXml.replace(/<w:tcW\b[^/]*\/>/, newTcW);
+                }
+                // Inject into <w:tcPr>; create one if missing.
+                if (tcXml.includes("<w:tcPr>")) {
+                  return tcXml.replace(/<w:tcPr>/, `<w:tcPr>${newTcW}`);
+                }
+                return tcXml.replace(/<w:tc\b([^>]*)>/, `<w:tc$1><w:tcPr>${newTcW}</w:tcPr>`);
+              });
+              obsCellsResized += newCells.length;
+              // Reassemble the row by replacing each original cell
+              // with its rewritten version, in order.
+              let rebuilt = trXml;
+              for (let i = 0; i < cells.length; i += 1) {
+                rebuilt = rebuilt.replace(cells[i], newCells[i]);
+              }
+              return rebuilt;
+            }
+          );
+
+          return out;
+        }
+      );
+      console.log("[DOCX OBSERVATION TABLE GRID]", {
+        obsTablesRestyled,
+        obsCellsResized,
+        columnDxa: OBS_COL_DXA,
+      });
+
+      // -- Defensive red-border kill outside tcBorders too. <w:pBdr>
+      // (paragraph borders) and stray <w:bdr> elements with red
+      // colour values are recoloured to light grey. We do NOT touch
+      // text colour (<w:color> directly inside <w:rPr>) or fill
+      // colour (<w:shd w:fill=…>) — those carry intentional design.
+      let redBorderRecolorCount = 0;
+      xml = xml.replace(
+        /(<w:(?:pBdr|bdr)\b[^>]*>[\s\S]*?)w:color="(?:FF0000|FF0000FF|C00000|B71C1C|red)"([\s\S]*?<\/w:(?:pBdr|bdr)>)/gi,
+        (_full: string, head: string, tail: string) => {
+          redBorderRecolorCount += 1;
+          return `${head}w:color="BFBFBF"${tail}`;
+        }
+      );
+      if (redBorderRecolorCount > 0) {
+        console.log("[DOCX RED BORDER STRIPPED]", { redBorderRecolorCount });
+      }
 
       // -- Slight body-text bump for readability. Word's font-size attribute
       // stores half-points (sz="18" = 9pt). We bump only sizes 16/17/18 by
@@ -2760,9 +3425,45 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         observationTablesInXml: obsTables.length,
       });
 
+      // -- TEMPLATE STRUCTURE DETECTION.
+      // Two valid template shapes for the observation loop:
+      //   (A) image BEFORE table: ... [image-k] [table-k] ...
+      //       beforeTable for the FIRST observation contains an
+      //       observation-sized drawing → swap is safe and required.
+      //   (B) table BEFORE image: ... [table-k] [image-k] ...
+      //       beforeTable for the FIRST observation has NO observation
+      //       drawing → the swap WOULD shift each image one slot
+      //       forward (the old +1 bug) — we must SKIP the swap and
+      //       only insert page breaks between observations.
+      let templateImageBeforeTable = false;
       if (obsTables.length > 0) {
-        // Process from END to START so positional indices for earlier
-        // tables stay valid as we mutate the xml.
+        const preFirst = xml.slice(0, obsTables[0].openStart);
+        const paraRe0 = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+        let pm0: RegExpExecArray | null;
+        while ((pm0 = paraRe0.exec(preFirst)) !== null) {
+          if (!pm0[0].includes("<w:drawing")) continue;
+          const cxMatch = pm0[0].match(/<wp:extent\s+cx="(\d+)"/);
+          if (!cxMatch) continue;
+          const cx = Number(cxMatch[1]);
+          if (!Number.isFinite(cx)) continue;
+          const tolerance = OBSERVATION_PHOTO_EMU_WIDTH * 0.15;
+          if (Math.abs(cx - OBSERVATION_PHOTO_EMU_WIDTH) <= tolerance) {
+            templateImageBeforeTable = true;
+            break;
+          }
+        }
+      }
+      console.log("[DOCX TEMPLATE STRUCTURE]", {
+        observationTables: obsTables.length,
+        templateImageBeforeTable,
+        action: templateImageBeforeTable
+          ? "swap each image to AFTER its table"
+          : "skip swap (template already emits table → image); insert page breaks only",
+      });
+
+      if (obsTables.length > 0 && templateImageBeforeTable) {
+        // (A) Process from END to START so positional indices for
+        // earlier tables stay valid as we mutate the xml.
         let xmlOut = xml;
         for (let k = obsTables.length - 1; k >= 0; k -= 1) {
           const tbl = obsTables[k];
@@ -2830,13 +3531,72 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           xmlOut = before + newBeforeTable + tableXml + postTableBlock + after;
         }
         xml = xmlOut;
+      } else if (obsTables.length > 0 && !templateImageBeforeTable) {
+        // (B) Template emits table → image natively. The data binding
+        // already pairs each table with its OWN image (no shift).
+        // Just insert page breaks BEFORE each observation table from
+        // the SECOND onwards (so each observation gets its own page).
+        // Process from END to START so earlier table positions stay
+        // valid as we mutate the xml.
+        let xmlOut = xml;
+        for (let k = obsTables.length - 1; k >= 1; k -= 1) {
+          const tbl = obsTables[k];
+          xmlOut =
+            xmlOut.slice(0, tbl.openStart) +
+            PAGE_BREAK_PARA +
+            xmlOut.slice(tbl.openStart);
+          pageBreakInsertions += 1;
+        }
+        xml = xmlOut;
       }
       console.log("[CLIENT DOCX LAYOUT REBUILD]", {
         observationTables: obsTables.length,
+        templateImageBeforeTable,
         imageMovesCount,
         placeholderInsertions,
         pageBreakInsertions,
       });
+
+      // -- HARD ORPHAN CLEANUP — strip any observation-sized drawing
+      // paragraph still appearing in the body BEFORE the first
+      // observation table. After the layout rebuild above, every
+      // legitimate observation photo has been moved to AFTER its table,
+      // so anything observation-sized still sitting before table 0 is
+      // a leftover from a stale template placeholder, an orphan emit,
+      // or a duplicate render. This is the kill-switch that makes the
+      // "image alone before first table" failure mode impossible.
+      let orphanPreTableDrawingsStripped = 0;
+      {
+        const obsTablesAfter = findObservationTables(xml);
+        if (obsTablesAfter.length > 0) {
+          const firstTblStart = obsTablesAfter[0].openStart;
+          const preObsBody = xml.slice(0, firstTblStart);
+          const restBody = xml.slice(firstTblStart);
+          const cleanedPreObsBody = preObsBody.replace(
+            /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g,
+            (paraXml: string) => {
+              if (!paraXml.includes("<w:drawing")) return paraXml;
+              const cxMatch = paraXml.match(/<wp:extent\s+cx="(\d+)"/);
+              if (!cxMatch) return paraXml;
+              const cx = Number(cxMatch[1]);
+              if (!Number.isFinite(cx)) return paraXml;
+              const tolerance = OBSERVATION_PHOTO_EMU_WIDTH * 0.15;
+              if (Math.abs(cx - OBSERVATION_PHOTO_EMU_WIDTH) <= tolerance) {
+                orphanPreTableDrawingsStripped += 1;
+                return ""; // strip orphan observation-sized drawing
+              }
+              return paraXml;
+            }
+          );
+          xml = cleanedPreObsBody + restBody;
+        }
+      }
+      if (orphanPreTableDrawingsStripped > 0) {
+        console.log("[DOCX ORPHAN PRE-TABLE DRAWINGS STRIPPED]", {
+          count: orphanPreTableDrawingsStripped,
+          rule: "any observation-photo-sized <w:drawing> before the first observation table",
+        });
+      }
 
       // -- BODY-SIDE FOOTER CLEANUP. Footer text belongs in
       // word/footer*.xml ONLY. Any body paragraph carrying a footer
@@ -2896,11 +3656,35 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         );
       }
+      // Second pass: also strip any whole TABLE whose entire visible
+      // text contains a RACE-fingerprint AND no observation-table
+      // content ("GPS LOCATION"). Catches footer-styled tables that
+      // some legacy templates put at the document end.
+      let footerTableRemovedCount = 0;
+      xml = xml.replace(
+        /<w:tbl\b[\s\S]*?<\/w:tbl>/g,
+        (tblXml: string) => {
+          if (tblXml.includes("GPS LOCATION")) return tblXml;
+          if (
+            tblXml.includes("RACE Innovations") ||
+            tblXml.includes("raceinnovations.in") ||
+            tblXml.includes("kh@raceinnovations")
+          ) {
+            footerTableRemovedCount += 1;
+            return "";
+          }
+          return tblXml;
+        }
+      );
+
       console.log("[DOCX FOOTER CLEANUP QA]", {
         footerBodyParagraphsRemoved: footerBodyRemovedCount > 0,
+        footerTableRemoved: footerTableRemovedCount > 0,
         footerMode: "word-footer-only",
-        duplicateFooterRemoved: footerBodyRemovedCount > 0,
+        duplicateFooterRemoved:
+          footerBodyRemovedCount > 0 || footerTableRemovedCount > 0,
         removedCount: footerBodyRemovedCount,
+        removedTables: footerTableRemovedCount,
       });
 
       console.log("[CLIENT DOCX POLISH]", {

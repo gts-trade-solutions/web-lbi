@@ -135,7 +135,29 @@ async function apiRequestJson(url: string, init: RequestInit = {}) {
     headers: mergedHeaders,
   });
   const data = await parseJsonSafe(res);
-  if (!res.ok) throw new Error(data?.error || "Request failed");
+  if (!res.ok) {
+    // Spec: surface the server's `detail` field (real SQL error)
+    // alongside `error`, with `code`/`sqlState` when present, so the
+    // user-facing alert shows what actually went wrong instead of a
+    // generic "Request failed".
+    const detail =
+      (data && (data.detail || data.error)) || `HTTP ${res.status}`;
+    const codePart = data?.code ? ` [${data.code}]` : "";
+    const sqlStatePart = data?.sqlState ? ` (sqlState ${data.sqlState})` : "";
+    const err = new Error(`${detail}${codePart}${sqlStatePart}`) as Error & {
+      status?: number;
+      detail?: string;
+      code?: string | null;
+      sqlState?: string | null;
+      response?: unknown;
+    };
+    err.status = res.status;
+    err.detail = data?.detail || null;
+    err.code = data?.code || null;
+    err.sqlState = data?.sqlState || null;
+    err.response = data;
+    throw err;
+  }
   return data;
 }
 
@@ -232,7 +254,16 @@ async function uploadReportPhotos(projectId: string, reportId: string, files: Fi
     }),
   });
   const data = await parseJsonSafe(res);
-  if (!res.ok) throw new Error(data?.error || "Failed to save report photos");
+  if (!res.ok) {
+    // Surface the server's actual detail (real SQL error) so the user
+    // sees what failed instead of a generic "Failed to save report photos".
+    console.error("[SAVE REPORT PHOTOS FRONTEND ERROR]", data);
+    const detail =
+      (data && (data.detail || data.error)) || `HTTP ${res.status}`;
+    const codePart = data?.code ? ` [${data.code}]` : "";
+    const sqlStatePart = data?.sqlState ? ` (sqlState ${data.sqlState})` : "";
+    throw new Error(`${detail}${codePart}${sqlStatePart}`);
+  }
 }
 
 function vmFilterLabel(f: VMFilter) {
@@ -1158,6 +1189,15 @@ export default function ProjectReportsPage() {
 
   // ✅ open insert modal after a row (between rows)
   const openInsertModal = (afterReportId: string) => {
+    // Spec-mandated click log. If this never fires, the button's
+    // onClick wiring is broken.
+    console.log("[ADD REPORT CLICK]", {
+      projectId,
+      afterReportId,
+      afterIndex: filteredSortedReports.findIndex((x) => x.id === afterReportId) + 1,
+      afterSortOrder:
+        filteredSortedReports.find((x) => x.id === afterReportId)?.sort_order ?? null,
+    });
     setInsertAfterId(afterReportId);
     setInsertOpen(true);
   };
@@ -1293,20 +1333,55 @@ export default function ProjectReportsPage() {
 
     const nowIso = new Date().toISOString();
 
-    const ins = await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}/reports`, {
-      method: "POST",
-      body: JSON.stringify({
-        user_id: userId,
-        category: payload.category || "Report",
-        description: payload.description || null,
-        remarks_action: payload.remarksAction?.trim() || null,
-        difficulty: payload.difficulty ? payload.difficulty : "green",
-        created_at: nowIso,
-        sort_order: newOrder,
-      }),
-    });
+    let ins: { report?: { id?: string; sort_order?: number } } = {};
+    try {
+      ins = await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}/reports`, {
+        method: "POST",
+        body: JSON.stringify({
+          // afterReportId triggers the API's "shift sort_order +1 for
+          // every following row" branch and fills NOT NULL defaults
+          // from the previous row.
+          afterReportId: afterId,
+          user_id: userId,
+          category: payload.category || "Report",
+          description: payload.description || null,
+          remarks_action: payload.remarksAction?.trim() || null,
+          difficulty: payload.difficulty ? payload.difficulty : "green",
+          created_at: nowIso,
+          sort_order: newOrder,
+        }),
+      });
+    } catch (err: any) {
+      console.error("[ADD REPORT API ERROR]", {
+        projectId,
+        afterReportId: afterId,
+        newOrder,
+        error: err?.message || String(err),
+        detail: err?.detail || null,
+        code: err?.code || null,
+        sqlState: err?.sqlState || null,
+        response: err?.response || null,
+      });
+      throw new Error(err?.message || `Failed to add report: ${String(err)}`);
+    }
 
     const newId = String(ins?.report?.id || "").trim();
+    if (!newId) {
+      console.error("[ADD REPORT API ERROR]", {
+        projectId,
+        afterReportId: afterId,
+        newOrder,
+        error: "API returned no report id",
+        response: ins,
+      });
+      throw new Error("Failed to add report: API returned no report id");
+    }
+    console.log("[ADD REPORT API SUCCESS]", {
+      projectId,
+      afterReportId: afterId,
+      newReportId: newId,
+      newSortOrder: newOrder,
+    });
 
     // ✅ Photos (optional)
     if (newId && payload.files?.length) {

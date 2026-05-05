@@ -737,9 +737,31 @@ export async function POST(request: Request, context: Ctx) {
       // with the canonical public URL keyed off the EXACT reports.id we just
       // saved. Existing rows for the same (report_id, normalised file_name)
       // are removed first so re-imports stay idempotent.
+      // Spec: top-level r.file_name may be a comma-separated string of
+      // multiple filenames for the same observation. Expand here so the
+      // local-upload + s3-lookup branches each iterate over the full
+      // list. r.image_key follows the same shape.
       const refs: Array<{ file_name?: string | null; image_key?: string | null }> = [];
       if (r.file_name || r.image_key) {
-        refs.push({ file_name: r.file_name || null, image_key: r.image_key || null });
+        const splitFn = String(r.file_name || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const splitIk = String(r.image_key || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (splitFn.length <= 1 && splitIk.length <= 1) {
+          refs.push({ file_name: r.file_name || null, image_key: r.image_key || null });
+        } else {
+          const max = Math.max(splitFn.length, splitIk.length, 1);
+          for (let s = 0; s < max; s += 1) {
+            refs.push({
+              file_name: splitFn[s] || splitFn[0] || null,
+              image_key: splitIk[s] || splitIk[0] || null,
+            });
+          }
+        }
       }
       if (Array.isArray(r.image_refs)) {
         for (const x of r.image_refs) {
