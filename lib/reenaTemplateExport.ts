@@ -1155,77 +1155,198 @@ function coordKey(lat: number, lng: number): string {
 }
 
 /**
+ * Throttle Nominatim to ~1 req/sec per their usage policy. We track the
+ * timestamp of the last request and sleep just enough before the next
+ * one to keep the gap >= 1100ms. This prevents the 429 rate-limit
+ * responses that otherwise force fallback to "Near {coords}" cells.
+ */
+let lastNominatimRequestAt = 0;
+async function nominatimThrottle(): Promise<void> {
+  const minGapMs = 1100;
+  const elapsed = Date.now() - lastNominatimRequestAt;
+  if (elapsed < minGapMs) {
+    await new Promise((r) => setTimeout(r, minGapMs - elapsed));
+  }
+  lastNominatimRequestAt = Date.now();
+}
+
+/**
+ * Build a clean, readable location string from Nominatim's structured
+ * address response. This is the KEY fix for highway points: when a
+ * coordinate sits on a road (e.g. AH45 / NH48 / 200 Feet Bypass Rd),
+ * Nominatim's `display_name` field is often empty or just the country,
+ * but the `address` object still contains road / suburb / city / state.
+ * Pick the most useful parts and join them.
+ *
+ * Priority (deduplicated):
+ *   road  →  suburb / neighbourhood  →  village / town / city  →
+ *   county / state_district  →  state  →  country
+ *
+ * Examples:
+ *   "200 Feet Bypass Road, Adayalampattu, Chennai, Tamil Nadu"
+ *   "National Highway 48, Nelamangala, Bengaluru Rural, Karnataka"
+ *   "Mominpur, Kolkata, West Bengal"
+ */
+type NominatimAddress = {
+  road?: string;
+  pedestrian?: string;
+  highway?: string;
+  trunk?: string;
+  primary?: string;
+  motorway?: string;
+  suburb?: string;
+  neighbourhood?: string;
+  hamlet?: string;
+  village?: string;
+  town?: string;
+  city?: string;
+  city_district?: string;
+  county?: string;
+  state_district?: string;
+  state?: string;
+  country?: string;
+};
+function buildLocationFromAddress(addr: NominatimAddress | undefined | null): string {
+  if (!addr || typeof addr !== "object") return "";
+  const road =
+    addr.road ||
+    addr.pedestrian ||
+    addr.motorway ||
+    addr.trunk ||
+    addr.primary ||
+    addr.highway;
+  const locality =
+    addr.suburb ||
+    addr.neighbourhood ||
+    addr.hamlet ||
+    addr.village ||
+    addr.town ||
+    addr.city_district;
+  const city = addr.city || addr.town || addr.village;
+  const district = addr.county || addr.state_district;
+  const state = addr.state;
+  const country = addr.country;
+
+  const parts: string[] = [];
+  if (road) parts.push(road);
+  if (locality && locality !== road) parts.push(locality);
+  if (city && city !== locality && city !== road) parts.push(city);
+  if (district && district !== city && district !== locality) parts.push(district);
+  if (state && state !== district && state !== city) parts.push(state);
+  // Country only if we don't already have city + state — keeps the
+  // string short for typical "City, State" cases.
+  if (country && parts.length < 2) parts.push(country);
+
+  // De-dup case-insensitive while preserving order.
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const p of parts) {
+    const k = p.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    unique.push(p);
+  }
+  return unique.join(", ");
+}
+
+/**
+ * Single Nominatim request at a specific zoom level. Asks for structured
+ * address details so we can build a clean string even when display_name
+ * is empty (common for highway / road-segment points). Returns the
+ * resolved location text on success, null on any failure / no-result /
+ * non-2xx response. Wraps the fetch in a 10 s timeout.
+ */
+async function nominatimReverseAtZoom(
+  lat: number,
+  lng: number,
+  zoom: number
+): Promise<string | null> {
+  await nominatimThrottle();
+  const url =
+    `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
+    `&lat=${encodeURIComponent(String(lat))}` +
+    `&lon=${encodeURIComponent(String(lng))}` +
+    `&zoom=${zoom}` +
+    // Structured address parts — required for highway/road points where
+    // display_name is often empty. Without this, road-only points fall
+    // straight through to the coordinate fallback.
+    `&addressdetails=1`;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 10000);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "lbi-web-export/1.0 (race route export)",
+        Accept: "application/json",
+      },
+      signal: ac.signal,
+    });
+    if (res.status === 429 || res.status === 503) {
+      // Throttled — wait longer and let the caller decide whether to
+      // retry the call.
+      await new Promise((r) => setTimeout(r, 1200));
+      return null;
+    }
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      display_name?: unknown;
+      address?: NominatimAddress;
+    };
+    // 1. Try the structured address first (road + city + state). This
+    //    works for highway points where display_name is empty.
+    const fromAddress = buildLocationFromAddress(json.address);
+    if (fromAddress) return fromAddress;
+    // 2. Fall back to display_name (works for POI / building points).
+    const dn = typeof json?.display_name === "string" ? json.display_name.trim() : "";
+    return dn || null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Reverse-geocode lat/lng to a human-readable place name. Uses OpenStreetMap
- * Nominatim. Failures and rate-limits trigger ONE retry with backoff.
- * Returns null only after both attempts fail. Callers MUST also cache the
- * result in MySQL (resolved_location) so we don't hammer the public
- * service across exports.
+ * Nominatim with an escalating zoom-fallback strategy:
+ *   1. zoom 14 (~ neighbourhood / village) — best precision
+ *   2. zoom 10 (~ city / district)         — fallback if 14 returns nothing
+ * Each zoom is attempted up to 2 times (so up to 4 total attempts) so a
+ * transient failure or 429 doesn't immediately collapse to the coordinate
+ * fallback. Results are cached per-coordinate; callers MUST also cache the
+ * result in MySQL (resolved_location) so subsequent exports skip the API.
  */
 async function reverseGeocodeLocation(lat: number, lng: number): Promise<string | null> {
   const key = coordKey(lat, lng);
   if (reverseGeocodeCache.has(key)) return reverseGeocodeCache.get(key) ?? null;
 
-  const url =
-    `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
-    `&lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lng))}&zoom=14`;
-  const TIMEOUT_MS = 10000;
-  const MAX_ATTEMPTS = 2;
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const ZOOM_LEVELS = [14, 10];
+  const ATTEMPTS_PER_ZOOM = 2;
 
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-    try {
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
-      let res: Response;
-      try {
-        res = await fetch(url, {
-          headers: {
-            "User-Agent": "lbi-web-export/1.0 (race route export)",
-            Accept: "application/json",
-          },
-          signal: ac.signal,
-        });
-      } finally {
-        clearTimeout(timer);
+  for (const zoom of ZOOM_LEVELS) {
+    for (let attempt = 0; attempt < ATTEMPTS_PER_ZOOM; attempt += 1) {
+      const name = await nominatimReverseAtZoom(lat, lng, zoom);
+      if (name) {
+        reverseGeocodeCache.set(key, name);
+        return name;
       }
-      if (res.status === 429 || res.status === 503) {
-        // Rate-limited / unavailable — wait, then retry once.
-        if (attempt + 1 < MAX_ATTEMPTS) {
-          console.warn("[export location] nominatim throttled:", res.status, "retrying");
-          await sleep(1200);
-          continue;
-        }
-        console.warn("[export location] nominatim throttled and out of retries:", res.status);
-        break;
-      }
-      if (!res.ok) {
-        console.warn("[export location] nominatim non-200:", res.status, "attempt", attempt + 1);
-        if (attempt + 1 < MAX_ATTEMPTS) {
-          await sleep(800);
-          continue;
-        }
-        break;
-      }
-      const json = (await res.json()) as { display_name?: unknown };
-      const name = typeof json?.display_name === "string" ? json.display_name.trim() : "";
-      const result = name || null;
-      reverseGeocodeCache.set(key, result);
-      return result;
-    } catch (err) {
-      console.warn(
-        "[export location] reverseGeocodeLocation attempt",
-        attempt + 1,
-        "failed:",
-        (err as Error)?.message || err
-      );
-      if (attempt + 1 < MAX_ATTEMPTS) {
-        await sleep(800);
+      if (attempt + 1 < ATTEMPTS_PER_ZOOM) {
+        await new Promise((r) => setTimeout(r, 600));
       }
     }
+    console.warn(
+      "[export location] nominatim no-result at zoom",
+      zoom,
+      "for",
+      lat,
+      lng,
+      "— trying broader zoom"
+    );
   }
 
-  // All attempts failed. Cache null so the SAME coordinate doesn't keep
-  // retrying inside this export run.
+  // All zoom levels and attempts failed. Cache null so the SAME
+  // coordinate doesn't keep retrying inside this export run.
+  console.warn("[export location] reverseGeocodeLocation exhausted all zoom fallbacks for", lat, lng);
   reverseGeocodeCache.set(key, null);
   return null;
 }
@@ -1243,14 +1364,129 @@ function isCoordinateOnlyLocation(value: unknown): boolean {
 }
 
 /**
+ * Pull just the city-level name out of a Nominatim address response,
+ * preferring (city → town → village → suburb → county → state).
+ * Used to build the route corridor label "From X to Y".
+ */
+function pickCityName(addr: NominatimAddress | undefined | null): string {
+  if (!addr) return "";
+  return (
+    addr.city ||
+    addr.town ||
+    addr.village ||
+    addr.suburb ||
+    addr.neighbourhood ||
+    addr.hamlet ||
+    addr.county ||
+    addr.state_district ||
+    addr.state ||
+    ""
+  );
+}
+
+/**
+ * Reverse-geocode JUST a city-level name (used by the corridor builder).
+ * Asks Nominatim at zoom 12 (city / town granularity) so we get a real
+ * settlement name even when the point sits on a highway between towns.
+ * Returns "" on failure.
+ */
+async function reverseGeocodeCity(lat: number, lng: number): Promise<string> {
+  await nominatimThrottle();
+  const url =
+    `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
+    `&lat=${encodeURIComponent(String(lat))}` +
+    `&lon=${encodeURIComponent(String(lng))}` +
+    `&zoom=12&addressdetails=1`;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 10000);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "lbi-web-export/1.0 (race route export)",
+        Accept: "application/json",
+      },
+      signal: ac.signal,
+    });
+    if (!res.ok) return "";
+    const json = (await res.json()) as { address?: NominatimAddress };
+    return pickCityName(json?.address);
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Build a route corridor label like "Highway from Porur to Ambattur"
+ * by geocoding the FIRST and LAST report coordinates of a project to
+ * city names. Used as a smart fallback in resolveReportLocation when
+ * a mid-route point doesn't reverse-geocode (typically a highway
+ * stretch between two known cities).
+ *
+ * Returns "" when the corridor can't be built (no coords, both endpoints
+ * geocode to the same place, or both fail).
+ */
+export type RouteCorridor = {
+  fromCity: string;
+  toCity: string;
+  label: string; // ready-to-use display string
+};
+async function buildRouteCorridor(reports: Row[]): Promise<RouteCorridor | null> {
+  // Find the first and last reports with valid coordinates.
+  let firstWithCoords: Row | null = null;
+  let lastWithCoords: Row | null = null;
+  for (const r of reports) {
+    if (pickLat(r) !== null && pickLng(r) !== null) {
+      if (!firstWithCoords) firstWithCoords = r;
+      lastWithCoords = r;
+    }
+  }
+  if (!firstWithCoords || !lastWithCoords || firstWithCoords === lastWithCoords) {
+    return null;
+  }
+  const fromLat = pickLat(firstWithCoords);
+  const fromLng = pickLng(firstWithCoords);
+  const toLat = pickLat(lastWithCoords);
+  const toLng = pickLng(lastWithCoords);
+  if (fromLat === null || fromLng === null || toLat === null || toLng === null) {
+    return null;
+  }
+  const [fromCity, toCity] = await Promise.all([
+    reverseGeocodeCity(fromLat, fromLng),
+    reverseGeocodeCity(toLat, toLng),
+  ]);
+  if (!fromCity && !toCity) return null;
+  // Same city at both ends → just show the city, not "X to X"
+  if (fromCity && toCity && fromCity.toLowerCase() === toCity.toLowerCase()) {
+    return { fromCity, toCity, label: `${fromCity} area highway` };
+  }
+  // Only one endpoint resolved → show what we have
+  if (!fromCity || !toCity) {
+    return { fromCity, toCity, label: `Near ${fromCity || toCity} highway` };
+  }
+  return {
+    fromCity,
+    toCity,
+    label: `Highway from ${fromCity} to ${toCity}`,
+  };
+}
+
+/**
  * Resolve the LOCATION cell value for one report. Order:
  *   1. existing stored value (location, address, resolved_location, ...)
  *      — but ONLY if it's not a coords-only string
  *   2. reverse-geocoded name from coordinates (cached back into MySQL)
- *   3. coordinate fallback "lat, lng"
- *   4. "-"
+ *   3. ROUTE CORRIDOR fallback ("Highway from {start} to {end}") so
+ *      mid-highway points show meaningful context instead of coords
+ *   4. coordinate fallback "lat, lng" (only when corridor unavailable)
+ *   5. "-"
  */
-async function resolveReportLocation(r: Row, hasResolvedColumn: boolean): Promise<string> {
+async function resolveReportLocation(
+  r: Row,
+  hasResolvedColumn: boolean,
+  corridor: RouteCorridor | null
+): Promise<string> {
   const existing = getExistingLocation(r);
   if (existing && !isCoordinateOnlyLocation(existing)) return existing;
   const lat = pickLat(r);
@@ -1274,11 +1510,16 @@ async function resolveReportLocation(r: Row, hasResolvedColumn: boolean): Promis
     }
     return resolved;
   }
-  // Coordinate fallback so the cell never says "-" when a coordinate exists.
-  // Use the same DMS-style format as the GPS columns for readability.
+  // Geocode failed — show the route corridor label if we have one. This
+  // tells the reader "this point is on the highway from X to Y" instead
+  // of dumping raw coordinates.
+  if (corridor && corridor.label) {
+    return corridor.label;
+  }
+  // Last resort: clean decimal-degree coordinates so the cell isn't blank.
   const latDir: "N" | "S" = lat >= 0 ? "N" : "S";
   const lngDir: "E" | "W" = lng >= 0 ? "E" : "W";
-  return `Near ${formatLatLine(latDir, lat)}, ${formatLatLine(lngDir, lng)}`;
+  return `${Math.abs(lat).toFixed(4)}° ${latDir}, ${Math.abs(lng).toFixed(4)}° ${lngDir}`;
 }
 
 async function ensureGaDrawingsTable() {
@@ -1390,6 +1631,19 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     hasResolvedLocationColumn = Array.isArray(cols) && cols.length > 0;
   } catch {
     hasResolvedLocationColumn = false;
+  }
+
+  // Build a route-corridor label once per export ("Highway from {start}
+  // to {end}") so highway points that don't reverse-geocode show
+  // meaningful context instead of raw coordinates. Geocodes only TWO
+  // points (the first and last reports with coordinates) so this is
+  // cheap regardless of project size.
+  let routeCorridor: RouteCorridor | null = null;
+  try {
+    routeCorridor = await buildRouteCorridor(reports);
+    console.log("[export route corridor]", routeCorridor || "(unavailable)");
+  } catch (err) {
+    console.warn("[export route corridor] build failed:", err);
   }
 
   // ----- Step 4: Photos.
@@ -2190,7 +2444,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     // LOCATION uses (1) any stored value, then (2) reverse-geocoded name
     // (cached into reports.resolved_location), then (3) coordinate fallback.
     const dbLocation = getExistingLocation(r);
-    const locationText = await resolveReportLocation(r, hasResolvedLocationColumn);
+    const locationText = await resolveReportLocation(r, hasResolvedLocationColumn, routeCorridor);
     // Spec-mandated location-source log. coords-only DB strings are
     // classified by their FINAL outcome — if the resolver succeeded
     // in reverse-geocoding past the coords-only DB value, source is
