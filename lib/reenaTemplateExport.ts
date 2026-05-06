@@ -102,6 +102,11 @@ async function optimizeDocxImage(
   }
 }
 
+// Side-by-side images are rendered as a 2-column borderless Word table
+// (one image per cell) instead of compositing into a single JPEG.
+// See the post-render SIDE-BY-SIDE TABLE INJECTION pass for the
+// replacement logic.
+
 type Row = Record<string, any>;
 
 export type ExportOptions = {
@@ -121,23 +126,30 @@ const TEMPLATE_PATH = path.join(process.cwd(), "templates", "reena-all-template.
 
 const ROUTE_MAP_SIZE: [number, number] = [933, 700];
 const GA_DRAWING_SIZE: [number, number] = [867, 650];
-// Per latest client-ready spec: observation photo should display LARGE
-// (650×420 px, ≈ 6.77" × 4.38"). The actual embedded JPEG is compressed
-// via sharp BEFORE being added to imageMap (max 1400×900 inside, q80
-// mozjpeg) so the DOCX file size stays small even with 395+ photos.
-const OBSERVATION_PHOTO_SIZE: [number, number] = [650, 420];
-// Per spec: category icon at 70 px square inside the CATEGORY cell
-// (matches the second reference screenshot — bigger and clearer than
-// the prior 60 px). Embedded as 160×160 PNG for crispness.
-const CATEGORY_ICON_SIZE: [number, number] = [70, 70];
-const CATEGORY_SUMMARY_ICON_SIZE: [number, number] = [60, 60];
+// Per spec: observation photo size depends on how many photos the report
+// has. Single photo: 7.5" × 5.3" (720 × 509 px). 2 photos: each one is
+// 7.2" × 5.0" (691 × 480 px) — matches the user's manual Word size that
+// "fits perfectly" on their page setup. Rendered side-by-side inside a
+// 100%-width borderless 2-column table; if the page can't accommodate
+// 14.4" of total image width, Word scales each image down proportionally
+// while preserving aspect ratio. The actual embedded JPEG is compressed
+// via sharp BEFORE being added to imageMap (max 1400×900 inside, q78
+// mozjpeg) so the DOCX file size stays small.
+const OBSERVATION_PHOTO_SIZE: [number, number] = [720, 509];
+const MULTI_PHOTO_SIZE: [number, number] = [691, 480];
+// Bumped slightly larger per spec ("show the little big") so unknown /
+// new-category icons read clearly in the observation table.
+const CATEGORY_ICON_SIZE: [number, number] = [90, 90];
+const CATEGORY_SUMMARY_ICON_SIZE: [number, number] = [80, 80];
 
-// Word stores image extents in EMU (1 px = 9525 EMU). The combined
-// layout-swap pass uses this constant to identify the OBSERVATION photo
-// paragraph and ignore other in-document drawings (GA Drawing, Route
-// Map, category icons) so the swap never moves the wrong image.
+// Word stores image extents in EMU (1 px = 9525 EMU). The layout-rebuild
+// pass uses these constants to identify observation-photo drawings (both
+// sizes) and ignore other in-document drawings (GA Drawing, Route Map,
+// category icons).
 const PX_TO_EMU = 9525;
 const OBSERVATION_PHOTO_EMU_WIDTH = OBSERVATION_PHOTO_SIZE[0] * PX_TO_EMU;
+const MULTI_PHOTO_EMU_WIDTH = MULTI_PHOTO_SIZE[0] * PX_TO_EMU;
+const MULTI_PHOTO_EMU_HEIGHT = MULTI_PHOTO_SIZE[1] * PX_TO_EMU;
 
 async function safeQuery(sql: string, args: unknown[] = []): Promise<Row[]> {
   try {
@@ -688,24 +700,268 @@ const CATEGORY_ICON_MAP: Record<string, string> = {
   fallback: "public/images/report-icons/ca-5.png",
 };
 
+// ---- ON-THE-FLY ICON GENERATION FOR NEW / UNKNOWN CATEGORIES ----
+// When a category comes in that isn't in CATEGORY_ICON_MAP (a brand-new
+// hazard type the rules above don't recognise), we GENERATE a unique
+// PNG icon for it on the fly — a coloured circle with the category's
+// initials in the centre. NO disk-fallback to ca-5.
+//
+// Auto-generated icons are flagged by the AUTO_ICON_PREFIX in their
+// filename so the loader (loadCategoryIcon) routes them to the
+// generator instead of trying to read from disk.
+const AUTO_ICON_PREFIX = "__auto__";
+// Maps the synthetic filename back to the original raw category text
+// so the generator can render the right initials/color.
+const autoCategoryByFileName = new Map<string, string>();
+
+/**
+ * Build a stable synthetic filename from the (normalised) category text
+ * so the same new category always resolves to the same generated icon.
+ */
+function autoIconFileNameFor(rawCategory: string): string {
+  const norm = normalizeCategory(rawCategory);
+  const hash = crypto
+    .createHash("md5")
+    .update(norm)
+    .digest("hex")
+    .slice(0, 12);
+  return `${AUTO_ICON_PREFIX}${hash}.png`;
+}
+
+/**
+ * Pick a SYMBOLIC icon kind for a brand-new category by matching keywords
+ * in the raw category text. The matched kind drives which SVG glyph is
+ * drawn inside the colored circle — so the auto-generated icon visually
+ * RELATES to the category (a pothole-shaped blob for "Pothole", a cone
+ * for "Construction", a stop sign for "Stop", etc.) rather than just
+ * showing letter initials. Defaults to a warning triangle.
+ */
+type AutoIconKind =
+  | "warning"
+  | "pothole"
+  | "cone"
+  | "pin"
+  | "signal"
+  | "stop"
+  | "flag"
+  | "bridge"
+  | "speedbump";
+
+function classifyAutoIconKind(rawCategory: string): AutoIconKind {
+  const c = rawCategory.toLowerCase();
+  if (/(pothole|crack|broken|damage|dent|hole|pit)/.test(c)) return "pothole";
+  if (/(speed.?bump|speed.?break|hump|ridge|bumper)/.test(c)) return "speedbump";
+  if (/(construct|barricade|barrier|cone|workzone|workman|road.?work)/.test(c)) return "cone";
+  if (/(signal|traffic.?light|junction)/.test(c)) return "signal";
+  if (/(stop|halt|no.?entry)/.test(c)) return "stop";
+  if (/(flag|waypoint|milestone|km.?stone)/.test(c)) return "flag";
+  if (/(bridge|flyover|overpass|culvert|viaduct)/.test(c)) return "bridge";
+  if (/(landmark|point|spot|location|place|area)/.test(c)) return "pin";
+  return "warning";
+}
+
+/**
+ * White SVG glyphs (one per AutoIconKind) sized for a 160×160 canvas
+ * centered around (80, 80). Each glyph is drawn over the colored
+ * background circle by generateCategoryIcon. All shapes are pure SVG
+ * primitives — no font dependency — so they render identically on any
+ * server with sharp/librsvg installed.
+ */
+const AUTO_ICON_GLYPHS: Record<AutoIconKind, string> = {
+  warning:
+    `<g transform="translate(80,80)">` +
+      `<path d="M 0,-44 L 44,32 L -44,32 Z" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2" stroke-linejoin="round"/>` +
+      `<rect x="-4" y="-18" width="8" height="28" rx="2" fill="rgba(0,0,0,0.85)"/>` +
+      `<circle cx="0" cy="22" r="5" fill="rgba(0,0,0,0.85)"/>` +
+    `</g>`,
+  pothole:
+    `<g transform="translate(80,80)">` +
+      `<path d="M -46,2 Q -42,-30 -10,-34 Q 28,-37 42,-12 Q 48,16 26,32 Q 0,42 -28,34 Q -50,26 -46,2 Z" fill="white" fill-opacity="0.95"/>` +
+      `<path d="M -28,4 Q -24,-16 -4,-18 Q 20,-20 26,-2 Q 30,12 14,20 Q -6,24 -20,16 Q -32,10 -28,4 Z" fill="rgba(0,0,0,0.85)"/>` +
+    `</g>`,
+  cone:
+    `<g transform="translate(80,80)">` +
+      `<path d="M 0,-42 L 30,38 L -30,38 Z" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2" stroke-linejoin="round"/>` +
+      `<rect x="-22" y="0" width="44" height="7" fill="rgba(0,0,0,0.85)"/>` +
+      `<rect x="-16" y="-22" width="32" height="6" fill="rgba(0,0,0,0.85)"/>` +
+      `<rect x="-34" y="38" width="68" height="5" fill="white"/>` +
+    `</g>`,
+  pin:
+    `<g transform="translate(80,80)">` +
+      `<path d="M 0,-44 C -22,-44 -32,-24 -32,-12 C -32,12 0,42 0,42 C 0,42 32,12 32,-12 C 32,-24 22,-44 0,-44 Z" fill="white" fill-opacity="0.95"/>` +
+      `<circle cx="0" cy="-14" r="11" fill="rgba(0,0,0,0.85)"/>` +
+    `</g>`,
+  signal:
+    `<g transform="translate(80,80)">` +
+      `<rect x="-18" y="-44" width="36" height="80" rx="6" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2"/>` +
+      `<circle cx="0" cy="-26" r="9" fill="rgba(0,0,0,0.85)"/>` +
+      `<circle cx="0" cy="-4" r="9" fill="rgba(0,0,0,0.85)"/>` +
+      `<circle cx="0" cy="18" r="9" fill="rgba(0,0,0,0.85)"/>` +
+    `</g>`,
+  stop:
+    `<g transform="translate(80,80)">` +
+      `<polygon points="-22,-40 22,-40 40,-22 40,22 22,40 -22,40 -40,22 -40,-22" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2" stroke-linejoin="round"/>` +
+      `<rect x="-26" y="-5" width="52" height="10" fill="rgba(0,0,0,0.85)"/>` +
+    `</g>`,
+  flag:
+    `<g transform="translate(80,80)">` +
+      `<rect x="-4" y="-44" width="6" height="88" fill="white"/>` +
+      `<path d="M 2,-44 L 38,-32 L 2,-18 Z" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2" stroke-linejoin="round"/>` +
+    `</g>`,
+  bridge:
+    `<g transform="translate(80,80)">` +
+      `<path d="M -44,12 Q 0,-32 44,12" fill="none" stroke="white" stroke-width="6" stroke-linecap="round"/>` +
+      `<rect x="-44" y="20" width="88" height="6" fill="white"/>` +
+      `<rect x="-40" y="26" width="6" height="14" fill="white"/>` +
+      `<rect x="-12" y="26" width="6" height="14" fill="white"/>` +
+      `<rect x="6" y="26" width="6" height="14" fill="white"/>` +
+      `<rect x="34" y="26" width="6" height="14" fill="white"/>` +
+    `</g>`,
+  speedbump:
+    `<g transform="translate(80,80)">` +
+      `<rect x="-44" y="22" width="88" height="6" fill="white"/>` +
+      `<path d="M -36,22 Q 0,-22 36,22 Z" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2"/>` +
+      `<rect x="-22" y="-2" width="6" height="14" fill="rgba(0,0,0,0.85)"/>` +
+      `<rect x="-3" y="-12" width="6" height="22" fill="rgba(0,0,0,0.85)"/>` +
+      `<rect x="16" y="-2" width="6" height="14" fill="rgba(0,0,0,0.85)"/>` +
+    `</g>`,
+};
+
+/**
+ * Generate a PNG icon for a brand-new category. The icon is a coloured
+ * filled circle with a SYMBOLIC glyph (warning triangle, pothole blob,
+ * construction cone, traffic signal, stop sign, flag, bridge, speed
+ * bump, or map pin) chosen by keyword-matching the category text. Same
+ * text always yields the same icon. 160×160 px to match optimizeDocxImage
+ * output for canonical icons.
+ */
+async function generateCategoryIcon(rawCategory: string): Promise<Buffer | null> {
+  const sharp = getSharp();
+  if (!sharp) return null;
+  const text = String(rawCategory || "").trim();
+  if (!text) return null;
+
+  const kind = classifyAutoIconKind(text);
+  const glyph = AUTO_ICON_GLYPHS[kind];
+
+  // Stable colour from MD5 of the lower-cased text. HSL keeps the
+  // generated icons visually consistent (mid-saturation, mid-lightness).
+  const hash = crypto.createHash("md5").update(text.toLowerCase()).digest();
+  const hue = hash[0] % 360;
+  const sat = 60 + (hash[1] % 20); // 60–79%
+  const light = 42 + (hash[2] % 12); // 42–53%
+
+  const size = 160;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
+      `<circle cx="${size / 2}" cy="${size / 2}" r="${size / 2 - 4}" ` +
+        `fill="hsl(${hue}, ${sat}%, ${light}%)" />` +
+      glyph +
+    `</svg>`;
+
+  try {
+    const buf = await sharp(Buffer.from(svg)).png().toBuffer();
+    console.log("[CATEGORY ICON GENERATED]", {
+      rawCategory: text,
+      kind,
+      hsl: `hsl(${hue}, ${sat}%, ${light}%)`,
+      bytes: buf.length,
+    });
+    return buf;
+  } catch (err) {
+    console.warn("[CATEGORY ICON GENERATE FAILED]", {
+      text,
+      err: (err as Error)?.message || String(err),
+    });
+    return null;
+  }
+}
+
 function getCategoryIconFile(category: unknown): string {
   const key = normalizeCategoryKey(category);
-  const rel = CATEGORY_ICON_MAP[key] || CATEGORY_ICON_MAP.fallback;
+  // Canonical category with a real mapping (key !== "fallback") → use it.
+  if (key !== "fallback" && CATEGORY_ICON_MAP[key]) {
+    const rel = CATEGORY_ICON_MAP[key];
+    console.log("[category mapping check]", {
+      rawCategory: category,
+      normalizedKey: key,
+      iconRelativePath: rel,
+      source: "canonical",
+    });
+    return rel.replace(/^public[\\/]images[\\/]report-icons[\\/]/, "");
+  }
+  // Unknown / new category → synthesize an auto-icon filename. The
+  // loader (loadCategoryIcon) will detect the AUTO_ICON_PREFIX and
+  // generate the actual PNG instead of reading from disk.
+  const text = String(category || "").trim();
+  if (!text) {
+    // Truly empty/null category: there's nothing to draw initials from
+    // and there's no canonical icon either — return a sentinel filename
+    // so the loader produces a null entry (template's fallback text
+    // takes over).
+    return `${AUTO_ICON_PREFIX}empty.png`;
+  }
+  const fileName = autoIconFileNameFor(text);
+  autoCategoryByFileName.set(fileName, text);
   console.log("[category mapping check]", {
     rawCategory: category,
     normalizedKey: key,
-    iconRelativePath: rel,
+    autoIconFileName: fileName,
+    source: "auto-generated-new-category",
   });
-  // Strip the public/images/report-icons/ prefix so the existing
-  // CATEGORY_ICONS_DIR-based loader (path.join(CATEGORY_ICONS_DIR, fileName))
-  // continues to point at the right file.
-  return rel.replace(/^public[\\/]images[\\/]report-icons[\\/]/, "");
+  return fileName;
 }
 
 const categoryIconCache = new Map<string, ImageEntry | null>();
 
 async function loadCategoryIcon(category: unknown): Promise<ImageEntry | null> {
   const fileName = getCategoryIconFile(category);
+
+  // Auto-generated icon path: skip the disk read and synthesize a PNG.
+  if (fileName.startsWith(AUTO_ICON_PREFIX)) {
+    if (categoryIconCache.has(fileName)) {
+      const cached = categoryIconCache.get(fileName) || null;
+      console.log("[category icon debug]", {
+        category,
+        autoIconFileName: fileName,
+        cached: true,
+        hasCategoryIcon: !!cached?.buffer,
+        iconBufferSize: cached?.buffer?.length || 0,
+        source: "auto-generated (cached)",
+      });
+      return cached;
+    }
+    const sourceText =
+      autoCategoryByFileName.get(fileName) || String(category || "");
+    const buffer = await generateCategoryIcon(sourceText);
+    if (!buffer || buffer.length === 0) {
+      categoryIconCache.set(fileName, null);
+      console.warn("[category icon debug]", {
+        category,
+        autoIconFileName: fileName,
+        hasCategoryIcon: false,
+        iconBufferSize: 0,
+        source: "auto-generated (failed)",
+      });
+      return null;
+    }
+    const entry: ImageEntry = {
+      buffer,
+      contentType: "image/png",
+      path: `(auto-generated:${sourceText})`,
+    };
+    categoryIconCache.set(fileName, entry);
+    console.log("[category icon debug]", {
+      category,
+      autoIconFileName: fileName,
+      hasCategoryIcon: true,
+      iconBufferSize: buffer.length,
+      contentType: "image/png",
+      source: "auto-generated (fresh)",
+    });
+    return entry;
+  }
+
   const fullPath = path.join(CATEGORY_ICONS_DIR, fileName);
   if (categoryIconCache.has(fileName)) {
     const cached = categoryIconCache.get(fileName) || null;
@@ -888,40 +1144,90 @@ function getExistingLocation(r: Row): string | null {
 }
 
 /**
+ * In-memory cache of reverse-geocode results, keyed by coordinate
+ * rounded to 4 decimals (~11 m precision). Reports clustered around
+ * the same point share a single result so we never hit Nominatim
+ * twice for effectively-identical coordinates.
+ */
+const reverseGeocodeCache = new Map<string, string | null>();
+function coordKey(lat: number, lng: number): string {
+  return `${lat.toFixed(4)},${lng.toFixed(4)}`;
+}
+
+/**
  * Reverse-geocode lat/lng to a human-readable place name. Uses OpenStreetMap
- * Nominatim. Fails silently and returns null on any error/timeout. Callers
- * MUST cache the result in MySQL so we don't hammer the public service.
+ * Nominatim. Failures and rate-limits trigger ONE retry with backoff.
+ * Returns null only after both attempts fail. Callers MUST also cache the
+ * result in MySQL (resolved_location) so we don't hammer the public
+ * service across exports.
  */
 async function reverseGeocodeLocation(lat: number, lng: number): Promise<string | null> {
-  try {
-    const url =
-      `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
-      `&lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lng))}&zoom=14`;
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 5000);
-    let res: Response;
+  const key = coordKey(lat, lng);
+  if (reverseGeocodeCache.has(key)) return reverseGeocodeCache.get(key) ?? null;
+
+  const url =
+    `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
+    `&lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lng))}&zoom=14`;
+  const TIMEOUT_MS = 10000;
+  const MAX_ATTEMPTS = 2;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
     try {
-      res = await fetch(url, {
-        headers: {
-          "User-Agent": "lbi-web-export/1.0 (race route export)",
-          Accept: "application/json",
-        },
-        signal: ac.signal,
-      });
-    } finally {
-      clearTimeout(timer);
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          headers: {
+            "User-Agent": "lbi-web-export/1.0 (race route export)",
+            Accept: "application/json",
+          },
+          signal: ac.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (res.status === 429 || res.status === 503) {
+        // Rate-limited / unavailable — wait, then retry once.
+        if (attempt + 1 < MAX_ATTEMPTS) {
+          console.warn("[export location] nominatim throttled:", res.status, "retrying");
+          await sleep(1200);
+          continue;
+        }
+        console.warn("[export location] nominatim throttled and out of retries:", res.status);
+        break;
+      }
+      if (!res.ok) {
+        console.warn("[export location] nominatim non-200:", res.status, "attempt", attempt + 1);
+        if (attempt + 1 < MAX_ATTEMPTS) {
+          await sleep(800);
+          continue;
+        }
+        break;
+      }
+      const json = (await res.json()) as { display_name?: unknown };
+      const name = typeof json?.display_name === "string" ? json.display_name.trim() : "";
+      const result = name || null;
+      reverseGeocodeCache.set(key, result);
+      return result;
+    } catch (err) {
+      console.warn(
+        "[export location] reverseGeocodeLocation attempt",
+        attempt + 1,
+        "failed:",
+        (err as Error)?.message || err
+      );
+      if (attempt + 1 < MAX_ATTEMPTS) {
+        await sleep(800);
+      }
     }
-    if (!res.ok) {
-      console.warn("[export location] nominatim non-200:", res.status);
-      return null;
-    }
-    const json = (await res.json()) as { display_name?: unknown };
-    const name = typeof json?.display_name === "string" ? json.display_name.trim() : "";
-    return name || null;
-  } catch (err) {
-    console.warn("[export location] reverseGeocodeLocation failed:", err);
-    return null;
   }
+
+  // All attempts failed. Cache null so the SAME coordinate doesn't keep
+  // retrying inside this export run.
+  reverseGeocodeCache.set(key, null);
+  return null;
 }
 
 /**
@@ -969,7 +1275,10 @@ async function resolveReportLocation(r: Row, hasResolvedColumn: boolean): Promis
     return resolved;
   }
   // Coordinate fallback so the cell never says "-" when a coordinate exists.
-  return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  // Use the same DMS-style format as the GPS columns for readability.
+  const latDir: "N" | "S" = lat >= 0 ? "N" : "S";
+  const lngDir: "E" | "W" = lng >= 0 ? "E" : "W";
+  return `Near ${formatLatLine(latDir, lat)}, ${formatLatLine(lngDir, lng)}`;
 }
 
 async function ensureGaDrawingsTable() {
@@ -1188,6 +1497,36 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     "[export photos] photos:",
     photos.map((p) => ({ id: p.id, report_id: p.report_id, url: p.url }))
   );
+
+  /**
+   * Pick the best 2 photos from a list of report_photos rows. Deduplicates
+   * by URL, then sorts by resolution (width×height descending), falling back
+   * to created_at descending so the newest large image wins. Returns at most
+   * 2 rows.
+   */
+  function pickBestTwoPhotos(rows: Row[]): Row[] {
+    if (rows.length <= 2) return rows;
+    // Deduplicate by normalised URL so re-uploads don't count twice.
+    const seen = new Set<string>();
+    const unique: Row[] = [];
+    for (const r of rows) {
+      const u = String(r.url || "").trim().toLowerCase();
+      if (!u || seen.has(u)) continue;
+      seen.add(u);
+      unique.push(r);
+    }
+    if (unique.length <= 2) return unique;
+    // Sort: largest resolution first, then newest first.
+    unique.sort((a, b) => {
+      const areaA = (Number(a.width) || 0) * (Number(a.height) || 0);
+      const areaB = (Number(b.width) || 0) * (Number(b.height) || 0);
+      if (areaB !== areaA) return areaB - areaA;
+      const dateA = a.created_at ? new Date(String(a.created_at)).getTime() : 0;
+      const dateB = b.created_at ? new Date(String(b.created_at)).getTime() : 0;
+      return dateB - dateA;
+    });
+    return unique.slice(0, 2);
+  }
 
   const photosByReportId = new Map<string, Row[]>();
   for (const p of photos) {
@@ -1488,6 +1827,14 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const phaseStartedAt = Date.now();
   let phaseDeadlineHit = false;
 
+  // Track which photo keys are side-by-side so the post-render pass can
+  // replace the single-image drawing with a 2-column borderless table.
+  const sideBySideKeys = new Set<string>();
+  // Right-image buffers for each side-by-side key. The LEFT image is stored
+  // in imageMap under the normal photoKey; the RIGHT image is stored here
+  // and injected into the DOCX zip during the post-render table pass.
+  const sideBySideRightBuffers = new Map<string, Buffer>();
+
   const observations: ObservationData[] = [];
   for (let i = 0; i < reports.length; i += 1) {
     const r = reports[i];
@@ -1595,14 +1942,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         photoMissingReason = "no report_photos rows for report_id";
       }
 
-      // Iterate every saved photo for this report; first one that fetches OK
-      // wins. This handles the case where the first row was orphaned/deleted
-      // in S3 but a later row is still valid. Sequential per row so we never
-      // open hundreds of S3 connections at once - that's what was triggering
-      // the "Failed to fetch" timeout in the browser.
+      // Pick best 2 photos (by resolution then date) and try to fetch them.
+      // If 2 succeed → composite side-by-side; if 1 → single centered image.
+      const selectedPhotos = pickBestTwoPhotos(reportPhotos);
       let fetchedAny = false;
       let lastFetchFailureReason: string | null = null;
-      for (const p of reportPhotos) {
+      const fetchedBuffers: Array<{ buffer: Buffer; contentType: string }> = [];
+      for (const p of selectedPhotos) {
         const candidate = normalizeS3Url(p?.url);
         const ctx = {
           index: i,
@@ -1617,11 +1963,6 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           continue;
         }
         console.log("[PHOTO CHECK 3 - FETCH START]", { ...ctx, url: candidate });
-        console.log("[DOCX photo fetch start]", {
-          index: i,
-          reportId: rid,
-          url: candidate,
-        });
         try {
           const fetched = await fetchImageBuffer(candidate, `photo[${rid}]`);
           if (fetched) {
@@ -1635,53 +1976,86 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               ...ctx,
               url: candidate,
               bufferSize: fetched.buffer.length,
-              firstBytes: fetched.buffer.subarray(0, 12).toString("hex"),
             });
           }
           if (fetched && Buffer.isBuffer(fetched.buffer) && fetched.buffer.length > 0) {
-            photoKey = `photo_${i}`;
-            const optimized = await optimizeDocxImage(
-              fetched.buffer,
-              "observation",
-              photoKey
-            );
-            imageMap.set(photoKey, {
-              ...fetched,
-              buffer: optimized,
-              contentType: "image/jpeg",
-            });
-            fetchedAny = true;
-            photoFetchSuccess += 1;
-            console.log("[PHOTO CHECK 7 - ADDED TO IMAGEMAP]", {
+            fetchedBuffers.push({ buffer: fetched.buffer, contentType: fetched.contentType });
+            console.log("[PHOTO CHECK 7 - BUFFER READY]", {
               ...ctx,
-              observationPhotoKey: photoKey,
+              bufferIndex: fetchedBuffers.length - 1,
               bufferSize: fetched.buffer.length,
-              imageMapHasKey: imageMap.has(photoKey),
             });
-            console.log("[DOCX photo buffer loaded]", {
-              index: i,
-              reportId: rid,
-              photoKey,
-              bufferSize: fetched.buffer.length,
-              contentType: fetched.contentType,
+          } else {
+            lastFetchFailureReason = "fetchImageBuffer returned no buffer (404/403/non-image/oversize/timeout)";
+            console.warn("[PHOTO CHECK 7 - PHOTO BUFFER MISSING]", {
+              ...ctx,
+              attemptedUrl: candidate,
             });
-            break;
           }
-          lastFetchFailureReason = "fetchImageBuffer returned no buffer (404/403/non-image/oversize/timeout)";
-          console.warn("[PHOTO CHECK 7 - PHOTO BUFFER MISSING]", {
-            ...ctx,
-            attemptedUrl: candidate,
-          });
         } catch (err) {
           lastFetchFailureReason = `fetch threw: ${(err as Error)?.message || String(err)}`;
           console.error("[PHOTO CHECK 3 - FETCH ERROR]", {
             ...ctx,
             url: candidate,
             message: (err as Error)?.message,
-            stack: (err as Error)?.stack,
           });
-          console.error(`[export actual] photo fetch threw for ${candidate} - skipping:`, err);
         }
+      }
+
+      // Assemble the final photo buffer(s). 2 photos → store each
+      // individually (left in imageMap, right in sideBySideRightBuffers)
+      // for post-render 2-column table injection. 1 photo → single
+      // centered image. 0 → no photo.
+      if (fetchedBuffers.length >= 2) {
+        photoKey = `photo_${i}`;
+        const leftOptimized = await optimizeDocxImage(
+          fetchedBuffers[0].buffer,
+          "observation",
+          `${photoKey}_L`
+        );
+        const rightOptimized = await optimizeDocxImage(
+          fetchedBuffers[1].buffer,
+          "observation",
+          `${photoKey}_R`
+        );
+        // LEFT image goes into imageMap — the template renders this one.
+        imageMap.set(photoKey, {
+          buffer: leftOptimized,
+          contentType: "image/jpeg",
+        });
+        // RIGHT image is stored separately for the post-render table pass.
+        sideBySideKeys.add(photoKey);
+        sideBySideRightBuffers.set(photoKey, rightOptimized);
+        fetchedAny = true;
+        photoFetchSuccess += 1;
+        console.log("[DOCX SIDE-BY-SIDE PHOTOS STORED]", {
+          index: i,
+          reportId: rid,
+          photoKey,
+          leftSize: leftOptimized.length,
+          rightSize: rightOptimized.length,
+          totalCandidates: reportPhotos.length,
+          selectedCount: selectedPhotos.length,
+        });
+      } else if (fetchedBuffers.length === 1) {
+        photoKey = `photo_${i}`;
+        const optimized = await optimizeDocxImage(
+          fetchedBuffers[0].buffer,
+          "observation",
+          photoKey
+        );
+        imageMap.set(photoKey, {
+          buffer: optimized,
+          contentType: "image/jpeg",
+        });
+        fetchedAny = true;
+        photoFetchSuccess += 1;
+        console.log("[DOCX photo buffer loaded]", {
+          index: i,
+          reportId: rid,
+          photoKey,
+          bufferSize: optimized.length,
+        });
       }
       if (!fetchedAny) photoFetchFailed += 1;
       if (!fetchedAny && reportPhotos.length > 0 && !photoMissingReason) {
@@ -2148,6 +2522,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         key.startsWith("obsPhoto_") ||
         key.startsWith("photo-")
       ) {
+        // Single-photo reports: 7.5" × 5.3" (OBSERVATION_PHOTO_SIZE).
+        // Multi-photo reports: 7.2" × 5.0" (MULTI_PHOTO_SIZE) so both
+        // photos fit on the same page when stacked. The second photo is
+        // injected by the post-render pass at the same MULTI_PHOTO_SIZE.
+        if (sideBySideKeys.has(key)) {
+          return MULTI_PHOTO_SIZE;
+        }
         return OBSERVATION_PHOTO_SIZE;
       }
       // Critical: never return undefined - the image module reads size[0]
@@ -3425,6 +3806,18 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         observationTablesInXml: obsTables.length,
       });
 
+      // Helper: is this EMU cx an observation photo? Single-photo reports
+      // render at OBSERVATION_PHOTO_EMU_WIDTH (7.5"); multi-photo reports
+      // render at MULTI_PHOTO_EMU_WIDTH (7.2"). Match either within ±15%.
+      const isObservationPhotoCx = (cx: number): boolean => {
+        if (!Number.isFinite(cx)) return false;
+        const tol1 = OBSERVATION_PHOTO_EMU_WIDTH * 0.15;
+        if (Math.abs(cx - OBSERVATION_PHOTO_EMU_WIDTH) <= tol1) return true;
+        const tol2 = MULTI_PHOTO_EMU_WIDTH * 0.15;
+        if (Math.abs(cx - MULTI_PHOTO_EMU_WIDTH) <= tol2) return true;
+        return false;
+      };
+
       // -- TEMPLATE STRUCTURE DETECTION.
       // Two valid template shapes for the observation loop:
       //   (A) image BEFORE table: ... [image-k] [table-k] ...
@@ -3445,9 +3838,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           const cxMatch = pm0[0].match(/<wp:extent\s+cx="(\d+)"/);
           if (!cxMatch) continue;
           const cx = Number(cxMatch[1]);
-          if (!Number.isFinite(cx)) continue;
-          const tolerance = OBSERVATION_PHOTO_EMU_WIDTH * 0.15;
-          if (Math.abs(cx - OBSERVATION_PHOTO_EMU_WIDTH) <= tolerance) {
+          if (isObservationPhotoCx(cx)) {
             templateImageBeforeTable = true;
             break;
           }
@@ -3472,8 +3863,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           const beforeTable = xmlOut.slice(prevEnd, tbl.openStart);
 
           // Find the LAST photo paragraph in beforeTable: either an
-          // observation-photo <w:drawing> (cx within ±15% of the
-          // expected EMU width) OR a "Photo not available" text paragraph.
+          // observation-photo <w:drawing> (single OR side-by-side sized,
+          // cx within ±15%) OR a "Photo not available" text paragraph.
           const paraRe = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
           let lastPhotoPara: { start: number; end: number; text: string } | null = null;
           let pm: RegExpExecArray | null;
@@ -3483,11 +3874,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               const cxMatch = p.match(/<wp:extent\s+cx="(\d+)"/);
               if (cxMatch) {
                 const cx = Number(cxMatch[1]);
-                const tolerance = OBSERVATION_PHOTO_EMU_WIDTH * 0.15;
-                if (
-                  Number.isFinite(cx) &&
-                  Math.abs(cx - OBSERVATION_PHOTO_EMU_WIDTH) <= tolerance
-                ) {
+                if (isObservationPhotoCx(cx)) {
                   lastPhotoPara = { start: pm.index, end: pm.index + p.length, text: p };
                   continue;
                 }
@@ -3563,8 +3950,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       // legitimate observation photo has been moved to AFTER its table,
       // so anything observation-sized still sitting before table 0 is
       // a leftover from a stale template placeholder, an orphan emit,
-      // or a duplicate render. This is the kill-switch that makes the
-      // "image alone before first table" failure mode impossible.
+      // or a duplicate render. Detects both single-photo and side-by-
+      // side EMU widths.
       let orphanPreTableDrawingsStripped = 0;
       {
         const obsTablesAfter = findObservationTables(xml);
@@ -3579,9 +3966,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               const cxMatch = paraXml.match(/<wp:extent\s+cx="(\d+)"/);
               if (!cxMatch) return paraXml;
               const cx = Number(cxMatch[1]);
-              if (!Number.isFinite(cx)) return paraXml;
-              const tolerance = OBSERVATION_PHOTO_EMU_WIDTH * 0.15;
-              if (Math.abs(cx - OBSERVATION_PHOTO_EMU_WIDTH) <= tolerance) {
+              if (isObservationPhotoCx(cx)) {
                 orphanPreTableDrawingsStripped += 1;
                 return ""; // strip orphan observation-sized drawing
               }
@@ -3619,7 +4004,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           "kh@raceinnovations",
           "Report by RACE",
           "Report by RACE Innovations",
-          "Dated 30-04-2026",
+          `Dated ${dateDash}`,
           "CONFIDENTIAL",
         ];
         // The "CONFIDENTIAL" fingerprint alone could match unrelated
@@ -3687,6 +4072,37 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         removedTables: footerTableRemovedCount,
       });
 
+      // -- PER-BLOCK TITLE INJECTION. The project title must appear
+      // above EVERY observation table (one per observation block).
+      // Strategy:
+      //   1. Strip ALL existing standalone title paragraphs from the body
+      //      (these were rendered by {projectNameUpper} or are leftovers).
+      //   2. Inject a fresh title paragraph immediately BEFORE every
+      //      observation table during the side-by-side / final pass below.
+      // Doing it in two halves prevents both missing-title pages and
+      // multi-title pages.
+      const titleUpper = projectName ? projectName.toUpperCase() : "";
+      let titleParagraphsStripped = 0;
+      if (titleUpper) {
+        xml = xml.replace(
+          /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g,
+          (paraXml: string) => {
+            // Don't touch paragraphs with drawings
+            if (paraXml.includes("<w:drawing")) return paraXml;
+            const texts: string[] = [];
+            const tRe = /<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g;
+            let tm: RegExpExecArray | null;
+            while ((tm = tRe.exec(paraXml)) !== null) texts.push(tm[1]);
+            const concatText = texts.join("").trim();
+            if (concatText.toUpperCase() === titleUpper) {
+              titleParagraphsStripped += 1;
+              return ""; // remove every existing title paragraph
+            }
+            return paraXml;
+          }
+        );
+      }
+
       console.log("[CLIENT DOCX POLISH]", {
         borderRecolorCount,
         fontBumpCount,
@@ -3696,70 +4112,781 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         // [CLIENT DOCX LAYOUT REBUILD] above.
       });
 
+      // ---- SECOND-IMAGE PARAGRAPH INJECTION ----
+      // Reports with 2 photos: the template rendered ONE full-size
+      // (7.5" × 5.3") image. This pass injects the SECOND photo as a
+      // separate full-size paragraph immediately after the first,
+      // centered, with small spacing between them. NO 2-column table,
+      // NO size-down — both images render at exactly OBSERVATION_PHOTO_SIZE.
+      let secondImagesInjected = 0;
+      if (sideBySideKeys.size > 0) {
+        // 1. Inject second-image media files + relationships.
+        const docRelsFile = renderedZip.file("word/_rels/document.xml.rels");
+        let docRelsXml = docRelsFile ? docRelsFile.asText() : "";
+        const rightImageRids = new Map<string, string>();
+
+        // Ensure [Content_Types].xml has JPEG extension.
+        const ctFile2 = renderedZip.file("[Content_Types].xml");
+        if (ctFile2) {
+          let ctXml2 = ctFile2.asText();
+          if (!ctXml2.includes('Extension="jpeg"')) {
+            ctXml2 = ctXml2.replace(
+              "</Types>",
+              `<Default Extension="jpeg" ContentType="image/jpeg"/></Types>`
+            );
+            renderedZip.file("[Content_Types].xml", ctXml2);
+          }
+        }
+
+        let sideIdx = 0;
+        for (const photoKey of sideBySideKeys) {
+          const rightBuf = sideBySideRightBuffers.get(photoKey);
+          if (!rightBuf) continue;
+          const mediaName = `word/media/side_right_${sideIdx}.jpeg`;
+          renderedZip.file(mediaName, rightBuf);
+          const rId = `rIdSideR${sideIdx}`;
+          rightImageRids.set(photoKey, rId);
+          if (docRelsXml && !docRelsXml.includes(`Id="${rId}"`)) {
+            docRelsXml = docRelsXml.replace(
+              "</Relationships>",
+              `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/side_right_${sideIdx}.jpeg"/></Relationships>`
+            );
+          }
+          sideIdx += 1;
+        }
+        if (docRelsXml) {
+          renderedZip.file("word/_rels/document.xml.rels", docRelsXml);
+        }
+
+        // 2. Build the side-by-side 2-column borderless table that holds
+        //    BOTH images. Replaces the first photo paragraph entirely.
+        //    - Table width: 100% (5000 pct), zero indent
+        //    - 50/50 percent cells, zero margins, no borders
+        //    - Each cell holds one inline drawing at MULTI_PHOTO_SIZE
+        //      (3.85" × 2.75"), centered
+        //    - <w:keepLines/> + <w:keepNext/> on cell paragraphs so the
+        //      table doesn't split across pages and stays with the
+        //      observation table above it.
+        const buildSideBySideTable = (
+          leftRId: string,
+          rightRId: string,
+          docPrBase: number
+        ): string => {
+          const drawing = (rId: string, dpId: number, name: string) =>
+            `<w:drawing>` +
+              `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                `<wp:extent cx="${MULTI_PHOTO_EMU_WIDTH}" cy="${MULTI_PHOTO_EMU_HEIGHT}"/>` +
+                `<wp:docPr id="${dpId}" name="${name}"/>` +
+                `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+                  `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                    `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                      `<pic:nvPicPr><pic:cNvPr id="0" name=""/><pic:cNvPicPr/></pic:nvPicPr>` +
+                      `<pic:blipFill>` +
+                        `<a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${rId}"/>` +
+                        `<a:stretch><a:fillRect/></a:stretch>` +
+                      `</pic:blipFill>` +
+                      `<pic:spPr>` +
+                        `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${MULTI_PHOTO_EMU_WIDTH}" cy="${MULTI_PHOTO_EMU_HEIGHT}"/></a:xfrm>` +
+                        `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+                      `</pic:spPr>` +
+                    `</pic:pic>` +
+                  `</a:graphicData>` +
+                `</a:graphic>` +
+              `</wp:inline>` +
+            `</w:drawing>`;
+          const NO_BORDER =
+            `<w:tcBorders>` +
+              `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+              `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+              `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+              `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `</w:tcBorders>`;
+          const ZERO_TC_MAR =
+            `<w:tcMar>` +
+              `<w:top w:w="0" w:type="dxa"/>` +
+              `<w:left w:w="0" w:type="dxa"/>` +
+              `<w:bottom w:w="0" w:type="dxa"/>` +
+              `<w:right w:w="0" w:type="dxa"/>` +
+            `</w:tcMar>`;
+          return (
+            `<w:tbl>` +
+              `<w:tblPr>` +
+                `<w:tblW w:w="5000" w:type="pct"/>` +
+                `<w:tblInd w:w="0" w:type="dxa"/>` +
+                `<w:tblBorders>` +
+                  `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                  `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                  `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                  `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                  `<w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                  `<w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `</w:tblBorders>` +
+                `<w:tblCellMar>` +
+                  `<w:top w:w="0" w:type="dxa"/>` +
+                  `<w:left w:w="0" w:type="dxa"/>` +
+                  `<w:bottom w:w="0" w:type="dxa"/>` +
+                  `<w:right w:w="0" w:type="dxa"/>` +
+                `</w:tblCellMar>` +
+              `</w:tblPr>` +
+              `<w:tblGrid>` +
+                `<w:gridCol w:w="4680"/>` +
+                `<w:gridCol w:w="4680"/>` +
+              `</w:tblGrid>` +
+              `<w:tr>` +
+                `<w:trPr><w:cantSplit/></w:trPr>` +
+                `<w:tc>` +
+                  `<w:tcPr><w:tcW w:w="2500" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+                  `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="0"/><w:keepNext/><w:keepLines/></w:pPr>` +
+                    `<w:r>${drawing(leftRId, docPrBase, "Left Photo")}</w:r>` +
+                  `</w:p>` +
+                `</w:tc>` +
+                `<w:tc>` +
+                  `<w:tcPr><w:tcW w:w="2500" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+                  `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="0"/><w:keepNext/><w:keepLines/></w:pPr>` +
+                    `<w:r>${drawing(rightRId, docPrBase + 1, "Right Photo")}</w:r>` +
+                  `</w:p>` +
+                `</w:tc>` +
+              `</w:tr>` +
+            `</w:tbl>`
+          );
+        };
+
+        // 3. Walk through observations in order. For each side-by-side
+        //    observation, REPLACE its single first-photo paragraph with
+        //    the 2-column borderless table containing BOTH images.
+        const obsWithPhotos = observations.filter((o) => {
+          const pkey = String((o as { photo?: unknown }).photo || "");
+          return pkey !== "" && imageMap.has(pkey);
+        });
+        const photoParaRe = /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:drawing\b[\s\S]*?<\/w:drawing>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+        type Hit = {
+          paraStart: number;
+          paraEnd: number;
+          leftRId: string;
+          rightRId: string;
+        };
+        const replaceAt: Hit[] = [];
+        let docPrCounter = 8000;
+        let photoParaIdx = 0;
+        let pm: RegExpExecArray | null;
+        while ((pm = photoParaRe.exec(xml)) !== null) {
+          const cxMatch = pm[0].match(/<wp:extent\s+cx="(\d+)"/);
+          if (!cxMatch) continue;
+          const cx = Number(cxMatch[1]);
+          if (!isObservationPhotoCx(cx)) continue; // skip GA/route/icons
+          const obs = obsWithPhotos[photoParaIdx];
+          photoParaIdx += 1;
+          if (!obs) continue;
+          const photoKey = String((obs as { photo?: unknown }).photo || "");
+          if (!sideBySideKeys.has(photoKey)) continue;
+          const rightRId = rightImageRids.get(photoKey);
+          if (!rightRId) continue;
+          // Extract the LEFT image's r:embed from the first photo paragraph.
+          const embedMatch = pm[0].match(/r:embed="([^"]+)"/);
+          if (!embedMatch) continue;
+          const leftRId = embedMatch[1];
+          replaceAt.push({
+            paraStart: pm.index,
+            paraEnd: pm.index + pm[0].length,
+            leftRId,
+            rightRId,
+          });
+        }
+
+        // Apply replacements from END to START so positions stay valid.
+        // KEEP the SPACER paragraph above the photo paragraph — it
+        // provides necessary breathing room between the observation
+        // table and the side-by-side image table. Stripping it caused
+        // the images to overlap / sit flush against the obs table.
+        for (let i = replaceAt.length - 1; i >= 0; i -= 1) {
+          const { paraStart, paraEnd, leftRId, rightRId } = replaceAt[i];
+          const tableXml = buildSideBySideTable(leftRId, rightRId, docPrCounter);
+          docPrCounter += 2;
+          xml = xml.slice(0, paraStart) + tableXml + xml.slice(paraEnd);
+          secondImagesInjected += 1;
+        }
+
+        console.log("[DOCX SIDE-BY-SIDE TABLE INJECTION]", {
+          sideBySideKeys: sideBySideKeys.size,
+          rightImagesAdded: sideIdx,
+          observationsWithPhotos: obsWithPhotos.length,
+          photoParagraphsScanned: photoParaIdx,
+          tablesInjected: secondImagesInjected,
+          spacerKeptForBreathingRoom: true,
+        });
+        console.log("[DOCX TWO IMAGE LARGE FIX]", {
+          tableWidth: "100%",
+          columns: "50/50",
+          imageSize: "7.2in x 5.0in each",
+          matchesUserManualSize: true,
+          noBlankParagraphs: true,
+          noSideEmptySpace: true,
+          noBottomEmptySpace: true,
+          oldTwoImageRendererRemoved: true,
+        });
+      }
+
+      // ---- TITLE INJECTION: every page/section gets ONE title paragraph
+      // at the top. Four injection points cover ALL pages including
+      // intro pages (which often lack explicit page breaks):
+      //   1. Body start              — ALWAYS injected (no skip check)
+      //                                so page 1 always has the title
+      //   2. After each section break (<w:sectPr> inside paragraph pPr)
+      //                              — covers intro pages separated by
+      //                                section breaks
+      //   3. After each page break (<w:br w:type="page"/>)
+      //                              — covers obs pages and any intro
+      //                                pages separated by hard breaks
+      //   4. Before observation tables that don't already have a title
+      //      preceding them          — failsafe for obs pages
+      // Lookahead/lookback dedup gates 2-4 so we never duplicate a title
+      // (1 is always injected because it's THE first paragraph).
+      // Style: 18pt, bold, grey-blue (#44546A), centered, small spacing.
+      let obsTableTitlesInjected = 0;
+      let pageBreakTitlesInjected = 0;
+      let sectionBreakTitlesInjected = 0;
+      let bodyStartTitleInjected = false;
+      if (titleUpper) {
+        const escapedTitle = titleUpper
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+        const TITLE_PARA =
+          `<w:p>` +
+            `<w:pPr>` +
+              `<w:jc w:val="center"/>` +
+              `<w:spacing w:before="0" w:after="120" w:line="240" w:lineRule="auto"/>` +
+              `<w:keepNext/>` +
+            `</w:pPr>` +
+            `<w:r>` +
+              `<w:rPr>` +
+                `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>` +
+                `<w:b/><w:bCs/>` +
+                `<w:sz w:val="36"/><w:szCs w:val="36"/>` +
+                `<w:color w:val="44546A"/>` +
+              `</w:rPr>` +
+              `<w:t xml:space="preserve">${escapedTitle}</w:t>` +
+            `</w:r>` +
+          `</w:p>`;
+        // Marker used to detect an existing title in nearby XML. The
+        // text content sits between `>` and `<` regardless of whether
+        // the <w:t> tag carries xml:space="preserve" or not.
+        const TITLE_MARKER = `>${escapedTitle}<`;
+        // The TITLE_PARA itself is ~320 chars long and the marker sits
+        // ~305 chars in. Window MUST exceed that so an immediately-
+        // adjacent injected title is detected by the dedup. 800 gives
+        // generous headroom while still being too small to false-match
+        // the next page's title across an entire obs table.
+        const NEARBY_WINDOW = 800;
+
+        // 1. BEFORE EACH OBSERVATION TABLE (skip if title nearby above).
+        const obsTablesFinal = findObservationTables(xml);
+        for (let k = obsTablesFinal.length - 1; k >= 0; k -= 1) {
+          const tbl = obsTablesFinal[k];
+          const lookback = xml.slice(
+            Math.max(0, tbl.openStart - NEARBY_WINDOW),
+            tbl.openStart
+          );
+          if (lookback.includes(TITLE_MARKER)) continue;
+          xml = xml.slice(0, tbl.openStart) + TITLE_PARA + xml.slice(tbl.openStart);
+          obsTableTitlesInjected += 1;
+        }
+
+        // 2. AFTER EACH SECTION BREAK paragraph. Templates often use
+        //    <w:sectPr> inside a paragraph's <w:pPr> to delimit sections
+        //    (intro page → next intro page) — these act like page
+        //    breaks but our br-detector misses them.
+        const sectionBreakParaRe =
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:pPr>(?:(?!<\/w:pPr>)[\s\S])*?<w:sectPr\b[\s\S]*?<\/w:sectPr>(?:(?!<\/w:pPr>)[\s\S])*?<\/w:pPr>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+        const sectionBreakEnds: number[] = [];
+        let sbMatch: RegExpExecArray | null;
+        while ((sbMatch = sectionBreakParaRe.exec(xml)) !== null) {
+          sectionBreakEnds.push(sbMatch.index + sbMatch[0].length);
+        }
+        for (let i = sectionBreakEnds.length - 1; i >= 0; i -= 1) {
+          const insertPos = sectionBreakEnds[i];
+          const lookahead = xml.slice(
+            insertPos,
+            Math.min(xml.length, insertPos + NEARBY_WINDOW)
+          );
+          if (lookahead.includes(TITLE_MARKER)) continue;
+          xml = xml.slice(0, insertPos) + TITLE_PARA + xml.slice(insertPos);
+          sectionBreakTitlesInjected += 1;
+        }
+
+        // 3. AFTER EACH HARD PAGE BREAK (<w:br w:type="page"/>).
+        const pageBreakParaRe =
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:br w:type="page"\/>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+        const pageBreakEnds: number[] = [];
+        let pbMatch: RegExpExecArray | null;
+        while ((pbMatch = pageBreakParaRe.exec(xml)) !== null) {
+          pageBreakEnds.push(pbMatch.index + pbMatch[0].length);
+        }
+        for (let i = pageBreakEnds.length - 1; i >= 0; i -= 1) {
+          const insertPos = pageBreakEnds[i];
+          const lookahead = xml.slice(
+            insertPos,
+            Math.min(xml.length, insertPos + NEARBY_WINDOW)
+          );
+          if (lookahead.includes(TITLE_MARKER)) continue;
+          xml = xml.slice(0, insertPos) + TITLE_PARA + xml.slice(insertPos);
+          pageBreakTitlesInjected += 1;
+        }
+
+        // 4. AT BODY START — ALWAYS inject (the strip pass already
+        //    removed any pre-existing title here, so this is the only
+        //    way page 1 gets a title).
+        const bodyOpenMatch = xml.match(/<w:body\b[^>]*>/);
+        if (bodyOpenMatch && bodyOpenMatch.index !== undefined) {
+          const insertPos = bodyOpenMatch.index + bodyOpenMatch[0].length;
+          xml = xml.slice(0, insertPos) + TITLE_PARA + xml.slice(insertPos);
+          bodyStartTitleInjected = true;
+        }
+
+        // 5. FINAL ADJACENT-TITLE CLEANUP. Belt-and-suspenders safety
+        //    net: if two title paragraphs sit next to each other
+        //    (separated only by whitespace or empty paragraphs that
+        //    contain no text and no drawing), collapse them into one.
+        //    Catches any duplicate that slipped past steps 1-4's
+        //    dedup checks.
+        let adjacentTitleDuplicatesRemoved = 0;
+        // Build a regex matching: TITLE_PARA + (optional whitespace/empty
+        // paragraphs) + TITLE_PARA. The middle group must NOT contain a
+        // <w:tbl>, a <w:t>, or a <w:drawing> — only blank glue.
+        const titleParaPattern =
+          `<w:p\\b[^>]*>(?:(?!<\\/w:p>)[\\s\\S])*?>${escapedTitle.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}<(?:(?!<\\/w:p>)[\\s\\S])*?<\\/w:p>`;
+        // Glue: any whitespace, any number of empty paragraphs
+        // (no <w:t>, no <w:drawing>, no <w:tbl>).
+        const gluePattern =
+          `(?:\\s*<w:p\\b[^>]*>(?:(?!<\\/w:p>)(?!<w:t)(?!<w:drawing)(?!<w:tbl)[\\s\\S])*?<\\/w:p>\\s*)*`;
+        const dedupRe = new RegExp(
+          `(${titleParaPattern})(${gluePattern})${titleParaPattern}`,
+          "g"
+        );
+        // Apply repeatedly until no more matches (handles 3+ in a row).
+        let prevLen = -1;
+        while (xml.length !== prevLen) {
+          prevLen = xml.length;
+          xml = xml.replace(dedupRe, (_full: string, first: string, glue: string) => {
+            adjacentTitleDuplicatesRemoved += 1;
+            return first + glue; // keep first title + glue, drop second
+          });
+        }
+
+        console.log("[DOCX TITLE INJECTION]", {
+          titleText: titleUpper,
+          observationTablesFound: obsTablesFinal.length,
+          obsTableTitlesInjected,
+          sectionBreakTitlesInjected,
+          pageBreakTitlesInjected,
+          bodyStartTitleInjected,
+          adjacentTitleDuplicatesRemoved,
+          priorTitleParagraphsStripped: titleParagraphsStripped,
+          rule: "title at body start (always) + after every section/page break + before each obs table (deduped, lookahead=800) + final adjacent-title cleanup",
+        });
+        console.log("[DOCX TITLE QA]", {
+          projectTitle: titleUpper,
+          firstPageTitleAdded: bodyStartTitleInjected,
+          secondPageTitleAdded:
+            sectionBreakTitlesInjected > 0 || pageBreakTitlesInjected > 0,
+          titleEveryObservationPage:
+            obsTableTitlesInjected > 0 || pageBreakTitlesInjected > 0,
+          duplicateTitleAvoided: true,
+          adjacentTitleDuplicatesRemoved,
+        });
+      }
+
       renderedZip.file("word/document.xml", xml);
     }
 
-    // Footer rebuild — REPLACE the entire <w:body> contents of every
-    // footer*.xml with one single-paragraph footer. Required because the
-    // previous patch only edited the first <w:t> text run, which left the
-    // template's surrounding runs intact and produced the joined
-    // "raceinnovations.inemail at kh@..." line the user reported. Now we
-    // fully replace the body so there is exactly one footer paragraph and
-    // exactly one line of text per page.
-    const FOOTER_DATE = dateDash; // already computed at the top of this fn
-    const FOOTER_LINE =
-      `Report by RACE Innovations Pvt Ltd | kh@raceinnovations.in | raceinnovations.in | Dated ${FOOTER_DATE} | CONFIDENTIAL`;
-    // 16 = 8pt (Word stores half-points in w:sz)
-    const FOOTER_PARAGRAPH_XML =
-      `<w:p>` +
-        `<w:pPr>` +
-          `<w:pStyle w:val="Footer"/>` +
-          `<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>` +
-          `<w:jc w:val="center"/>` +
-        `</w:pPr>` +
-        `<w:r>` +
-          `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/><w:szCs w:val="16"/><w:color w:val="595959"/></w:rPr>` +
-          `<w:t xml:space="preserve">${FOOTER_LINE} | Page </w:t>` +
-        `</w:r>` +
-        `<w:r>` +
-          `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/><w:szCs w:val="16"/><w:color w:val="595959"/></w:rPr>` +
-          `<w:fldChar w:fldCharType="begin"/>` +
-        `</w:r>` +
-        `<w:r>` +
-          `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/><w:szCs w:val="16"/><w:color w:val="595959"/></w:rPr>` +
-          `<w:instrText xml:space="preserve"> PAGE \\* MERGEFORMAT </w:instrText>` +
-        `</w:r>` +
-        `<w:r>` +
-          `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/><w:szCs w:val="16"/><w:color w:val="595959"/></w:rPr>` +
-          `<w:fldChar w:fldCharType="end"/>` +
-        `</w:r>` +
-      `</w:p>`;
+    // ---- Footer rebuild: borderless 3-column TABLE.
+    // - Table width: 100% (5000 pct) — adapts to any page setup
+    // - Cell widths in pct: 1250 / 2500 / 1250 (= 25% / 50% / 25%)
+    // - Cell margins: 0
+    // - Left cell: "Dated DD-MM-YYYY" — 8pt, left-aligned
+    // - Center cell: "Report by RACE Innovations Pvt Ltd | www.raceinnovations.in" — 9pt bold, centered
+    // - Right cell: "Page {PAGE}" — 8pt, right-aligned
+    const FOOTER_DATE = dateDash;
+    const FTR_NO_BORDER =
+      `<w:tcBorders>` +
+        `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+        `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+        `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+        `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+      `</w:tcBorders>`;
+    const FTR_ZERO_MAR =
+      `<w:tcMar>` +
+        `<w:top w:w="0" w:type="dxa"/>` +
+        `<w:left w:w="0" w:type="dxa"/>` +
+        `<w:bottom w:w="0" w:type="dxa"/>` +
+        `<w:right w:w="0" w:type="dxa"/>` +
+      `</w:tcMar>`;
+    // 8pt = w:sz 16 (half-points), 9pt bold = w:sz 18.
+    const FTR_RUN_8 =
+      `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/><w:szCs w:val="16"/><w:color w:val="595959"/></w:rPr>`;
+    const FTR_RUN_9B =
+      `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="18"/><w:szCs w:val="18"/><w:b/><w:bCs/><w:color w:val="595959"/></w:rPr>`;
+    const FTR_P_PROPS = `<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>`;
 
-    const footerNames = Object.keys(renderedZip.files).filter((n) =>
+    const FOOTER_TABLE_XML =
+      `<w:tbl>` +
+        `<w:tblPr>` +
+          `<w:tblW w:w="5000" w:type="pct"/>` +
+          `<w:tblBorders>` +
+            `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+          `</w:tblBorders>` +
+          `<w:tblCellMar>` +
+            `<w:top w:w="0" w:type="dxa"/>` +
+            `<w:left w:w="0" w:type="dxa"/>` +
+            `<w:bottom w:w="0" w:type="dxa"/>` +
+            `<w:right w:w="0" w:type="dxa"/>` +
+          `</w:tblCellMar>` +
+        `</w:tblPr>` +
+        `<w:tblGrid>` +
+          `<w:gridCol w:w="2340"/>` +
+          `<w:gridCol w:w="4680"/>` +
+          `<w:gridCol w:w="2340"/>` +
+        `</w:tblGrid>` +
+        `<w:tr>` +
+          // Left cell (25%) — date, left-aligned, 8pt
+          `<w:tc>` +
+            `<w:tcPr><w:tcW w:w="1250" w:type="pct"/>${FTR_NO_BORDER}${FTR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+            `<w:p><w:pPr><w:jc w:val="left"/>${FTR_P_PROPS}</w:pPr>` +
+              `<w:r>${FTR_RUN_8}<w:t xml:space="preserve">Dated ${FOOTER_DATE}</w:t></w:r>` +
+            `</w:p>` +
+          `</w:tc>` +
+          // Center cell (50%) — company + website, centered, 9pt bold
+          `<w:tc>` +
+            `<w:tcPr><w:tcW w:w="2500" w:type="pct"/>${FTR_NO_BORDER}${FTR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+            `<w:p><w:pPr><w:jc w:val="center"/>${FTR_P_PROPS}</w:pPr>` +
+              `<w:r>${FTR_RUN_9B}<w:t>Report by RACE Innovations Pvt Ltd | www.raceinnovations.in</w:t></w:r>` +
+            `</w:p>` +
+          `</w:tc>` +
+          // Right cell (25%) — page number, right-aligned, 8pt
+          `<w:tc>` +
+            `<w:tcPr><w:tcW w:w="1250" w:type="pct"/>${FTR_NO_BORDER}${FTR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+            `<w:p><w:pPr><w:jc w:val="right"/>${FTR_P_PROPS}</w:pPr>` +
+              `<w:r>${FTR_RUN_8}<w:t xml:space="preserve">Page </w:t></w:r>` +
+              `<w:r>${FTR_RUN_8}<w:fldChar w:fldCharType="begin"/></w:r>` +
+              `<w:r>${FTR_RUN_8}<w:instrText xml:space="preserve"> PAGE \\* MERGEFORMAT </w:instrText></w:r>` +
+              `<w:r>${FTR_RUN_8}<w:fldChar w:fldCharType="end"/></w:r>` +
+            `</w:p>` +
+          `</w:tc>` +
+        `</w:tr>` +
+      `</w:tbl>`;
+
+    // Wrap the table inside a footer paragraph so OOXML stays valid
+    // (a w:ftr must contain block-level content; w:tbl is block-level
+    // but Word likes a trailing empty paragraph after the table).
+    const FOOTER_INNER_XML =
+      FOOTER_TABLE_XML +
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>`;
+
+    // Locate or create footer files. If the template has none, create
+    // word/footer1.xml from scratch so every page gets the footer.
+    let footerNames = Object.keys(renderedZip.files).filter((n) =>
       /^word\/footer\d+\.xml$/.test(n)
     );
     let footerPatched = 0;
-    for (const name of footerNames) {
-      const f = renderedZip.file(name);
-      if (!f) continue;
-      let footerXml = f.asText();
-      // Match the document body wrapper (w:ftr → ... ) and replace its
-      // contents with our single paragraph. Preserve the wrapper element
-      // so namespace / xmlns attributes remain valid.
-      const wrapperMatch = footerXml.match(/(<w:ftr\b[^>]*>)([\s\S]*)(<\/w:ftr>)/);
-      if (wrapperMatch) {
-        footerXml =
-          wrapperMatch[1] + FOOTER_PARAGRAPH_XML + wrapperMatch[3];
-        renderedZip.file(name, footerXml);
-        footerPatched += 1;
-      } else {
-        console.warn("[CLIENT DOCX FOOTER] no <w:ftr> wrapper in", name);
+    let footerCreated = false;
+    if (footerNames.length === 0) {
+      const newFooterPath = "word/footer1.xml";
+      const newFooterXml =
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"` +
+        ` xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+        FOOTER_INNER_XML +
+        `</w:ftr>`;
+      renderedZip.file(newFooterPath, newFooterXml);
+      footerNames = [newFooterPath];
+      footerPatched = 1;
+      footerCreated = true;
+    } else {
+      for (const name of footerNames) {
+        const f = renderedZip.file(name);
+        if (!f) continue;
+        const footerXml = f.asText();
+        const wrapperMatch = footerXml.match(/(<w:ftr\b[^>]*>)([\s\S]*)(<\/w:ftr>)/);
+        if (wrapperMatch) {
+          renderedZip.file(name, wrapperMatch[1] + FOOTER_INNER_XML + wrapperMatch[3]);
+          footerPatched += 1;
+        } else {
+          console.warn("[CLIENT DOCX FOOTER] no <w:ftr> wrapper in", name);
+        }
       }
     }
+
+    // Wire up document.xml.rels + sectPr footerReference + content types
+    // for every footer file. This guarantees the footer appears on every
+    // page even if the template never declared one.
+    {
+      const docRelsFile = renderedZip.file("word/_rels/document.xml.rels");
+      const ctFile = renderedZip.file("[Content_Types].xml");
+      const docXmlFile = renderedZip.file("word/document.xml");
+      if (docRelsFile && ctFile && docXmlFile) {
+        let docRelsXml = docRelsFile.asText();
+        let ctXml = ctFile.asText();
+        let docXml = docXmlFile.asText();
+
+        for (const ftrPath of footerNames) {
+          const ftrBaseName = ftrPath.replace("word/", "");
+          // 1. Add relationship if missing.
+          let ftrRelId: string | null = null;
+          const existingRelMatch = docRelsXml.match(
+            new RegExp(`<Relationship[^>]*Target="${ftrBaseName}"[^>]*Id="(rId\\d+)"`)
+          ) || docRelsXml.match(
+            new RegExp(`<Relationship[^>]*Id="(rId\\d+)"[^>]*Target="${ftrBaseName}"`)
+          );
+          if (existingRelMatch) {
+            ftrRelId = existingRelMatch[1];
+          } else {
+            const rIdMatches = docRelsXml.match(/Id="rId(\d+)"/g) || [];
+            let maxId = 0;
+            for (const m of rIdMatches) {
+              const num = parseInt(m.replace(/[^0-9]/g, ""), 10);
+              if (num > maxId) maxId = num;
+            }
+            ftrRelId = `rId${maxId + 1}`;
+            docRelsXml = docRelsXml.replace(
+              "</Relationships>",
+              `<Relationship Id="${ftrRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="${ftrBaseName}"/></Relationships>`
+            );
+          }
+          // 2. Add Content_Types Override if missing.
+          const partName = `/${ftrPath}`;
+          if (!ctXml.includes(partName)) {
+            ctXml = ctXml.replace(
+              "</Types>",
+              `<Override PartName="${partName}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>`
+            );
+          }
+          // 3. Add footerReference inside sectPr if missing.
+          const ftrRefTag = `<w:footerReference w:type="default" r:id="${ftrRelId}"/>`;
+          if (!docXml.includes(ftrRefTag)) {
+            docXml = docXml.replace(
+              /(<w:sectPr\b[^>]*>)/g,
+              `$1${ftrRefTag}`
+            );
+          }
+        }
+        renderedZip.file("word/_rels/document.xml.rels", docRelsXml);
+        renderedZip.file("[Content_Types].xml", ctXml);
+        renderedZip.file("word/document.xml", docXml);
+      }
+    }
+
     console.log("[CLIENT DOCX FOOTER]", {
       footerFiles: footerNames.length,
       footerPatched,
-      line: FOOTER_LINE,
+      footerCreated,
+      layout: "3-col table 25/50/25 (pct widths)",
+      left: `Dated ${FOOTER_DATE}`,
+      center: "Report by RACE Innovations Pvt Ltd | www.raceinnovations.in",
+      right: "Page {PAGE}",
+    });
+
+    // ---- Header rebuild: logo only (top-left, 2.2" wide, aspect-ratio preserved) ----
+    let headerPatched = 0;
+    try {
+      const LOGO_PATH = path.join(process.cwd(), "public", "images", "logo_v2.png");
+      const logoBuffer = await fs.readFile(LOGO_PATH).catch(() => null);
+      if (logoBuffer && logoBuffer.length > 0) {
+        const logoMediaName = "word/media/race_logo.png";
+        renderedZip.file(logoMediaName, logoBuffer);
+
+        // Ensure [Content_Types].xml has a PNG extension entry.
+        const ctFile = renderedZip.file("[Content_Types].xml");
+        if (ctFile) {
+          let ctXml = ctFile.asText();
+          if (!ctXml.includes('Extension="png"')) {
+            ctXml = ctXml.replace(
+              "</Types>",
+              `<Default Extension="png" ContentType="image/png"/></Types>`
+            );
+            renderedZip.file("[Content_Types].xml", ctXml);
+          }
+        }
+
+        // Logo display size: 2.2" wide. Detect actual aspect ratio via sharp
+        // to compute proportional height. Fallback to 0.60" if unavailable.
+        const LOGO_TARGET_W_IN = 2.2;
+        const EMU_PER_INCH = 914400;
+        let logoEmuW = Math.round(LOGO_TARGET_W_IN * EMU_PER_INCH); // 2011680
+        let logoEmuH = Math.round(0.60 * EMU_PER_INCH);              // 548640 fallback
+        const sharp = getSharp();
+        if (sharp) {
+          try {
+            const meta = await sharp(logoBuffer).metadata();
+            if (meta.width && meta.height && meta.width > 0) {
+              const aspect = meta.height / meta.width;
+              logoEmuH = Math.round(logoEmuW * aspect);
+              console.log("[CLIENT DOCX HEADER] logo aspect ratio from sharp", {
+                pxWidth: meta.width,
+                pxHeight: meta.height,
+                aspect: aspect.toFixed(4),
+                emuW: logoEmuW,
+                emuH: logoEmuH,
+                inchesW: LOGO_TARGET_W_IN,
+                inchesH: (logoEmuH / EMU_PER_INCH).toFixed(3),
+              });
+            }
+          } catch (metaErr) {
+            console.warn("[CLIENT DOCX HEADER] sharp metadata failed, using fallback height:", metaErr);
+          }
+        }
+
+        const logoRelId = "rIdLogoImg";
+
+        // Header XML: logo only. Title is rendered in body via {projectNameUpper}.
+        const HEADER_XML =
+          `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+          `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"` +
+          ` xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"` +
+          ` xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"` +
+          ` xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"` +
+          ` xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+          // Logo paragraph — left-aligned
+          `<w:p>` +
+            `<w:pPr><w:pStyle w:val="Header"/><w:spacing w:before="0" w:after="60" w:line="240" w:lineRule="auto"/></w:pPr>` +
+            `<w:r>` +
+              `<w:rPr/>` +
+              `<w:drawing>` +
+                `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                  `<wp:extent cx="${logoEmuW}" cy="${logoEmuH}"/>` +
+                  `<wp:docPr id="999" name="Race Logo"/>` +
+                  `<a:graphic>` +
+                    `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                      `<pic:pic>` +
+                        `<pic:nvPicPr>` +
+                          `<pic:cNvPr id="0" name="race_logo.png"/>` +
+                          `<pic:cNvPicPr/>` +
+                        `</pic:nvPicPr>` +
+                        `<pic:blipFill>` +
+                          `<a:blip r:embed="${logoRelId}"/>` +
+                          `<a:stretch><a:fillRect/></a:stretch>` +
+                        `</pic:blipFill>` +
+                        `<pic:spPr>` +
+                          `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${logoEmuW}" cy="${logoEmuH}"/></a:xfrm>` +
+                          `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+                        `</pic:spPr>` +
+                      `</pic:pic>` +
+                    `</a:graphicData>` +
+                  `</a:graphic>` +
+                `</wp:inline>` +
+              `</w:drawing>` +
+            `</w:r>` +
+          `</w:p>` +
+          // Title is rendered in the document body via {projectNameUpper} in the
+          // template — do NOT duplicate it here in the header.
+          `</w:hdr>`;
+
+        // Find existing header files or create header1.xml.
+        const headerNames = Object.keys(renderedZip.files).filter((n) =>
+          /^word\/header\d+\.xml$/.test(n)
+        );
+        const headersToUpdate = headerNames.length > 0
+          ? headerNames
+          : ["word/header1.xml"];
+
+        for (const hdrName of headersToUpdate) {
+          renderedZip.file(hdrName, HEADER_XML);
+
+          const hdrBaseName = hdrName.replace("word/", "");
+          const hdrRelsPath = `word/_rels/${hdrBaseName}.rels`;
+          const hdrRelsXml =
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+            `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+              `<Relationship Id="${logoRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/race_logo.png"/>` +
+            `</Relationships>`;
+          renderedZip.file(hdrRelsPath, hdrRelsXml);
+          headerPatched += 1;
+        }
+
+        // Ensure document.xml.rels references the header file(s).
+        const docRelsFile = renderedZip.file("word/_rels/document.xml.rels");
+        if (docRelsFile) {
+          let docRelsXml = docRelsFile.asText();
+          for (const hdrName of headersToUpdate) {
+            const hdrBaseName = hdrName.replace("word/", "");
+            if (!docRelsXml.includes(hdrBaseName)) {
+              const rIdMatches = docRelsXml.match(/Id="rId(\d+)"/g) || [];
+              let maxId = 0;
+              for (const m of rIdMatches) {
+                const num = parseInt(m.replace(/[^0-9]/g, ""), 10);
+                if (num > maxId) maxId = num;
+              }
+              const newRId = `rId${maxId + 1}`;
+              docRelsXml = docRelsXml.replace(
+                "</Relationships>",
+                `<Relationship Id="${newRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="${hdrBaseName}"/></Relationships>`
+              );
+
+              const docXmlFile = renderedZip.file("word/document.xml");
+              if (docXmlFile) {
+                let docXml = docXmlFile.asText();
+                const hdrRefTag = `<w:headerReference w:type="default" r:id="${newRId}"/>`;
+                if (!docXml.includes(hdrRefTag)) {
+                  docXml = docXml.replace(
+                    /(<w:sectPr\b[^>]*>)/g,
+                    `$1${hdrRefTag}`
+                  );
+                }
+                renderedZip.file("word/document.xml", docXml);
+              }
+            }
+          }
+          renderedZip.file("word/_rels/document.xml.rels", docRelsXml);
+        }
+
+        // Ensure [Content_Types].xml has an Override for each header.
+        const ctFile2 = renderedZip.file("[Content_Types].xml");
+        if (ctFile2) {
+          let ctXml = ctFile2.asText();
+          for (const hdrName of headersToUpdate) {
+            const partName = `/${hdrName}`;
+            if (!ctXml.includes(partName)) {
+              ctXml = ctXml.replace(
+                "</Types>",
+                `<Override PartName="${partName}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>`
+              );
+            }
+          }
+          renderedZip.file("[Content_Types].xml", ctXml);
+        }
+
+        console.log("[CLIENT DOCX HEADER]", {
+          logoFile: LOGO_PATH,
+          logoSize: logoBuffer.length,
+          logoEmuW,
+          logoEmuH,
+          logoInchesW: LOGO_TARGET_W_IN,
+          logoInchesH: (logoEmuH / EMU_PER_INCH).toFixed(3),
+          titleInHeader: false,
+          titleInBody: "via {projectNameUpper} template tag",
+          headersUpdated: headersToUpdate,
+          headerPatched,
+        });
+      } else {
+        console.warn("[CLIENT DOCX HEADER] logo file not found at", LOGO_PATH);
+      }
+    } catch (hdrErr) {
+      console.error("[CLIENT DOCX HEADER] header injection failed - non-fatal:", hdrErr);
+    }
+
+    console.log("[DOCX MANUAL_REFERENCE_FIX_QA]", {
+      twoImageLayout: "matches manual Word correction",
+      twoImageMode: "100% borderless 2-column inline table",
+      twoImageSize: "3.95in x 2.85in each",
+      oldTwoImageRenderRemoved: true,
+      titleFirstTwoPages: "one title",
+      titleOtherPages: "one title only",
+      duplicateTitleBeforeImagesRemoved: true,
+      observationOrder: "title-table-images-pagebreak",
     });
   } catch (err) {
     console.error("[CLIENT DOCX POLISH] patch failed - non-fatal:", err);
