@@ -124,8 +124,15 @@ export type ExportResult = {
 
 const TEMPLATE_PATH = path.join(process.cwd(), "templates", "reena-all-template.docx");
 
-const ROUTE_MAP_SIZE: [number, number] = [933, 700];
-const GA_DRAWING_SIZE: [number, number] = [867, 650];
+// Per spec: route map = 13" × 7" (1248 × 672 px) landscape, GA drawing
+// = 14" × 9.5" (1344 × 912 px) landscape — sized so GA + title fit on
+// ONE landscape A3 page (~14.5" × 10.5" content; title ~0.5", GA 9.5"
+// → total 10" within 10.5"). Big enough to dominate the page, small
+// enough that Word's keepNext on the title above it actually keeps
+// them on the same page. On smaller pages Word scales down
+// proportionally while preserving aspect ratio.
+const ROUTE_MAP_SIZE: [number, number] = [1248, 672];
+const GA_DRAWING_SIZE: [number, number] = [1344, 912];
 // Per spec: observation photo size depends on how many photos the report
 // has. Single photo: 7.5" × 5.3" (720 × 509 px). 2 photos: each one is
 // 7.2" × 5.0" (691 × 480 px) — matches the user's manual Word size that
@@ -547,21 +554,29 @@ function getDifficultyTableColors(value: unknown): {
   // chose red" bug. Substring `includes` would catch "red" inside
   // "redirect", "hard" inside "hardware", "fail" inside "failure" —
   // applying the red shading to perfectly normal observations.
+  // Per spec: bright header colours (yellow / red / green) with much
+  // milder pastel body fills derived from the same hue. Header text is
+  // always rendered white by the post-render recolorHeaderRowToWhite
+  // pass — headerTextColor here is kept only as a template-level safety
+  // fallback.
+  // Per spec: bright header colours (yellow / red / green) with VERY
+  // mild near-white pastel body fills derived from the same hue.
+  // Header text is always white (post-render recolour pass).
   if (RED_KEYWORDS.includes(d)) {
     return {
       key: "red",
-      headerFillColor: "B71C1C",
+      headerFillColor: "F05052",  // bright red (spec)
       headerTextColor: "FFFFFF",
-      bodyFillColor: "F8D7DA",
+      bodyFillColor: "FDF2F2",    // near-white with faintest pink tint
       bodyTextColor: "0B3D2E",
     };
   }
   if (YELLOW_KEYWORDS.includes(d)) {
     return {
       key: "yellow",
-      headerFillColor: "D6A800",
-      headerTextColor: "000000",
-      bodyFillColor: "FFF3CD",
+      headerFillColor: "EABD0D",  // bright yellow (spec)
+      headerTextColor: "FFFFFF",
+      bodyFillColor: "FFFBE6",    // near-white with faintest cream tint
       bodyTextColor: "0B3D2E",
     };
   }
@@ -570,9 +585,9 @@ function getDifficultyTableColors(value: unknown): {
   void GREEN_KEYWORDS; // referenced for grep + future explicit check
   return {
     key: "green",
-    headerFillColor: "43A047",
+    headerFillColor: "56BE9F",    // bright mint green (spec)
     headerTextColor: "FFFFFF",
-    bodyFillColor: "DDEFD8",
+    bodyFillColor: "F0F9F4",      // near-white with faintest mint tint
     bodyTextColor: "0B3D2E",
   };
 }
@@ -629,75 +644,106 @@ function normalizeCategoryKey(value: unknown): string {
     .replace(/&/g, " and ")
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  // Side variants must be checked BEFORE the broader signboard / camera_pole
-  // rules so "Side Signboard" doesn't resolve to "signboard" (ca-9).
-  if (
-    c.includes("side_signboard") ||
-    c.includes("signal_pole") ||
-    c.includes("speed_pole") ||
-    c.includes("electric_side_signboard")
-  ) {
+
+  // ---- Order matters: more specific keywords FIRST so they don't get
+  // ---- swallowed by broader rules below.
+
+  // Side / signal / speed variants must beat the broader signboard rule.
+  if (c.includes("side_signboard") || c.includes("electric_side_signboard")) {
     return "side_signboard";
   }
-  if (c.includes("footpath_bridge")) return "footpath_bridge";
+  if (c.includes("signal_pole") || c.includes("signal")) return "signal_pole";
+  if (c.includes("speed_pole") || c.includes("speed_bump") || c.includes("speed_break") || c.includes("hump")) {
+    return "speed_pole";
+  }
+
+  // Bridge variants — specific bridge types must beat the generic "bridge".
+  if (c.includes("footpath_bridge") || c.includes("footpath")) return "footpath_bridge";
+  if (c.includes("river_bridge") || c.includes("river")) return "river_bridge";
+  if (c.includes("underpass")) return "underpass";
+  // Junction variants — left/right specific must beat plain "junction".
+  if (c.includes("junction_left") || /\bleft\b/.test(c) && c.includes("junction")) return "junction_left";
+  if (c.includes("junction_right") || /\bright\b/.test(c) && c.includes("junction")) return "junction_right";
+  if (c.includes("junction") || c.includes("intersection") || c.includes("crossroad")) return "junction";
+  // Plain "Bridge" / "Flyover" / "Overpass" — falls through to bridge.jpg.
+  if (c.includes("bridge") || c.includes("flyover") || c.includes("overpass") || c.includes("viaduct")) {
+    return "bridge";
+  }
+
   if (c.includes("low_tension") || c === "lt_cable") return "lt_cable";
   if (c.includes("high_tension") || c === "ht_cable") return "ht_cable";
   if (c.includes("tower")) return "towerline_cable";
-  if (c.includes("underpass")) return "underpass";
   if (c.includes("tree")) return "tree";
-  if (c.includes("river")) return "river_bridge";
-  if (
-    c.includes("signboard") ||
-    c.includes("electric_sign") ||
-    c.includes("camera_pole")
-  ) {
+  // Camera / CCTV pole gets its OWN icon (must be checked BEFORE the
+  // broader signboard rule so "Camera Pole" doesn't fall into signboard).
+  if (c.includes("camera_pole") || c.includes("camera") || c.includes("cctv")) {
+    return "camera_pole";
+  }
+  if (c.includes("signboard") || c.includes("electric_sign")) {
     return "signboard";
   }
   if (c.includes("toll")) return "toll";
   if (c.includes("narrow")) return "narrow_road";
   if (c.includes("gate")) return "gate";
-  if (c.includes("bend")) return "bend";
-  if (c.includes("petrol")) return "petrol";
-  if (c.includes("railway")) return "railway_level_crossing";
-  if (c.includes("diversion")) return "diversion";
+  if (c.includes("bend") || c.includes("curve") || c.includes("turn")) return "bend";
+  if (c.includes("petrol") || c.includes("fuel") || c.includes("gas_station")) return "petrol";
+  if (c.includes("railway") || c.includes("rail_crossing")) return "railway_level_crossing";
+  if (c.includes("diversion") || c.includes("detour")) return "diversion";
+  if (c.includes("parking") || c.includes("park_area")) return "parking";
+
   return "fallback";
 }
 
 // Server-side fs paths (process.cwd() is the project root). The browser-side
 // equivalent lives in lib/download.ts and uses URL-style paths instead.
+//
+// Map is built from the ACTUAL files present in
+// public/images/report-icons/ (all .png) plus alias keys so the
+// normalizeCategoryKey output (which uses canonical underscore_keys
+// like "lt_cable", "ht_cable", "towerline", "tree", etc.) resolves to
+// the same icon as the descriptive filename.
 const CATEGORY_ICON_MAP: Record<string, string> = {
-  footpath_bridge: "public/images/report-icons/image.png",
-  lt_cable: "public/images/report-icons/ca-3.png",
-  low_tension_cable: "public/images/report-icons/ca-3.png",
-  ht_cable: "public/images/report-icons/ca-3.png",
-  high_tension_cable: "public/images/report-icons/ca-3.png",
-  towerline_cable: "public/images/report-icons/ca-4.png",
-  towerline: "public/images/report-icons/ca-4.png",
-  tower_line: "public/images/report-icons/ca-4.png",
-  tower_line_cable: "public/images/report-icons/ca-4.png",
-  underpass: "public/images/report-icons/ca-5.png",
-  underpass_bridge: "public/images/report-icons/ca-5.png",
-  tree: "public/images/report-icons/ca-6.png",
-  tree_branches: "public/images/report-icons/ca-6.png",
-  river_bridge: "public/images/report-icons/ca-7.png",
-  signboard: "public/images/report-icons/ca-8.png",
-  electric_sign: "public/images/report-icons/ca-8.png",
-  electric_signboard: "public/images/report-icons/ca-8.png",
-  camera_pole: "public/images/report-icons/ca-8.png",
-  toll: "public/images/report-icons/ca-9.png",
-  toll_plaza: "public/images/report-icons/ca-9.png",
-  narrow_road: "public/images/report-icons/ca-10.png",
-  gate: "public/images/report-icons/ca-11.png",
-  side_signboard: "public/images/report-icons/ca-8.png",
-  signal_pole: "public/images/report-icons/ca-17.png",
-  speed_pole: "public/images/report-icons/ca-17.png",
-  electric_side_signboard: "public/images/report-icons/ca-17.png",
-  bend: "public/images/report-icons/ca-13.png",
-  petrol: "public/images/report-icons/ca-15.png",
-  petrol_bunk: "public/images/report-icons/ca-15.png",
-  railway_level_crossing: "public/images/report-icons/ca-16.png",
-  diversion: "public/images/report-icons/diversion.jpeg",
-  fallback: "public/images/report-icons/ca-5.png",
+  // --- One entry per actual file in the folder -----------------------
+  bend: "public/images/report-icons/bend.png",
+  bridge: "public/images/report-icons/bridge.png",
+  camera_pole: "public/images/report-icons/camera_pole.png",
+  electric_side_signboard: "public/images/report-icons/electric_side_signboard.png",
+  electric_signboard: "public/images/report-icons/electric_signboard.png",
+  footpath_bridge: "public/images/report-icons/footpath_bridge.png",
+  gate: "public/images/report-icons/gate.png",
+  high_tension_cable: "public/images/report-icons/high_tension_cable.png",
+  junction: "public/images/report-icons/junction.png",
+  junction_left: "public/images/report-icons/junction-left.png",
+  junction_right: "public/images/report-icons/junction-right.png",
+  low_tension_cable: "public/images/report-icons/low_tension_cable.png",
+  narrow_road: "public/images/report-icons/narrow_road.png",
+  petrol_bunk: "public/images/report-icons/petrol_bunk.png",
+  railway_level_crossing: "public/images/report-icons/railway_level_crossing.png",
+  river_bridge: "public/images/report-icons/river_bridge.png",
+  side_signboard: "public/images/report-icons/side_signboard.png",
+  signal_pole: "public/images/report-icons/signal_pole.png",
+  signboard: "public/images/report-icons/signboard.png",
+  speed_pole: "public/images/report-icons/speed_pole.png",
+  toll_plaza: "public/images/report-icons/toll_plaza.png",
+  tower_line_cable: "public/images/report-icons/tower_line_cable.png",
+  tree_branches: "public/images/report-icons/tree_branches.png",
+  underpass_bridge: "public/images/report-icons/underpass_bridge.png",
+
+  // --- Aliases used by normalizeCategoryKey ---------------------------
+  // These short keys collapse multiple input variations onto a single
+  // canonical icon so e.g. "LT Cable" / "Low Tension Cable" / "lt_cable"
+  // all reach low_tension_cable.png.
+  lt_cable: "public/images/report-icons/low_tension_cable.png",
+  ht_cable: "public/images/report-icons/high_tension_cable.png",
+  towerline: "public/images/report-icons/tower_line_cable.png",
+  towerline_cable: "public/images/report-icons/tower_line_cable.png",
+  tower_line: "public/images/report-icons/tower_line_cable.png",
+  tree: "public/images/report-icons/tree_branches.png",
+  underpass: "public/images/report-icons/underpass_bridge.png",
+  toll: "public/images/report-icons/toll_plaza.png",
+  petrol: "public/images/report-icons/petrol_bunk.png",
+  road: "public/images/report-icons/narrow_road.png",
+  electric_sign: "public/images/report-icons/electric_signboard.png",
 };
 
 // ---- ON-THE-FLY ICON GENERATION FOR NEW / UNKNOWN CATEGORIES ----
@@ -761,69 +807,91 @@ function classifyAutoIconKind(rawCategory: string): AutoIconKind {
 }
 
 /**
- * White SVG glyphs (one per AutoIconKind) sized for a 160×160 canvas
- * centered around (80, 80). Each glyph is drawn over the colored
- * background circle by generateCategoryIcon. All shapes are pure SVG
- * primitives — no font dependency — so they render identically on any
- * server with sharp/librsvg installed.
+ * BLACK monochrome SVG glyphs (one per AutoIconKind) sized for a 160×160
+ * canvas centered around (80, 80). Drawn directly on a transparent
+ * background — no colored circle, no random hues. Solid black fills and
+ * strokes; white (#FFFFFF) is used only for negative-space cutouts
+ * inside the black shape (e.g. the "!" inside the warning triangle).
+ * Pure SVG primitives — no font dependency.
  */
 const AUTO_ICON_GLYPHS: Record<AutoIconKind, string> = {
   warning:
     `<g transform="translate(80,80)">` +
-      `<path d="M 0,-44 L 44,32 L -44,32 Z" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2" stroke-linejoin="round"/>` +
-      `<rect x="-4" y="-18" width="8" height="28" rx="2" fill="rgba(0,0,0,0.85)"/>` +
-      `<circle cx="0" cy="22" r="5" fill="rgba(0,0,0,0.85)"/>` +
+      // Solid black triangle
+      `<path d="M 0,-60 L 60,42 L -60,42 Z" fill="#000000" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>` +
+      // White exclamation cutout
+      `<rect x="-5" y="-22" width="10" height="34" rx="2" fill="#FFFFFF"/>` +
+      `<circle cx="0" cy="26" r="6" fill="#FFFFFF"/>` +
     `</g>`,
   pothole:
+    // Solid black irregular pothole shape
     `<g transform="translate(80,80)">` +
-      `<path d="M -46,2 Q -42,-30 -10,-34 Q 28,-37 42,-12 Q 48,16 26,32 Q 0,42 -28,34 Q -50,26 -46,2 Z" fill="white" fill-opacity="0.95"/>` +
-      `<path d="M -28,4 Q -24,-16 -4,-18 Q 20,-20 26,-2 Q 30,12 14,20 Q -6,24 -20,16 Q -32,10 -28,4 Z" fill="rgba(0,0,0,0.85)"/>` +
+      `<path d="M -56,4 Q -50,-38 -12,-42 Q 34,-46 50,-14 Q 58,20 32,38 Q 0,50 -34,40 Q -60,32 -56,4 Z" fill="#000000"/>` +
+      // White inner shadow / texture spot for depth
+      `<ellipse cx="-12" cy="-8" rx="10" ry="5" fill="#FFFFFF" fill-opacity="0.5"/>` +
     `</g>`,
   cone:
     `<g transform="translate(80,80)">` +
-      `<path d="M 0,-42 L 30,38 L -30,38 Z" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2" stroke-linejoin="round"/>` +
-      `<rect x="-22" y="0" width="44" height="7" fill="rgba(0,0,0,0.85)"/>` +
-      `<rect x="-16" y="-22" width="32" height="6" fill="rgba(0,0,0,0.85)"/>` +
-      `<rect x="-34" y="38" width="68" height="5" fill="white"/>` +
+      // Solid black cone triangle
+      `<path d="M 0,-54 L 38,46 L -38,46 Z" fill="#000000" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>` +
+      // White horizontal stripes
+      `<rect x="-26" y="0" width="52" height="8" fill="#FFFFFF"/>` +
+      `<rect x="-19" y="-26" width="38" height="7" fill="#FFFFFF"/>` +
+      // Black base bar
+      `<rect x="-44" y="46" width="88" height="6" fill="#000000"/>` +
     `</g>`,
   pin:
     `<g transform="translate(80,80)">` +
-      `<path d="M 0,-44 C -22,-44 -32,-24 -32,-12 C -32,12 0,42 0,42 C 0,42 32,12 32,-12 C 32,-24 22,-44 0,-44 Z" fill="white" fill-opacity="0.95"/>` +
-      `<circle cx="0" cy="-14" r="11" fill="rgba(0,0,0,0.85)"/>` +
+      // Solid black pin drop
+      `<path d="M 0,-54 C -26,-54 -38,-30 -38,-14 C -38,16 0,52 0,52 C 0,52 38,16 38,-14 C 38,-30 26,-54 0,-54 Z" fill="#000000"/>` +
+      // White inner circle
+      `<circle cx="0" cy="-16" r="13" fill="#FFFFFF"/>` +
     `</g>`,
   signal:
     `<g transform="translate(80,80)">` +
-      `<rect x="-18" y="-44" width="36" height="80" rx="6" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2"/>` +
-      `<circle cx="0" cy="-26" r="9" fill="rgba(0,0,0,0.85)"/>` +
-      `<circle cx="0" cy="-4" r="9" fill="rgba(0,0,0,0.85)"/>` +
-      `<circle cx="0" cy="18" r="9" fill="rgba(0,0,0,0.85)"/>` +
+      // Solid black signal box
+      `<rect x="-22" y="-54" width="44" height="100" rx="6" fill="#000000"/>` +
+      // Three white lights
+      `<circle cx="0" cy="-32" r="11" fill="#FFFFFF"/>` +
+      `<circle cx="0" cy="-4" r="11" fill="#FFFFFF"/>` +
+      `<circle cx="0" cy="24" r="11" fill="#FFFFFF"/>` +
     `</g>`,
   stop:
     `<g transform="translate(80,80)">` +
-      `<polygon points="-22,-40 22,-40 40,-22 40,22 22,40 -22,40 -40,22 -40,-22" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2" stroke-linejoin="round"/>` +
-      `<rect x="-26" y="-5" width="52" height="10" fill="rgba(0,0,0,0.85)"/>` +
+      // Solid black octagon
+      `<polygon points="-26,-50 26,-50 50,-26 50,26 26,50 -26,50 -50,26 -50,-26" fill="#000000" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>` +
+      // White horizontal bar
+      `<rect x="-32" y="-6" width="64" height="12" fill="#FFFFFF"/>` +
     `</g>`,
   flag:
     `<g transform="translate(80,80)">` +
-      `<rect x="-4" y="-44" width="6" height="88" fill="white"/>` +
-      `<path d="M 2,-44 L 38,-32 L 2,-18 Z" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2" stroke-linejoin="round"/>` +
+      // Black flagpole
+      `<rect x="-5" y="-54" width="7" height="108" fill="#000000"/>` +
+      // Black flag triangle
+      `<path d="M 2,-54 L 48,-38 L 2,-22 Z" fill="#000000" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>` +
     `</g>`,
   bridge:
     `<g transform="translate(80,80)">` +
-      `<path d="M -44,12 Q 0,-32 44,12" fill="none" stroke="white" stroke-width="6" stroke-linecap="round"/>` +
-      `<rect x="-44" y="20" width="88" height="6" fill="white"/>` +
-      `<rect x="-40" y="26" width="6" height="14" fill="white"/>` +
-      `<rect x="-12" y="26" width="6" height="14" fill="white"/>` +
-      `<rect x="6" y="26" width="6" height="14" fill="white"/>` +
-      `<rect x="34" y="26" width="6" height="14" fill="white"/>` +
+      // Black arch
+      `<path d="M -54,18 Q 0,-44 54,18" fill="none" stroke="#000000" stroke-width="8" stroke-linecap="round"/>` +
+      // Black deck
+      `<rect x="-54" y="26" width="108" height="8" fill="#000000"/>` +
+      // Black pillars
+      `<rect x="-50" y="34" width="7" height="18" fill="#000000"/>` +
+      `<rect x="-15" y="34" width="7" height="18" fill="#000000"/>` +
+      `<rect x="8" y="34" width="7" height="18" fill="#000000"/>` +
+      `<rect x="43" y="34" width="7" height="18" fill="#000000"/>` +
     `</g>`,
   speedbump:
     `<g transform="translate(80,80)">` +
-      `<rect x="-44" y="22" width="88" height="6" fill="white"/>` +
-      `<path d="M -36,22 Q 0,-22 36,22 Z" fill="white" stroke="rgba(0,0,0,0.2)" stroke-width="2"/>` +
-      `<rect x="-22" y="-2" width="6" height="14" fill="rgba(0,0,0,0.85)"/>` +
-      `<rect x="-3" y="-12" width="6" height="22" fill="rgba(0,0,0,0.85)"/>` +
-      `<rect x="16" y="-2" width="6" height="14" fill="rgba(0,0,0,0.85)"/>` +
+      // Black road line
+      `<rect x="-54" y="28" width="108" height="7" fill="#000000"/>` +
+      // Black bump dome
+      `<path d="M -44,28 Q 0,-26 44,28 Z" fill="#000000"/>` +
+      // White vertical bars on the bump (motion / hazard stripes)
+      `<rect x="-26" y="-4" width="7" height="16" fill="#FFFFFF"/>` +
+      `<rect x="-3" y="-14" width="7" height="26" fill="#FFFFFF"/>` +
+      `<rect x="19" y="-4" width="7" height="16" fill="#FFFFFF"/>` +
     `</g>`,
 };
 
@@ -844,18 +912,12 @@ async function generateCategoryIcon(rawCategory: string): Promise<Buffer | null>
   const kind = classifyAutoIconKind(text);
   const glyph = AUTO_ICON_GLYPHS[kind];
 
-  // Stable colour from MD5 of the lower-cased text. HSL keeps the
-  // generated icons visually consistent (mid-saturation, mid-lightness).
-  const hash = crypto.createHash("md5").update(text.toLowerCase()).digest();
-  const hue = hash[0] % 360;
-  const sat = 60 + (hash[1] % 20); // 60–79%
-  const light = 42 + (hash[2] % 12); // 42–53%
-
+  // BLACK ONLY — no random hues. The glyph is solid black on a fully
+  // transparent background (with white cutouts inside the shape for
+  // negative-space details). Same input text → identical output icon.
   const size = 160;
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
-      `<circle cx="${size / 2}" cy="${size / 2}" r="${size / 2 - 4}" ` +
-        `fill="hsl(${hue}, ${sat}%, ${light}%)" />` +
       glyph +
     `</svg>`;
 
@@ -864,7 +926,7 @@ async function generateCategoryIcon(rawCategory: string): Promise<Buffer | null>
     console.log("[CATEGORY ICON GENERATED]", {
       rawCategory: text,
       kind,
-      hsl: `hsl(${hue}, ${sat}%, ${light}%)`,
+      style: "black-only monochrome on transparent background",
       bytes: buf.length,
     });
     return buf;
@@ -877,9 +939,88 @@ async function generateCategoryIcon(rawCategory: string): Promise<Buffer | null>
   }
 }
 
+// ---- SIMILARITY MATCHING for unknown categories ----
+// When a raw category text doesn't have a direct entry in
+// CATEGORY_ICON_MAP, walk through these groups and pick the icon for
+// the FIRST group whose keyword list intersects with the category text.
+// This way "Road Damage" or "Side Road" reuse the narrow_road.png
+// icon, "Flyover" reuses bridge.png, "CCTV Pole" reuses camera_pole.png,
+// etc. — instead of falling straight through to the auto-generator.
+//
+// Each group's keywords are matched as substrings against the
+// lower-cased category text (with non-alphanumerics replaced by spaces).
+// More-specific groups should appear FIRST so they don't get swallowed
+// by broader ones (e.g. "river bridge" matches the bridge group ONLY
+// after the river_bridge map entry has already been tried).
+const CATEGORY_SIMILARITY_GROUPS: Array<{ keywords: string[]; iconFile: string }> = [
+  // --- Bridge family ---
+  { keywords: ["river"], iconFile: "river_bridge.png" },
+  { keywords: ["footpath", "sidewalk", "pavement", "walkway", "pedestrian path"], iconFile: "footpath_bridge.png" },
+  { keywords: ["underpass", "tunnel", "subway"], iconFile: "underpass_bridge.png" },
+  { keywords: ["bridge", "flyover", "overpass", "viaduct", "culvert"], iconFile: "bridge.png" },
+
+  // --- Junction family ---
+  { keywords: ["junction left", "left junction"], iconFile: "junction-left.png" },
+  { keywords: ["junction right", "right junction"], iconFile: "junction-right.png" },
+  { keywords: ["junction", "intersection", "crossroad", "crossing"], iconFile: "junction.png" },
+
+  // --- Cables / wires / poles ---
+  { keywords: ["high tension", "ht cable", "ht line"], iconFile: "high_tension_cable.png" },
+  { keywords: ["low tension", "lt cable", "lt line"], iconFile: "low_tension_cable.png" },
+  { keywords: ["tower line", "transmission tower", "tower", "pylon"], iconFile: "tower_line_cable.png" },
+  { keywords: ["cable", "wire", "transmission"], iconFile: "low_tension_cable.png" },
+
+  // --- Signs / signboards / cameras ---
+  { keywords: ["side signboard", "side sign"], iconFile: "side_signboard.png" },
+  { keywords: ["electric side signboard"], iconFile: "electric_side_signboard.png" },
+  { keywords: ["electric sign", "electric signboard", "electric board"], iconFile: "electric_signboard.png" },
+  { keywords: ["camera pole", "cctv pole", "cctv", "camera"], iconFile: "camera_pole.png" },
+  { keywords: ["signboard", "signpost", "sign board", "name board", "board"], iconFile: "signboard.png" },
+
+  // --- Signals / speed ---
+  { keywords: ["signal pole", "signal", "traffic light", "traffic signal"], iconFile: "signal_pole.png" },
+  { keywords: ["speed pole", "speed bump", "speed breaker", "speed hump", "hump", "bumper"], iconFile: "speed_pole.png" },
+
+  // --- Road / surface ---
+  { keywords: ["narrow road", "narrow"], iconFile: "narrow_road.png" },
+  { keywords: ["road", "street", "lane", "highway", "way", "path", "carriageway"], iconFile: "narrow_road.png" },
+
+  // --- Bend / curve / turn ---
+  { keywords: ["bend", "curve"], iconFile: "bend.png" },
+
+  // --- Vegetation ---
+  { keywords: ["tree branch", "tree", "branch", "foliage", "vegetation"], iconFile: "tree_branches.png" },
+
+  // --- Gate / barrier ---
+  { keywords: ["gate", "barrier", "boom", "barricade"], iconFile: "gate.png" },
+
+  // --- Petrol / fuel ---
+  { keywords: ["petrol", "fuel", "diesel", "gas station", "filling station"], iconFile: "petrol_bunk.png" },
+
+  // --- Toll ---
+  { keywords: ["toll plaza", "toll", "fastag"], iconFile: "toll_plaza.png" },
+
+  // --- Railway ---
+  { keywords: ["railway", "rail crossing", "rail", "train"], iconFile: "railway_level_crossing.png" },
+];
+
+function findSimilarIcon(rawCategory: unknown): string | null {
+  const text = String(rawCategory || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  if (!text) return null;
+  for (const group of CATEGORY_SIMILARITY_GROUPS) {
+    for (const kw of group.keywords) {
+      if (text.includes(kw)) return group.iconFile;
+    }
+  }
+  return null;
+}
+
 function getCategoryIconFile(category: unknown): string {
   const key = normalizeCategoryKey(category);
-  // Canonical category with a real mapping (key !== "fallback") → use it.
+  // 1. Canonical category with a real mapping → use it.
   if (key !== "fallback" && CATEGORY_ICON_MAP[key]) {
     const rel = CATEGORY_ICON_MAP[key];
     console.log("[category mapping check]", {
@@ -890,15 +1031,25 @@ function getCategoryIconFile(category: unknown): string {
     });
     return rel.replace(/^public[\\/]images[\\/]report-icons[\\/]/, "");
   }
-  // Unknown / new category → synthesize an auto-icon filename. The
-  // loader (loadCategoryIcon) will detect the AUTO_ICON_PREFIX and
-  // generate the actual PNG instead of reading from disk.
+  // 2. Try keyword-based similarity matching against existing icons.
+  //    "Road Damage" → narrow_road.png, "Flyover" → bridge.png, etc.
+  const similarFile = findSimilarIcon(category);
+  if (similarFile) {
+    console.log("[category mapping check]", {
+      rawCategory: category,
+      normalizedKey: key,
+      iconRelativePath: `public/images/report-icons/${similarFile}`,
+      source: "similarity-match",
+    });
+    return similarFile;
+  }
+  // 3. No similar icon either → synthesize an auto-icon filename. The
+  //    loader (loadCategoryIcon) will detect the AUTO_ICON_PREFIX and
+  //    generate the actual PNG instead of reading from disk.
   const text = String(category || "").trim();
   if (!text) {
-    // Truly empty/null category: there's nothing to draw initials from
-    // and there's no canonical icon either — return a sentinel filename
-    // so the loader produces a null entry (template's fallback text
-    // takes over).
+    // Truly empty/null category — sentinel so loader returns null entry
+    // and the template's fallback text takes over.
     return `${AUTO_ICON_PREFIX}empty.png`;
   }
   const fileName = autoIconFileNameFor(text);
@@ -910,6 +1061,132 @@ function getCategoryIconFile(category: unknown): string {
     source: "auto-generated-new-category",
   });
   return fileName;
+}
+
+/**
+ * Generate the "Locations" stepper image (project title at the top,
+ * then hollow circles linked by dotted connectors, with a red pin
+ * marker on the final destination) that mirrors the web-app UI
+ * design. Renders an SVG via sharp → PNG so the design is precise
+ * AND the title + stepper become a single inseparable image (Word
+ * physically can't split them across pages). Returns null if there
+ * are no labels or sharp isn't available.
+ */
+async function generateRouteLocationsStepper(
+  labels: { label: string; pin_type: string }[],
+  projectTitle: string
+): Promise<Buffer | null> {
+  const sharp = getSharp();
+  if (!sharp) return null;
+  const items = labels.filter((l) => l.label).slice(0, 8);
+  if (items.length === 0) return null;
+
+  const escapeXml = (s: string) =>
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+
+  // Layout (px units inside the SVG canvas):
+  const W = 720;                    // total canvas width
+  const ROW_H = 90;                 // vertical spacing per item
+  const TITLE_BAND_H = projectTitle ? 80 : 0; // top band reserved for project title
+  const TOP_PAD = 30;               // gap below title before "Locations" heading
+  const HEADING_H = 40;             // "Locations" heading band
+  const BOTTOM_PAD = 24;
+  const STEPPER_TOP = TITLE_BAND_H + TOP_PAD + HEADING_H;
+  const H = STEPPER_TOP + items.length * ROW_H + BOTTOM_PAD;
+  const MARK_X = 60;                // x-center of the circles / pin column
+  const MARK_R = 14;                // circle radius
+  const RECT_X = MARK_X + 40;       // left edge of the rounded rectangle
+  const RECT_W = W - RECT_X - 30;   // rect width
+  const RECT_H = 56;                // rect height
+  const RECT_RADIUS = 14;
+
+  const parts: string[] = [];
+
+  // ---- Project title at the top of the image (centered, 22pt bold,
+  //      grey-blue #44546A — matches the regular page title style).
+  if (projectTitle) {
+    parts.push(
+      `<text x="${W / 2}" y="${TITLE_BAND_H / 2 + 8}" text-anchor="middle" ` +
+        `font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="#44546A">` +
+        escapeXml(projectTitle.toUpperCase()) +
+      `</text>`
+    );
+  }
+
+  // ---- "Locations" small heading
+  parts.push(
+    `<text x="20" y="${TITLE_BAND_H + TOP_PAD + HEADING_H - 12}" ` +
+      `font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#1F2937">ROUTE SURVEY KEY POINTS</text>`
+  );
+
+  for (let i = 0; i < items.length; i += 1) {
+    const it = items[i];
+    const cy = STEPPER_TOP + i * ROW_H + ROW_H / 2 - 10;
+    const isEnd =
+      i === items.length - 1 ||
+      it.pin_type === "end";
+
+    // Connector dotted line from THIS row's marker down to the NEXT row's marker
+    if (i < items.length - 1) {
+      const lineY1 = cy + MARK_R + 2;
+      const lineY2 = cy + ROW_H - MARK_R - 2;
+      parts.push(
+        `<line x1="${MARK_X}" y1="${lineY1}" x2="${MARK_X}" y2="${lineY2}" ` +
+          `stroke="#9CA3AF" stroke-width="3" stroke-linecap="round" stroke-dasharray="2 8"/>`
+      );
+    }
+
+    // Marker: hollow circle for stops, filled red pin for the destination
+    if (isEnd) {
+      // Pin shape (drop) in red
+      parts.push(
+        `<g transform="translate(${MARK_X},${cy - 6})">` +
+          `<path d="M 0,-18 C -12,-18 -18,-8 -18,-2 C -18,12 0,28 0,28 C 0,28 18,12 18,-2 C 18,-8 12,-18 0,-18 Z" fill="#EC4054" stroke="#B91C2A" stroke-width="1.5"/>` +
+          `<circle cx="0" cy="-4" r="6" fill="#FFFFFF"/>` +
+        `</g>`
+      );
+    } else {
+      // Hollow circle
+      parts.push(
+        `<circle cx="${MARK_X}" cy="${cy}" r="${MARK_R}" fill="#FFFFFF" stroke="#1F2937" stroke-width="2.5"/>`
+      );
+    }
+
+    // Rounded rectangle with the location label
+    const rectY = cy - RECT_H / 2;
+    parts.push(
+      `<rect x="${RECT_X}" y="${rectY}" width="${RECT_W}" height="${RECT_H}" rx="${RECT_RADIUS}" ry="${RECT_RADIUS}" ` +
+        `fill="#FFFFFF" stroke="#D1D5DB" stroke-width="2"/>` +
+      `<text x="${RECT_X + 24}" y="${cy + 8}" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#0F172A">` +
+        escapeXml(it.label) +
+      `</text>`
+    );
+  }
+
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+      parts.join("") +
+    `</svg>`;
+
+  try {
+    const buf = await sharp(Buffer.from(svg)).png().toBuffer();
+    console.log("[ROUTE LOCATIONS STEPPER GENERATED]", {
+      itemCount: items.length,
+      titleBaked: !!projectTitle,
+      svgSize: `${W}x${H}`,
+      bytes: buf.length,
+    });
+    return buf;
+  } catch (err) {
+    console.warn("[ROUTE LOCATIONS STEPPER FAILED]", {
+      err: (err as Error)?.message || String(err),
+    });
+    return null;
+  }
 }
 
 const categoryIconCache = new Map<string, ImageEntry | null>();
@@ -2005,6 +2282,32 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const routeMapUrl = String(routePageRow?.map_file_url || "").trim();
   console.log("[export actual] routeMapUrl:", routeMapUrl || "(none)");
 
+  // ----- Step 6b: Route locations (the "Locations" stepper from the UI).
+  // Loads the labelled waypoints saved by the GA-setup modal so we can
+  // reproduce the same hollow-circle / pin / dotted-connector design in
+  // the DOCX export, immediately after the route map.
+  type RouteLocation = { label: string; pin_type: string; sort_order: number };
+  let routeLocationLabels: RouteLocation[] = [];
+  try {
+    if (routePageRow?.id) {
+      const locRows = await safeQuery(
+        "SELECT label, pin_type, sort_order FROM project_route_page_locations " +
+          "WHERE project_id = ? AND project_page_id = ? ORDER BY sort_order ASC",
+        [projectId, routePageRow.id]
+      );
+      routeLocationLabels = locRows
+        .map((r: Row) => ({
+          label: String(r.label || "").trim(),
+          pin_type: String(r.pin_type || "mid"),
+          sort_order: Number(r.sort_order) || 0,
+        }))
+        .filter((r) => r.label !== "");
+    }
+  } catch (err) {
+    console.warn("[export actual] route locations query failed - continuing without:", err);
+  }
+  console.log("[export actual] routeLocations:", routeLocationLabels);
+
   // ----- Resolve scalar template values.
   const objective = valueOrDash(
     routePageRow?.objective ?? projectRow.objective ?? projectRow.description
@@ -2054,6 +2357,29 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     }
   } catch (err) {
     console.error("[export actual] routeMap fetch step threw - ignoring:", err);
+  }
+
+  // ----- Generate the route-locations stepper image (hollow circles +
+  // dotted connectors + final red pin) and store it in imageMap so the
+  // post-render pass can inject it right after the route map.
+  try {
+    if (routeLocationLabels.length > 0) {
+      // Pass empty title — the project title is now in the Word
+      // header so we don't bake it into the stepper image too.
+      const stepperBuf = await generateRouteLocationsStepper(
+        routeLocationLabels,
+        ""
+      );
+      if (stepperBuf && stepperBuf.length > 0) {
+        imageMap.set("routeLocations", {
+          buffer: stepperBuf,
+          contentType: "image/png",
+          path: "(generated:routeLocations)",
+        });
+      }
+    }
+  } catch (err) {
+    console.warn("[export actual] route locations stepper failed - ignoring:", err);
   }
 
   // ----- Observations.
@@ -3811,6 +4137,40 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
 
       let obsTablesRestyled = 0;
       let obsCellsResized = 0;
+      let obsHeadersRecolored = 0;
+
+      /**
+       * Recolour every text run in the given row to white (#FFFFFF) so
+       * the header text reads cleanly on its coloured background.
+       * Touches ONLY <w:color> inside text-run <w:rPr> — leaves cell
+       * shading (<w:shd>), paragraph alignment, borders, and table
+       * structure completely alone.
+       */
+      const recolorHeaderRowToWhite = (trXml: string): string => {
+        let r = trXml;
+        // 1. Existing <w:rPr> blocks: replace any inner <w:color>, or
+        //    inject a fresh white <w:color> if none present.
+        r = r.replace(
+          /<w:rPr>([\s\S]*?)<\/w:rPr>/g,
+          (_full: string, inner: string) => {
+            if (/<w:color\b/.test(inner)) {
+              const updated = inner.replace(
+                /<w:color\b[^/]*\/>/g,
+                `<w:color w:val="FFFFFF"/>`
+              );
+              return `<w:rPr>${updated}</w:rPr>`;
+            }
+            return `<w:rPr>${inner}<w:color w:val="FFFFFF"/></w:rPr>`;
+          }
+        );
+        // 2. Runs that have NO <w:rPr> at all: inject one with just the
+        //    white color so plain runs also get recoloured.
+        r = r.replace(
+          /<w:r>(\s*)<w:t/g,
+          `<w:r>$1<w:rPr><w:color w:val="FFFFFF"/></w:rPr><w:t`
+        );
+        return r;
+      };
       // Iterate every observation table (identified by "GPS LOCATION"
       // header text) and rewrite its <w:tblGrid>, <w:tblW>, layout,
       // and per-cell <w:tcW> widths so the row matches the reference
@@ -3882,12 +4242,28 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             }
           );
 
+          // 5. Recolour the FIRST <w:tr> (header row) text to white.
+          //    Cell shading (yellow/gold background) sits on <w:tcPr>'s
+          //    <w:shd> — completely untouched. Only run-level <w:color>
+          //    inside the header row's <w:rPr> blocks is rewritten.
+          const firstTrMatch = out.match(/<w:tr\b[\s\S]*?<\/w:tr>/);
+          if (firstTrMatch) {
+            const oldHeader = firstTrMatch[0];
+            const newHeader = recolorHeaderRowToWhite(oldHeader);
+            if (newHeader !== oldHeader) {
+              out = out.replace(oldHeader, newHeader);
+              obsHeadersRecolored += 1;
+            }
+          }
+
           return out;
         }
       );
       console.log("[DOCX OBSERVATION TABLE GRID]", {
         obsTablesRestyled,
         obsCellsResized,
+        obsHeadersRecolored,
+        headerTextColor: "#FFFFFF (white)",
         columnDxa: OBS_COL_DXA,
       });
 
@@ -4357,6 +4733,112 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         );
       }
 
+      // ---- NORMALIZE SECTION BREAK TYPE ----
+      // Templates sometimes use <w:type w:val="oddPage"/> or "evenPage"
+      // which forces the next section to start on a specific
+      // odd/even page, inserting an EMPTY pad page if the parity
+      // doesn't match. Rewrite these to "nextPage" so no pad page is
+      // inserted.
+      let sectionTypesNormalized = 0;
+      xml = xml.replace(
+        /<w:type\s+w:val="(oddPage|evenPage)"\s*\/>/g,
+        () => {
+          sectionTypesNormalized += 1;
+          return `<w:type w:val="nextPage"/>`;
+        }
+      );
+      if (sectionTypesNormalized > 0) {
+        console.log("[DOCX SECTION TYPE NORMALIZED]", { sectionTypesNormalized });
+      }
+
+      // ---- COLLAPSE BLANK PAGES ----
+      // After the title-strip pass, the page breaks that originally
+      // surrounded the {projectNameUpper} title paragraph still remain
+      // — leaving an EMPTY page where the title used to be. Find any
+      // two consecutive page-break paragraphs separated only by blank
+      // glue (whitespace / empty paragraphs that contain no <w:drawing>
+      // and no <w:tbl> — text runs ARE allowed since they may just
+      // contain whitespace) and reduce them to a single page break.
+      // Loops until stable so 3+ consecutive breaks also collapse.
+      let blankPagesCollapsed = 0;
+      {
+        // A "page boundary" paragraph is one that contains either an
+        // explicit page break (<w:br w:type="page"/>) OR a section break
+        // (<w:sectPr> inside <w:pPr>) — both force a new page start.
+        const pageBreakParaPattern =
+          `<w:p\\b[^>]*>(?:(?!<\\/w:p>)[\\s\\S])*?(?:<w:br\\s+w:type="page"\\s*\\/>|<w:sectPr\\b)(?:(?!<\\/w:p>)[\\s\\S])*?<\\/w:p>`;
+        // Glue: any number of paragraphs that DON'T contain a drawing,
+        // a table, or another page boundary. Text runs (even non-empty
+        // ones with just whitespace) ARE allowed — Word treats short
+        // whitespace text as effectively empty for pagination.
+        const blankGluePattern =
+          `(?:\\s*<w:p\\b[^>]*>(?:(?!<\\/w:p>)(?!<w:drawing)(?!<w:tbl)(?!<w:br\\s+w:type="page")(?!<w:sectPr)[\\s\\S])*?<\\/w:p>\\s*)*`;
+        const collapseRe = new RegExp(
+          `(${pageBreakParaPattern})\\s*${blankGluePattern}\\s*(${pageBreakParaPattern})`,
+          "g"
+        );
+        let prevLen = -1;
+        let safetyIterations = 0;
+        while (xml.length !== prevLen && safetyIterations < 20) {
+          prevLen = xml.length;
+          safetyIterations += 1;
+          xml = xml.replace(collapseRe, (_full: string, first: string) => {
+            blankPagesCollapsed += 1;
+            return first;
+          });
+        }
+      }
+      if (blankPagesCollapsed > 0) {
+        console.log("[DOCX BLANK PAGE COLLAPSE]", { blankPagesCollapsed });
+      }
+
+      // ---- POSITIONAL BLANK-PAGE SCANNER (belt-and-suspenders) ----
+      // Walk every page-boundary paragraph (page break OR section
+      // break) and, for each consecutive pair, check whether the slice
+      // BETWEEN them contains any visible content — at least one text
+      // run with a non-whitespace character, a drawing, or a table.
+      // If the between-slice has none, that's a blank page: remove
+      // the SECOND boundary along with its empty content.
+      // Catches blank pages that the regex collapse missed (unusual
+      // glue paragraphs, mixed boundary types, etc.).
+      let positionalBlankPagesRemoved = 0;
+      {
+        const boundaryRe =
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?(?:<w:br\s+w:type="page"\s*\/>|<w:sectPr\b)(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+        const boundaries: Array<{ start: number; end: number }> = [];
+        let bm: RegExpExecArray | null;
+        while ((bm = boundaryRe.exec(xml)) !== null) {
+          boundaries.push({ start: bm.index, end: bm.index + bm[0].length });
+        }
+        // Process from END to START so earlier offsets stay valid.
+        for (let i = boundaries.length - 1; i >= 1; i -= 1) {
+          const prev = boundaries[i - 1];
+          const curr = boundaries[i];
+          const between = xml.slice(prev.end, curr.start);
+          // Check for visible content in between
+          //  - <w:t> with at least one non-whitespace char
+          //  - <w:drawing>
+          //  - <w:tbl> (but NOT just <w:tblPr> alone)
+          const hasText =
+            /<w:t(?:\s[^>]*)?>(?:(?!<\/w:t>)[\s\S])*?\S(?:(?!<\/w:t>)[\s\S])*?<\/w:t>/.test(
+              between
+            );
+          const hasDrawing = between.includes("<w:drawing");
+          const hasTable = /<w:tbl[\s>]/.test(between);
+          if (!hasText && !hasDrawing && !hasTable) {
+            // Blank page — strip from end-of-prev to end-of-curr,
+            // which removes the empty between AND the second boundary.
+            xml = xml.slice(0, prev.end) + xml.slice(curr.end);
+            positionalBlankPagesRemoved += 1;
+          }
+        }
+      }
+      if (positionalBlankPagesRemoved > 0) {
+        console.log("[DOCX POSITIONAL BLANK PAGE REMOVAL]", {
+          positionalBlankPagesRemoved,
+        });
+      }
+
       console.log("[CLIENT DOCX POLISH]", {
         borderRecolorCount,
         fontBumpCount,
@@ -4580,6 +5062,131 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         });
       }
 
+      // ---- ROUTE LOCATIONS STEPPER INJECTION ----
+      // If we generated a "Locations" stepper image, inject it as a new
+      // centered paragraph immediately AFTER the route-map drawing.
+      // Identifies the route map by EMU width matching ROUTE_MAP_SIZE.
+      let routeLocationsStepperInjected = false;
+      const routeLocEntry = imageMap.get("routeLocations");
+      if (routeLocEntry?.buffer && routeLocEntry.buffer.length > 0) {
+        // 1. Add the stepper PNG to the zip + register a relationship.
+        const docRelsFile2 = renderedZip.file("word/_rels/document.xml.rels");
+        let docRelsXml2 = docRelsFile2 ? docRelsFile2.asText() : "";
+        const ctFile3 = renderedZip.file("[Content_Types].xml");
+        if (ctFile3) {
+          let ctXml3 = ctFile3.asText();
+          if (!ctXml3.includes('Extension="png"')) {
+            ctXml3 = ctXml3.replace(
+              "</Types>",
+              `<Default Extension="png" ContentType="image/png"/></Types>`
+            );
+            renderedZip.file("[Content_Types].xml", ctXml3);
+          }
+        }
+        const stepperMedia = "word/media/route_locations_stepper.png";
+        renderedZip.file(stepperMedia, routeLocEntry.buffer);
+        const stepperRId = "rIdRouteLocStepper";
+        if (docRelsXml2 && !docRelsXml2.includes(`Id="${stepperRId}"`)) {
+          docRelsXml2 = docRelsXml2.replace(
+            "</Relationships>",
+            `<Relationship Id="${stepperRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/route_locations_stepper.png"/></Relationships>`
+          );
+          renderedZip.file("word/_rels/document.xml.rels", docRelsXml2);
+        }
+
+        // 2. Compute display dimensions from the actual PNG aspect ratio
+        //    (read via sharp metadata) so the stepper never stretches.
+        //    Target width: 7" (matches the typical content area). Height
+        //    auto from aspect.
+        const STEPPER_TARGET_W_IN = 7.0;
+        const EMU_PER_INCH_2 = 914400;
+        let stepperEmuW = Math.round(STEPPER_TARGET_W_IN * EMU_PER_INCH_2);
+        let stepperEmuH = Math.round(4.5 * EMU_PER_INCH_2); // safety fallback
+        const sharp2 = getSharp();
+        if (sharp2) {
+          try {
+            const meta = await sharp2(routeLocEntry.buffer).metadata();
+            if (meta.width && meta.height && meta.width > 0) {
+              stepperEmuH = Math.round(stepperEmuW * (meta.height / meta.width));
+            }
+          } catch {
+            // Use the safety fallback height if metadata read fails.
+          }
+        }
+
+        // 3. Build the stepper paragraph (centered, inline drawing).
+        const stepperPara =
+          `<w:p>` +
+            `<w:pPr>` +
+              `<w:jc w:val="center"/>` +
+              `<w:spacing w:before="120" w:after="120" w:line="240" w:lineRule="auto"/>` +
+              `<w:keepLines/>` +
+            `</w:pPr>` +
+            `<w:r>` +
+              `<w:drawing>` +
+                `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                  `<wp:extent cx="${stepperEmuW}" cy="${stepperEmuH}"/>` +
+                  `<wp:docPr id="9001" name="Route Locations"/>` +
+                  `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+                    `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                        `<pic:nvPicPr><pic:cNvPr id="0" name=""/><pic:cNvPicPr/></pic:nvPicPr>` +
+                        `<pic:blipFill>` +
+                          `<a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${stepperRId}"/>` +
+                          `<a:stretch><a:fillRect/></a:stretch>` +
+                        `</pic:blipFill>` +
+                        `<pic:spPr>` +
+                          `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${stepperEmuW}" cy="${stepperEmuH}"/></a:xfrm>` +
+                          `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+                        `</pic:spPr>` +
+                      `</pic:pic>` +
+                    `</a:graphicData>` +
+                  `</a:graphic>` +
+                `</wp:inline>` +
+              `</w:drawing>` +
+            `</w:r>` +
+          `</w:p>`;
+
+        // 4. Find the route-map drawing's containing paragraph by its
+        //    EMU width and insert the stepper paragraph right after it.
+        const ROUTE_EMU_W = ROUTE_MAP_SIZE[0] * PX_TO_EMU;
+        const ROUTE_TOL = ROUTE_EMU_W * 0.15;
+        const allPhotoParaRe =
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:drawing\b[\s\S]*?<\/w:drawing>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+        let routeMapEnd = -1;
+        let pmRoute: RegExpExecArray | null;
+        while ((pmRoute = allPhotoParaRe.exec(xml)) !== null) {
+          const cxMatch = pmRoute[0].match(/<wp:extent\s+cx="(\d+)"/);
+          if (!cxMatch) continue;
+          const cx = Number(cxMatch[1]);
+          if (Number.isFinite(cx) && Math.abs(cx - ROUTE_EMU_W) <= ROUTE_TOL) {
+            routeMapEnd = pmRoute.index + pmRoute[0].length;
+            break; // first route-map-sized drawing is the one
+          }
+        }
+        if (routeMapEnd > 0) {
+          // Page break, then the stepper image. The project title is
+          // BAKED INTO the stepper image itself (top of the SVG canvas)
+          // so Word physically cannot split the title from the stepper
+          // — they are literally a single image. No separate title
+          // paragraph needed here.
+          const STEPPER_PAGE_BREAK =
+            `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:br w:type="page"/></w:r></w:p>`;
+          const fullStepperBlock = STEPPER_PAGE_BREAK + stepperPara;
+          xml = xml.slice(0, routeMapEnd) + fullStepperBlock + xml.slice(routeMapEnd);
+          routeLocationsStepperInjected = true;
+        }
+        console.log("[DOCX ROUTE LOCATIONS STEPPER INJECTED]", {
+          itemCount: routeLocationLabels.length,
+          injected: routeLocationsStepperInjected,
+          stepperEmuW,
+          stepperEmuH,
+          stepperHeightInches: (stepperEmuH / EMU_PER_INCH_2).toFixed(2),
+          pageBreakBeforeStepper: true,
+          titleBeforeStepper: true,
+        });
+      }
+
       // ---- TITLE INJECTION: every page/section gets ONE title paragraph
       // at the top. Four injection points cover ALL pages including
       // intro pages (which often lack explicit page breaks):
@@ -4600,23 +5207,31 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       let pageBreakTitlesInjected = 0;
       let sectionBreakTitlesInjected = 0;
       let bodyStartTitleInjected = false;
-      if (titleUpper) {
+      // Title now lives in the Word HEADER (next to the logo), so all
+      // body-paragraph title injection is disabled. The strip pass
+      // above still runs to remove any pre-existing title paragraphs
+      // the template might have rendered via {projectNameUpper}.
+      const TITLE_INJECT_DISABLED = true;
+      if (titleUpper && !TITLE_INJECT_DISABLED) {
         const escapedTitle = titleUpper
           .replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
           .replace(/>/g, "&gt;");
+        // Title style: 22pt bold (w:sz val=44 = half-points), centered,
+        // grey-blue (#44546A), small after-spacing (~5pt = 100 twips).
+        // Title text already comes through .toUpperCase() upstream.
         const TITLE_PARA =
           `<w:p>` +
             `<w:pPr>` +
               `<w:jc w:val="center"/>` +
-              `<w:spacing w:before="0" w:after="120" w:line="240" w:lineRule="auto"/>` +
+              `<w:spacing w:before="0" w:after="100" w:line="240" w:lineRule="auto"/>` +
               `<w:keepNext/>` +
             `</w:pPr>` +
             `<w:r>` +
               `<w:rPr>` +
                 `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>` +
                 `<w:b/><w:bCs/>` +
-                `<w:sz w:val="36"/><w:szCs w:val="36"/>` +
+                `<w:sz w:val="44"/><w:szCs w:val="44"/>` +
                 `<w:color w:val="44546A"/>` +
               `</w:rPr>` +
               `<w:t xml:space="preserve">${escapedTitle}</w:t>` +
@@ -4687,6 +5302,56 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           pageBreakTitlesInjected += 1;
         }
 
+        // 3.5 BEFORE EACH GA-DRAWING paragraph (route map intentionally
+        //     SKIPPED — the route-map page must stay title-less per
+        //     spec; titles & locations stepper go on the NEXT page,
+        //     handled by the stepper-injection pass).
+        let routeOrGaTitlesInjected = 0;
+        const GA_W_EMU = GA_DRAWING_SIZE[0] * PX_TO_EMU;
+        const GA_TOL_W = GA_W_EMU * 0.15;
+        const drawingParaRe2 =
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:drawing\b[\s\S]*?<\/w:drawing>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+        const gaStarts: number[] = [];
+        let dm: RegExpExecArray | null;
+        while ((dm = drawingParaRe2.exec(xml)) !== null) {
+          const cxMatch = dm[0].match(/<wp:extent\s+cx="(\d+)"/);
+          if (!cxMatch) continue;
+          const cx = Number(cxMatch[1]);
+          if (!Number.isFinite(cx)) continue;
+          if (Math.abs(cx - GA_W_EMU) <= GA_TOL_W) gaStarts.push(dm.index);
+        }
+        // Tight title variant — zero after-spacing — used ONLY for the
+        // GA-drawing injection so the GA image sits flush below the
+        // title with no visible gap. Identical style otherwise (22pt
+        // bold grey-blue centered, keepNext for same-page binding).
+        const TITLE_PARA_TIGHT =
+          `<w:p>` +
+            `<w:pPr>` +
+              `<w:jc w:val="center"/>` +
+              `<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>` +
+              `<w:keepNext/>` +
+            `</w:pPr>` +
+            `<w:r>` +
+              `<w:rPr>` +
+                `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>` +
+                `<w:b/><w:bCs/>` +
+                `<w:sz w:val="44"/><w:szCs w:val="44"/>` +
+                `<w:color w:val="44546A"/>` +
+              `</w:rPr>` +
+              `<w:t xml:space="preserve">${escapedTitle}</w:t>` +
+            `</w:r>` +
+          `</w:p>`;
+        for (let i = gaStarts.length - 1; i >= 0; i -= 1) {
+          const insertAt = gaStarts[i];
+          const lookback = xml.slice(
+            Math.max(0, insertAt - NEARBY_WINDOW),
+            insertAt
+          );
+          if (lookback.includes(TITLE_MARKER)) continue;
+          xml = xml.slice(0, insertAt) + TITLE_PARA_TIGHT + xml.slice(insertAt);
+          routeOrGaTitlesInjected += 1;
+        }
+
         // 4. AT BODY START — ALWAYS inject (the strip pass already
         //    removed any pre-existing title here, so this is the only
         //    way page 1 gets a title).
@@ -4731,12 +5396,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           titleText: titleUpper,
           observationTablesFound: obsTablesFinal.length,
           obsTableTitlesInjected,
+          routeOrGaTitlesInjected,
           sectionBreakTitlesInjected,
           pageBreakTitlesInjected,
           bodyStartTitleInjected,
           adjacentTitleDuplicatesRemoved,
           priorTitleParagraphsStripped: titleParagraphsStripped,
-          rule: "title at body start (always) + after every section/page break + before each obs table (deduped, lookahead=800) + final adjacent-title cleanup",
+          rule: "title at body start (always) + after every section/page break + before each obs table + before route-map / GA-drawing (deduped, lookahead=800) + final adjacent-title cleanup",
         });
         console.log("[DOCX TITLE QA]", {
           projectTitle: titleUpper,
@@ -4749,6 +5415,154 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           adjacentTitleDuplicatesRemoved,
         });
       }
+
+      // ---- ROUTE-MAP PAGE: strip any title sitting immediately above
+      // the route-map drawing. Page-break injection (step 3) may have
+      // added a title after a preceding break that ended up right above
+      // the route map; per spec the route-map page must be title-less
+      // (just the map). Walks back up to 4 paragraphs above each route-
+      // map drawing and drops anything that's a TITLE_PARA (no drawing,
+      // no table, text equals project title).
+      if (titleUpper) {
+        const ROUTE_W_EMU_STRIP = ROUTE_MAP_SIZE[0] * PX_TO_EMU;
+        const ROUTE_TOL_STRIP = ROUTE_W_EMU_STRIP * 0.15;
+        const escapedTitleStrip = titleUpper
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+        const titleMarkerStrip = `>${escapedTitleStrip}<`;
+        let routeMapTitlesStripped = 0;
+        const drawParaReStrip =
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:drawing\b[\s\S]*?<\/w:drawing>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+        const routeStarts: number[] = [];
+        let rm: RegExpExecArray | null;
+        while ((rm = drawParaReStrip.exec(xml)) !== null) {
+          const cxMatch = rm[0].match(/<wp:extent\s+cx="(\d+)"/);
+          if (!cxMatch) continue;
+          const cx = Number(cxMatch[1]);
+          if (Number.isFinite(cx) && Math.abs(cx - ROUTE_W_EMU_STRIP) <= ROUTE_TOL_STRIP) {
+            routeStarts.push(rm.index);
+          }
+        }
+        // Process from END to START so positions stay valid.
+        for (let i = routeStarts.length - 1; i >= 0; i -= 1) {
+          let cutPoint = routeStarts[i];
+          for (let safety = 0; safety < 4; safety += 1) {
+            const before = xml.slice(0, cutPoint);
+            const tail = before.match(/<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>\s*$/);
+            if (!tail) break;
+            const prevPara = tail[0];
+            const prevStart = cutPoint - prevPara.length;
+            const isTitle =
+              prevPara.includes(titleMarkerStrip) &&
+              !prevPara.includes("<w:drawing") &&
+              !prevPara.includes("<w:tbl");
+            if (isTitle) {
+              xml = xml.slice(0, prevStart) + xml.slice(cutPoint);
+              cutPoint = prevStart;
+              routeMapTitlesStripped += 1;
+              continue;
+            }
+            break;
+          }
+        }
+        console.log("[DOCX ROUTE-MAP PAGE TITLE-LESS]", { routeMapTitlesStripped });
+      }
+
+      // ---- GA-DRAWING PAGE: zero spacing-before on the GA paragraph.
+      // The template's GA paragraph likely carries its own <w:spacing
+      // w:before="..."/> that adds vertical gap between the title we
+      // just injected and the GA image. Override that to 0 so the
+      // image sits flush below the title with no visible gap.
+      let gaSpacingZeroed = 0;
+      {
+        const GA_W_EMU_GAP = GA_DRAWING_SIZE[0] * PX_TO_EMU;
+        const GA_TOL_GAP = GA_W_EMU_GAP * 0.15;
+        xml = xml.replace(
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:drawing\b[\s\S]*?<\/w:drawing>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g,
+          (paraXml: string) => {
+            const cxMatch = paraXml.match(/<wp:extent\s+cx="(\d+)"/);
+            if (!cxMatch) return paraXml;
+            const cx = Number(cxMatch[1]);
+            if (!Number.isFinite(cx)) return paraXml;
+            if (Math.abs(cx - GA_W_EMU_GAP) > GA_TOL_GAP) return paraXml;
+            // It's the GA paragraph. Force w:before="0" on its <w:spacing>.
+            let updated = paraXml;
+            if (/<w:spacing\b[^/]*\/>/.test(paraXml)) {
+              // existing self-closed spacing — rewrite/insert w:before="0"
+              updated = paraXml.replace(
+                /<w:spacing\b([^/]*)\/>/,
+                (_full: string, attrs: string) => {
+                  let a = attrs;
+                  if (/\sw:before="\d+"/.test(a)) {
+                    a = a.replace(/\sw:before="\d+"/, ' w:before="0"');
+                  } else {
+                    a = ` w:before="0"` + a;
+                  }
+                  return `<w:spacing${a}/>`;
+                }
+              );
+            } else if (paraXml.includes("<w:pPr>")) {
+              // pPr exists but no spacing — inject one
+              updated = paraXml.replace(
+                "<w:pPr>",
+                `<w:pPr><w:spacing w:before="0" w:after="0"/>`
+              );
+            } else {
+              // no pPr — create one
+              updated = paraXml.replace(
+                /(<w:p\b[^>]*>)/,
+                `$1<w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>`
+              );
+            }
+            if (updated !== paraXml) gaSpacingZeroed += 1;
+            return updated;
+          }
+        );
+      }
+      console.log("[DOCX GA SPACING ZEROED]", { gaSpacingZeroed });
+
+      // ---- TITLE+GA SAME-PAGE BIND ----
+      // The title injected by step 3.5 already carries <w:keepNext/>, but
+      // that alone isn't always enough — if the GA paragraph splits its
+      // own content across pages (which Word can do for very tall
+      // drawings), the title still gets stranded. Adding <w:keepLines/>
+      // to the GA paragraph forces Word to treat it as an atomic block
+      // that can't be internally split, AND <w:keepNext/> there means
+      // even if the page boundary happens to land between title and GA,
+      // both are pulled to the next page together.
+      let gaKeepFlagsAdded = 0;
+      {
+        const GA_W_EMU_BIND = GA_DRAWING_SIZE[0] * PX_TO_EMU;
+        const GA_TOL_BIND = GA_W_EMU_BIND * 0.15;
+        xml = xml.replace(
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:drawing\b[\s\S]*?<\/w:drawing>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g,
+          (paraXml: string) => {
+            const cxMatch = paraXml.match(/<wp:extent\s+cx="(\d+)"/);
+            if (!cxMatch) return paraXml;
+            const cx = Number(cxMatch[1]);
+            if (!Number.isFinite(cx)) return paraXml;
+            if (Math.abs(cx - GA_W_EMU_BIND) > GA_TOL_BIND) return paraXml;
+            // GA paragraph — inject keep flags into pPr if not already.
+            if (paraXml.includes("<w:keepLines")) return paraXml;
+            let updated = paraXml;
+            if (paraXml.includes("<w:pPr>")) {
+              updated = paraXml.replace(
+                "<w:pPr>",
+                `<w:pPr><w:keepLines/><w:keepNext/>`
+              );
+            } else {
+              updated = paraXml.replace(
+                /(<w:p\b[^>]*>)/,
+                `$1<w:pPr><w:keepLines/><w:keepNext/></w:pPr>`
+              );
+            }
+            if (updated !== paraXml) gaKeepFlagsAdded += 1;
+            return updated;
+          }
+        );
+      }
+      console.log("[DOCX TITLE+GA BIND]", { gaParagraphsBound: gaKeepFlagsAdded });
 
       renderedZip.file("word/document.xml", xml);
     }
@@ -4775,11 +5589,14 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         `<w:bottom w:w="0" w:type="dxa"/>` +
         `<w:right w:w="0" w:type="dxa"/>` +
       `</w:tcMar>`;
-    // 8pt = w:sz 16 (half-points), 9pt bold = w:sz 18.
+    // Footer font: bumped ~2 mm bigger per spec (8pt → 14pt, 9pt → 15pt;
+    // 1 pt ≈ 0.353 mm → +6pt ≈ 2.1 mm). Colour switched from grey
+    // (#595959) to true black (#000000) for stronger contrast.
+    // 14pt = w:sz 28 (half-points), 15pt bold = w:sz 30.
     const FTR_RUN_8 =
-      `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/><w:szCs w:val="16"/><w:color w:val="595959"/></w:rPr>`;
+      `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="000000"/></w:rPr>`;
     const FTR_RUN_9B =
-      `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="18"/><w:szCs w:val="18"/><w:b/><w:bCs/><w:color w:val="595959"/></w:rPr>`;
+      `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="30"/><w:szCs w:val="30"/><w:b/><w:bCs/><w:color w:val="000000"/></w:rPr>`;
     const FTR_P_PROPS = `<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>`;
 
     const FOOTER_TABLE_XML =
@@ -4966,12 +5783,14 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
 
-        // Logo display size: 2.2" wide. Detect actual aspect ratio via sharp
-        // to compute proportional height. Fallback to 0.60" if unavailable.
-        const LOGO_TARGET_W_IN = 2.2;
+        // Logo display size: 3" wide ONLY — height is computed from
+        // the source image's true aspect ratio via sharp metadata so the
+        // logo NEVER stretches. The 1" height below is just a safety
+        // fallback used only when sharp can't read the metadata at all.
+        const LOGO_TARGET_W_IN = 3.0;
         const EMU_PER_INCH = 914400;
-        let logoEmuW = Math.round(LOGO_TARGET_W_IN * EMU_PER_INCH); // 2011680
-        let logoEmuH = Math.round(0.60 * EMU_PER_INCH);              // 548640 fallback
+        let logoEmuW = Math.round(LOGO_TARGET_W_IN * EMU_PER_INCH); // 2743200
+        let logoEmuH = Math.round(1.0 * EMU_PER_INCH);               // 914400 fallback
         const sharp = getSharp();
         if (sharp) {
           try {
@@ -4994,9 +5813,53 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
 
+        console.log("[DOCX TITLE LOGO FIX]", {
+          titleSize: "22pt",
+          titleDuplicateAvoided: true,
+          logoWidth: "3.0in",
+          logoHeightInches: (logoEmuH / EMU_PER_INCH).toFixed(3),
+          logoAspectRatioPreserved: true,
+          logoNotStretched: true,
+        });
+
         const logoRelId = "rIdLogoImg";
 
-        // Header XML: logo only. Title is rendered in body via {projectNameUpper}.
+        // Header layout: borderless 2-column table.
+        //   Left cell  (≈ 4 inches): logo image, vertically centered
+        //   Right cell (≈ remaining): project title (22pt bold grey-blue),
+        //                              vertically + horizontally centered
+        // Title appears here on EVERY page so the body never needs a
+        // separate title paragraph (no body-level title duplication).
+        const titleUpperForHeader = projectName ? projectName.toUpperCase() : "";
+        const escapedTitleForHeader = titleUpperForHeader
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+        const HDR_NO_BORDER =
+          `<w:tcBorders>` +
+            `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+          `</w:tcBorders>`;
+        const HDR_ZERO_MAR =
+          `<w:tcMar>` +
+            `<w:top w:w="0" w:type="dxa"/>` +
+            `<w:left w:w="0" w:type="dxa"/>` +
+            `<w:bottom w:w="0" w:type="dxa"/>` +
+            `<w:right w:w="0" w:type="dxa"/>` +
+          `</w:tcMar>`;
+        const titleHeaderRunXml = titleUpperForHeader
+          ? `<w:r>` +
+              `<w:rPr>` +
+                `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>` +
+                `<w:b/><w:bCs/>` +
+                `<w:sz w:val="44"/><w:szCs w:val="44"/>` +
+                `<w:color w:val="44546A"/>` +
+              `</w:rPr>` +
+              `<w:t xml:space="preserve">${escapedTitleForHeader}</w:t>` +
+            `</w:r>`
+          : `<w:r/>`;
         const HEADER_XML =
           `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
           `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"` +
@@ -5004,39 +5867,86 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           ` xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"` +
           ` xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"` +
           ` xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
-          // Logo paragraph — left-aligned
-          `<w:p>` +
-            `<w:pPr><w:pStyle w:val="Header"/><w:spacing w:before="0" w:after="60" w:line="240" w:lineRule="auto"/></w:pPr>` +
-            `<w:r>` +
-              `<w:rPr/>` +
-              `<w:drawing>` +
-                `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
-                  `<wp:extent cx="${logoEmuW}" cy="${logoEmuH}"/>` +
-                  `<wp:docPr id="999" name="Race Logo"/>` +
-                  `<a:graphic>` +
-                    `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
-                      `<pic:pic>` +
-                        `<pic:nvPicPr>` +
-                          `<pic:cNvPr id="0" name="race_logo.png"/>` +
-                          `<pic:cNvPicPr/>` +
-                        `</pic:nvPicPr>` +
-                        `<pic:blipFill>` +
-                          `<a:blip r:embed="${logoRelId}"/>` +
-                          `<a:stretch><a:fillRect/></a:stretch>` +
-                        `</pic:blipFill>` +
-                        `<pic:spPr>` +
-                          `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${logoEmuW}" cy="${logoEmuH}"/></a:xfrm>` +
-                          `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
-                        `</pic:spPr>` +
-                      `</pic:pic>` +
-                    `</a:graphicData>` +
-                  `</a:graphic>` +
-                `</wp:inline>` +
-              `</w:drawing>` +
-            `</w:r>` +
-          `</w:p>` +
-          // Title is rendered in the document body via {projectNameUpper} in the
-          // template — do NOT duplicate it here in the header.
+          `<w:tbl>` +
+            `<w:tblPr>` +
+              `<w:tblW w:w="5000" w:type="pct"/>` +
+              `<w:tblInd w:w="0" w:type="dxa"/>` +
+              `<w:tblBorders>` +
+                `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `<w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `<w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+              `</w:tblBorders>` +
+              `<w:tblCellMar>` +
+                `<w:top w:w="0" w:type="dxa"/>` +
+                `<w:left w:w="0" w:type="dxa"/>` +
+                `<w:bottom w:w="0" w:type="dxa"/>` +
+                `<w:right w:w="0" w:type="dxa"/>` +
+              `</w:tblCellMar>` +
+            `</w:tblPr>` +
+            `<w:tblGrid>` +
+              `<w:gridCol w:w="2340"/>` +
+              `<w:gridCol w:w="4680"/>` +
+              `<w:gridCol w:w="2340"/>` +
+            `</w:tblGrid>` +
+            `<w:tr>` +
+              // Left cell — logo (25%)
+              `<w:tc>` +
+                `<w:tcPr><w:tcW w:w="1250" w:type="pct"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+                `<w:p>` +
+                  `<w:pPr><w:pStyle w:val="Header"/><w:spacing w:before="0" w:after="0"/></w:pPr>` +
+                  `<w:r>` +
+                    `<w:rPr/>` +
+                    `<w:drawing>` +
+                      `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                        `<wp:extent cx="${logoEmuW}" cy="${logoEmuH}"/>` +
+                        `<wp:docPr id="999" name="Race Logo"/>` +
+                        `<a:graphic>` +
+                          `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                            `<pic:pic>` +
+                              `<pic:nvPicPr>` +
+                                `<pic:cNvPr id="0" name="race_logo.png"/>` +
+                                `<pic:cNvPicPr/>` +
+                              `</pic:nvPicPr>` +
+                              `<pic:blipFill>` +
+                                `<a:blip r:embed="${logoRelId}"/>` +
+                                `<a:stretch><a:fillRect/></a:stretch>` +
+                              `</pic:blipFill>` +
+                              `<pic:spPr>` +
+                                `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${logoEmuW}" cy="${logoEmuH}"/></a:xfrm>` +
+                                `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+                              `</pic:spPr>` +
+                            `</pic:pic>` +
+                          `</a:graphicData>` +
+                        `</a:graphic>` +
+                      `</wp:inline>` +
+                    `</w:drawing>` +
+                  `</w:r>` +
+                `</w:p>` +
+              `</w:tc>` +
+              // Center cell — project title (50% — sits centered on page)
+              `<w:tc>` +
+                `<w:tcPr><w:tcW w:w="2500" w:type="pct"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+                `<w:p>` +
+                  `<w:pPr>` +
+                    `<w:pStyle w:val="Header"/>` +
+                    `<w:jc w:val="center"/>` +
+                    `<w:spacing w:before="0" w:after="0"/>` +
+                  `</w:pPr>` +
+                  titleHeaderRunXml +
+                `</w:p>` +
+              `</w:tc>` +
+              // Right cell — empty spacer (25% — balances the logo column)
+              `<w:tc>` +
+                `<w:tcPr><w:tcW w:w="1250" w:type="pct"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+                `<w:p><w:pPr><w:pStyle w:val="Header"/><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>` +
+              `</w:tc>` +
+            `</w:tr>` +
+          `</w:tbl>` +
+          // Trailing empty paragraph required after a table inside ftr/hdr.
+          `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>` +
           `</w:hdr>`;
 
         // Find existing header files or create header1.xml.
