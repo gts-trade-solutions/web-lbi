@@ -196,36 +196,22 @@ function _fillRoundedRect(
 function _strokeRoundedRect(
   buf: Uint8Array, w: number, h: number,
   x: number, y: number, rw: number, rh: number, radius: number,
-  thickness: number, c: RgbColor
+  thickness: number, c: RgbColor, fillColor: RgbColor = [255, 255, 255, 255]
 ) {
-  const r = Math.min(radius, rw / 2, rh / 2);
-  // Top + bottom edges
-  _fillRect(buf, w, h, x + r, y, rw - 2 * r, thickness, c);
-  _fillRect(buf, w, h, x + r, y + rh - thickness, rw - 2 * r, thickness, c);
-  // Left + right edges
-  _fillRect(buf, w, h, x, y + r, thickness, rh - 2 * r, c);
-  _fillRect(buf, w, h, x + rw - thickness, y + r, thickness, rh - 2 * r, c);
-  // Rounded corners (annulus arcs)
-  const corners: Array<[number, number]> = [
-    [x + r, y + r],
-    [x + rw - r - 1, y + r],
-    [x + r, y + rh - r - 1],
-    [x + rw - r - 1, y + rh - r - 1],
-  ];
-  const outerR = r;
-  const innerR = Math.max(0, r - thickness);
-  for (const [cx, cy] of corners) {
-    for (let py = Math.floor(cy - outerR); py <= Math.ceil(cy + outerR); py += 1) {
-      for (let px = Math.floor(cx - outerR); px <= Math.ceil(cx + outerR); px += 1) {
-        const dx = px - cx;
-        const dy = py - cy;
-        const d2 = dx * dx + dy * dy;
-        if (d2 <= outerR * outerR && d2 >= innerR * innerR) {
-          _setPixel(buf, w, h, px, py, c);
-        }
-      }
-    }
-  }
+  // Fill-and-cut approach: paint the OUTER rounded shape in the
+  // border color, then paint a SMALLER inner rounded shape in the
+  // fill color to "cut" the interior. Produces a clean stroke with
+  // no corner artifacts. fillColor defaults to white (matches the
+  // stepper background) — caller can pass a different color to
+  // composite cleanly over a non-white background.
+  _fillRoundedRect(buf, w, h, x, y, rw, rh, radius, c);
+  const innerRadius = Math.max(0, radius - thickness);
+  _fillRoundedRect(
+    buf, w, h,
+    x + thickness, y + thickness,
+    rw - 2 * thickness, rh - 2 * thickness,
+    innerRadius, fillColor
+  );
 }
 function _fillCircle(buf: Uint8Array, w: number, h: number, cx: number, cy: number, r: number, c: RgbColor) {
   for (let py = Math.floor(cy - r); py <= Math.ceil(cy + r); py += 1) {
@@ -346,8 +332,23 @@ function _drawBitmapText(
   buf: Uint8Array, w: number, h: number,
   text: string, x: number, y: number, scale: number, c: RgbColor
 ) {
+  // Supersampled rendering for smoother edges. Steps:
+  //  1. Render at 2x scale into a temporary single-channel mask.
+  //  2. Downsample the 2x mask to 1x by averaging 2x2 blocks — this
+  //     gives anti-aliased edges (each output pixel's alpha is a
+  //     fraction of the input pixels' "on" count).
+  //  3. Composite each mask pixel onto the main buffer with the
+  //     resulting alpha.
   const upper = text.toUpperCase();
   const cellW = 5 * scale + scale; // 5 cols + 1 col gap
+  const renderH = 7 * scale;
+  const renderW = upper.length * cellW;
+  // Render at 2x into a binary mask (Uint8Array, 1 byte per pixel)
+  const ssScale = scale * 2;
+  const ssCellW = 5 * ssScale + ssScale;
+  const ssH = 7 * ssScale;
+  const ssW = upper.length * ssCellW;
+  const mask = new Uint8Array(ssW * ssH);
   for (let i = 0; i < upper.length; i += 1) {
     const ch = upper[i];
     const glyph = _BITMAP_FONT_5x7[ch] || _BITMAP_FONT_5x7[" "];
@@ -355,8 +356,31 @@ function _drawBitmapText(
       const bits = glyph[row];
       for (let col = 0; col < 5; col += 1) {
         if (bits & (1 << (4 - col))) {
-          _fillRect(buf, w, h, x + i * cellW + col * scale, y + row * scale, scale, scale, c);
+          // Fill ssScale × ssScale block in the mask
+          const baseX = i * ssCellW + col * ssScale;
+          const baseY = row * ssScale;
+          for (let py = 0; py < ssScale; py += 1) {
+            for (let px = 0; px < ssScale; px += 1) {
+              mask[(baseY + py) * ssW + (baseX + px)] = 255;
+            }
+          }
         }
+      }
+    }
+  }
+  // Downsample 2x → 1x with averaging (4 mask pixels → 1 output alpha)
+  for (let oy = 0; oy < renderH; oy += 1) {
+    for (let ox = 0; ox < renderW; ox += 1) {
+      const sx = ox * 2;
+      const sy = oy * 2;
+      let sum = 0;
+      sum += mask[sy * ssW + sx];
+      sum += mask[sy * ssW + (sx + 1)];
+      sum += mask[(sy + 1) * ssW + sx];
+      sum += mask[(sy + 1) * ssW + (sx + 1)];
+      const alpha = Math.round(sum / 4);
+      if (alpha > 0) {
+        _setPixel(buf, w, h, x + ox, y + oy, [c[0], c[1], c[2], Math.round((alpha * c[3]) / 255)]);
       }
     }
   }
@@ -401,17 +425,19 @@ function renderRouteLocationsStepperPng(
     buf, W, H,
     "ROUTE SURVEY KEY POINTS",
     40,
-    TOP_PAD + 18,
-    4, // scale
+    TOP_PAD + 14,
+    5, // bigger scale for the heading
     grey800
   );
 
   const MARK_X = 90;
-  const MARK_R = 22;
-  const RECT_X = MARK_X + 60;
+  const MARK_R = 24;
+  const RECT_X = MARK_X + 70;
   const RECT_W = W - RECT_X - 40;
-  const RECT_H = 76;
-  const RECT_RADIUS = 18;
+  const RECT_H = 88;
+  // Bigger radius makes the labels read as proper "pills" matching
+  // the web-app design.
+  const RECT_RADIUS = 36;
 
   for (let i = 0; i < items.length; i += 1) {
     const it = items[i];
@@ -444,9 +470,9 @@ function renderRouteLocationsStepperPng(
     _drawBitmapText(
       buf, W, H,
       it.label,
-      RECT_X + 24,
-      rectY + RECT_H / 2 - 14,
-      4,
+      RECT_X + 28,
+      rectY + RECT_H / 2 - 18,
+      5, // bigger label scale
       black0F
     );
   }
