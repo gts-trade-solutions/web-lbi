@@ -1077,9 +1077,21 @@ async function generateRouteLocationsStepper(
   projectTitle: string
 ): Promise<Buffer | null> {
   const sharp = getSharp();
-  if (!sharp) return null;
+  if (!sharp) {
+    // Production-friendly diagnostic: sharp's native binary (or
+    // libvips) isn't loadable on this host. The Word-table fallback
+    // path picks up where this returns null.
+    console.warn(
+      "[ROUTE LOCATIONS STEPPER] sharp unavailable — SVG→PNG impossible. " +
+        "Word-table fallback will be used instead."
+    );
+    return null;
+  }
   const items = labels.filter((l) => l.label).slice(0, 8);
-  if (items.length === 0) return null;
+  if (items.length === 0) {
+    console.warn("[ROUTE LOCATIONS STEPPER] no labels passed in");
+    return null;
+  }
 
   const escapeXml = (s: string) =>
     s
@@ -1182,11 +1194,165 @@ async function generateRouteLocationsStepper(
     });
     return buf;
   } catch (err) {
-    console.warn("[ROUTE LOCATIONS STEPPER FAILED]", {
-      err: (err as Error)?.message || String(err),
-    });
+    console.warn(
+      "[ROUTE LOCATIONS STEPPER FAILED] SVG→PNG render failed " +
+        "(probably libvips lacks librsvg in this build). Word-table " +
+        "fallback will be used instead. Error:",
+      (err as Error)?.message || String(err)
+    );
     return null;
   }
+}
+
+/**
+ * Sharp-free fallback for the route locations stepper. Builds the
+ * locations list as a pure OOXML borderless table — no SVG, no PNG,
+ * no native dependencies. Renders cleanly on any production server,
+ * even ones where sharp/libvips/librsvg isn't installed.
+ *
+ * Layout: a single-column outer table. Each row is one location with:
+ *   - A small bullet character ("○" for a stop, "●" for the final
+ *     destination) prefixed to the label
+ *   - The label text in a bordered rounded-grey cell
+ *   - "Locations" heading sits in its own row at the top
+ *
+ * Returns the full <w:tbl>...</w:tbl> XML string (no leading/trailing
+ * paragraph), or "" if no labels are passed.
+ */
+function buildRouteLocationsStepperTableXml(
+  labels: { label: string; pin_type: string }[]
+): string {
+  const items = labels.filter((l) => l.label).slice(0, 8);
+  if (items.length === 0) return "";
+
+  const escapeXml = (s: string) =>
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+
+  // Cell border styles
+  const NO_BORDER =
+    `<w:tcBorders>` +
+      `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+      `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+      `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+      `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+    `</w:tcBorders>`;
+  const PILL_BORDER =
+    `<w:tcBorders>` +
+      `<w:top w:val="single" w:sz="6" w:space="0" w:color="D1D5DB"/>` +
+      `<w:left w:val="single" w:sz="6" w:space="0" w:color="D1D5DB"/>` +
+      `<w:bottom w:val="single" w:sz="6" w:space="0" w:color="D1D5DB"/>` +
+      `<w:right w:val="single" w:sz="6" w:space="0" w:color="D1D5DB"/>` +
+    `</w:tcBorders>`;
+
+  // Outer table grid: marker column ~700 dxa (~0.5"), label column rest
+  const TBL_W = 9360;
+  const MARK_COL = 700;
+  const LABEL_COL = TBL_W - MARK_COL;
+
+  // Heading row built as an array of fragments joined together. Using
+  // `.join("")` over an array (instead of long `+`-chained template
+  // literals) keeps the AST flat — long `+` chains can blow the SWC
+  // parser's stack on Windows during `next build`.
+  const headingRow = [
+    `<w:tr>`,
+    `<w:tc>`,
+    `<w:tcPr><w:tcW w:w="${TBL_W}" w:type="dxa"/>`,
+    `<w:gridSpan w:val="2"/>${NO_BORDER}`,
+    `</w:tcPr>`,
+    `<w:p>`,
+    `<w:pPr><w:spacing w:before="0" w:after="100"/></w:pPr>`,
+    `<w:r>`,
+    `<w:rPr>`,
+    `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>`,
+    `<w:b/><w:bCs/>`,
+    `<w:sz w:val="28"/><w:szCs w:val="28"/>`,
+    `<w:color w:val="1F2937"/>`,
+    `</w:rPr>`,
+    `<w:t>Locations</w:t>`,
+    `</w:r>`,
+    `</w:p>`,
+    `</w:tc>`,
+    `</w:tr>`,
+  ].join("");
+
+  const itemRows: string[] = [];
+  for (let i = 0; i < items.length; i += 1) {
+    const it = items[i];
+    const isEnd = i === items.length - 1 || it.pin_type === "end";
+    // ⚫ red filled circle for end, ◯ outlined circle for stops.
+    // Unicode glyphs work without any font install on Windows servers.
+    const marker = isEnd ? "●" : "○";
+    const markerColor = isEnd ? "EC4054" : "1F2937";
+
+    itemRows.push([
+      `<w:tr>`,
+      // Marker cell — small bullet character
+      `<w:tc>`,
+      `<w:tcPr><w:tcW w:w="${MARK_COL}" w:type="dxa"/>${NO_BORDER}<w:vAlign w:val="center"/></w:tcPr>`,
+      `<w:p>`,
+      `<w:pPr><w:jc w:val="center"/><w:spacing w:before="60" w:after="60"/></w:pPr>`,
+      `<w:r>`,
+      `<w:rPr>`,
+      `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>`,
+      `<w:b/><w:bCs/>`,
+      `<w:sz w:val="40"/><w:szCs w:val="40"/>`,
+      `<w:color w:val="${markerColor}"/>`,
+      `</w:rPr>`,
+      `<w:t>${marker}</w:t>`,
+      `</w:r>`,
+      `</w:p>`,
+      `</w:tc>`,
+      // Label cell — bordered "pill" with the location name
+      `<w:tc>`,
+      `<w:tcPr><w:tcW w:w="${LABEL_COL}" w:type="dxa"/>${PILL_BORDER}<w:vAlign w:val="center"/></w:tcPr>`,
+      `<w:p>`,
+      `<w:pPr><w:spacing w:before="80" w:after="80"/></w:pPr>`,
+      `<w:r>`,
+      `<w:rPr>`,
+      `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>`,
+      `<w:b/><w:bCs/>`,
+      `<w:sz w:val="28"/><w:szCs w:val="28"/>`,
+      `<w:color w:val="0F172A"/>`,
+      `</w:rPr>`,
+      `<w:t xml:space="preserve">${escapeXml(it.label)}</w:t>`,
+      `</w:r>`,
+      `</w:p>`,
+      `</w:tc>`,
+      `</w:tr>`,
+    ].join(""));
+  }
+
+  console.log("[ROUTE LOCATIONS STEPPER FALLBACK XML]", {
+    itemCount: items.length,
+    fallbackPath: "Word-table (no sharp/libvips needed)",
+  });
+
+  return [
+    `<w:tbl>`,
+    `<w:tblPr>`,
+    `<w:tblW w:w="5000" w:type="pct"/>`,
+    `<w:tblInd w:w="0" w:type="dxa"/>`,
+    `<w:tblBorders>`,
+    `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>`,
+    `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>`,
+    `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>`,
+    `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>`,
+    `<w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>`,
+    `<w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>`,
+    `</w:tblBorders>`,
+    `</w:tblPr>`,
+    `<w:tblGrid>`,
+    `<w:gridCol w:w="${MARK_COL}"/>`,
+    `<w:gridCol w:w="${LABEL_COL}"/>`,
+    `</w:tblGrid>`,
+    headingRow,
+    itemRows.join(""),
+    `</w:tbl>`,
+  ].join("");
 }
 
 const categoryIconCache = new Map<string, ImageEntry | null>();
@@ -5165,11 +5331,6 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
         if (routeMapEnd > 0) {
-          // Page break, then the stepper image. The project title is
-          // BAKED INTO the stepper image itself (top of the SVG canvas)
-          // so Word physically cannot split the title from the stepper
-          // — they are literally a single image. No separate title
-          // paragraph needed here.
           const STEPPER_PAGE_BREAK =
             `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:br w:type="page"/></w:r></w:p>`;
           const fullStepperBlock = STEPPER_PAGE_BREAK + stepperPara;
@@ -5179,11 +5340,53 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         console.log("[DOCX ROUTE LOCATIONS STEPPER INJECTED]", {
           itemCount: routeLocationLabels.length,
           injected: routeLocationsStepperInjected,
+          renderPath: "image (sharp SVG→PNG)",
           stepperEmuW,
           stepperEmuH,
           stepperHeightInches: (stepperEmuH / EMU_PER_INCH_2).toFixed(2),
-          pageBreakBeforeStepper: true,
-          titleBeforeStepper: true,
+        });
+      } else if (routeLocationLabels.length > 0) {
+        // ---- SHARP-FREE FALLBACK ----
+        // Stepper PNG wasn't generated (sharp unavailable, libvips
+        // missing librsvg, etc.). Inject a pure OOXML table instead so
+        // the locations still appear in the export — works on any
+        // production server regardless of native deps.
+        const ROUTE_EMU_W_FB = ROUTE_MAP_SIZE[0] * PX_TO_EMU;
+        const ROUTE_TOL_FB = ROUTE_EMU_W_FB * 0.15;
+        const allPhotoParaReFB =
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:drawing\b[\s\S]*?<\/w:drawing>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+        let routeMapEndFB = -1;
+        let pmRouteFB: RegExpExecArray | null;
+        while ((pmRouteFB = allPhotoParaReFB.exec(xml)) !== null) {
+          const cxMatch = pmRouteFB[0].match(/<wp:extent\s+cx="(\d+)"/);
+          if (!cxMatch) continue;
+          const cx = Number(cxMatch[1]);
+          if (Number.isFinite(cx) && Math.abs(cx - ROUTE_EMU_W_FB) <= ROUTE_TOL_FB) {
+            routeMapEndFB = pmRouteFB.index + pmRouteFB[0].length;
+            break;
+          }
+        }
+        if (routeMapEndFB > 0) {
+          const STEPPER_PAGE_BREAK_FB =
+            `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:br w:type="page"/></w:r></w:p>`;
+          const tableXml = buildRouteLocationsStepperTableXml(routeLocationLabels);
+          // Trailing empty paragraph (Word requires a paragraph after a table)
+          const trailingPara = `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>`;
+          const fallbackBlock = STEPPER_PAGE_BREAK_FB + tableXml + trailingPara;
+          xml = xml.slice(0, routeMapEndFB) + fallbackBlock + xml.slice(routeMapEndFB);
+          routeLocationsStepperInjected = true;
+        }
+        console.log("[DOCX ROUTE LOCATIONS STEPPER INJECTED]", {
+          itemCount: routeLocationLabels.length,
+          injected: routeLocationsStepperInjected,
+          renderPath: "fallback (Word-table, no sharp/libvips needed)",
+          reason: "sharp PNG buffer missing — generator returned null",
+        });
+      } else {
+        console.log("[DOCX ROUTE LOCATIONS STEPPER SKIPPED]", {
+          reason: "no route location labels in DB for this project",
+          routeLocationsTableExists:
+            "check that project_route_page_locations table is migrated in production",
         });
       }
 
@@ -5565,6 +5768,102 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       console.log("[DOCX TITLE+GA BIND]", { gaParagraphsBound: gaKeepFlagsAdded });
 
       renderedZip.file("word/document.xml", xml);
+    }
+
+    // ---- ENSURE OUTPUT IS FREELY EDITABLE ----
+    // Word's "Save → asks for filename" / Save-As prompt usually fires
+    // when one of these is true:
+    //   1. settings.xml has <w:writeProtection> (modify-recommended)
+    //   2. settings.xml has <w:documentProtection> (read-only / forms)
+    //   3. Content_Types.xml says the main document is a TEMPLATE
+    //      (wordprocessingml.template.main+xml) instead of a regular
+    //      document — Word always opens templates as "new untitled"
+    //   4. core.xml has <cp:contentStatus>Final</cp:contentStatus>
+    // None of these should be set, but if the template ever inherits
+    // them (or docxtemplater adds them), this pass strips them so the
+    // user can save the downloaded DOCX in place without a dialog.
+    {
+      let protectionStripped = 0;
+      let templateContentTypeFixed = false;
+      let contentStatusCleared = false;
+
+      // 1+2. Strip <w:writeProtection .../> and <w:documentProtection .../>
+      const settingsFile = renderedZip.file("word/settings.xml");
+      if (settingsFile) {
+        let settingsXml = settingsFile.asText();
+        const before = settingsXml;
+        settingsXml = settingsXml.replace(
+          /<w:writeProtection\b[^/]*\/>/g,
+          () => {
+            protectionStripped += 1;
+            return "";
+          }
+        );
+        settingsXml = settingsXml.replace(
+          /<w:writeProtection\b[\s\S]*?<\/w:writeProtection>/g,
+          () => {
+            protectionStripped += 1;
+            return "";
+          }
+        );
+        settingsXml = settingsXml.replace(
+          /<w:documentProtection\b[^/]*\/>/g,
+          () => {
+            protectionStripped += 1;
+            return "";
+          }
+        );
+        settingsXml = settingsXml.replace(
+          /<w:documentProtection\b[\s\S]*?<\/w:documentProtection>/g,
+          () => {
+            protectionStripped += 1;
+            return "";
+          }
+        );
+        if (settingsXml !== before) {
+          renderedZip.file("word/settings.xml", settingsXml);
+        }
+      }
+
+      // 3. If Content_Types.xml flagged the doc as a TEMPLATE, switch it
+      //    to a regular document so Word doesn't open it "as new".
+      const ctxFile = renderedZip.file("[Content_Types].xml");
+      if (ctxFile) {
+        let ctxXml = ctxFile.asText();
+        const beforeCtx = ctxXml;
+        ctxXml = ctxXml.replace(
+          /application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.template\.main\+xml/g,
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+        );
+        if (ctxXml !== beforeCtx) {
+          renderedZip.file("[Content_Types].xml", ctxXml);
+          templateContentTypeFixed = true;
+        }
+      }
+
+      // 4. Strip <cp:contentStatus>Final</cp:contentStatus> from core.xml
+      //    so Word doesn't open it in "Marked as Final" read-only mode.
+      const coreFile = renderedZip.file("docProps/core.xml");
+      if (coreFile) {
+        let coreXml = coreFile.asText();
+        const beforeCore = coreXml;
+        coreXml = coreXml.replace(
+          /<cp:contentStatus\b[\s\S]*?<\/cp:contentStatus>/g,
+          () => {
+            contentStatusCleared = true;
+            return "";
+          }
+        );
+        if (coreXml !== beforeCore) {
+          renderedZip.file("docProps/core.xml", coreXml);
+        }
+      }
+
+      console.log("[DOCX EDITABILITY PASS]", {
+        protectionStripped,
+        templateContentTypeFixed,
+        contentStatusCleared,
+      });
     }
 
     // ---- Footer rebuild: borderless 3-column TABLE.
