@@ -1,5 +1,6 @@
 import path from "path";
 import crypto from "crypto";
+import { deflateSync } from "zlib";
 import { promises as fs } from "fs";
 import PizZip from "pizzip";
 import Docxtemplater from "docxtemplater";
@@ -64,6 +65,398 @@ function readPngDimensions(buffer: Buffer): { width: number; height: number } | 
   const height = buffer.readUInt32BE(20);
   if (width <= 0 || height <= 0) return null;
   return { width, height };
+}
+
+// ---- PURE-JS PNG ENCODER ----
+// Pre-computed CRC table for IEEE 802.3 polynomial (used by PNG chunks).
+const _CRC32_TABLE: number[] = (() => {
+  const t = new Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function _crc32(buf: Buffer): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i += 1) {
+    c = _CRC32_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+function _pngChunk(type: string, data: Buffer): Buffer {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  const typeBuf = Buffer.from(type, "ascii");
+  const crcBuf = Buffer.alloc(4);
+  crcBuf.writeUInt32BE(_crc32(Buffer.concat([typeBuf, data])), 0);
+  return Buffer.concat([length, typeBuf, data, crcBuf]);
+}
+/**
+ * Encode an RGBA pixel array to a PNG buffer using only Node's
+ * built-in zlib — NO sharp / libvips / librsvg required. This is the
+ * production-safe path for generating images when sharp can't render.
+ */
+function encodeRgbaToPng(width: number, height: number, rgba: Uint8Array): Buffer {
+  // Build raw scanlines with PNG row-filter byte (0 = None) per row.
+  const rowSize = width * 4;
+  const raw = Buffer.alloc((rowSize + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    raw[y * (rowSize + 1)] = 0;
+    rgba.subarray(y * rowSize, (y + 1) * rowSize).forEach((v, i) => {
+      raw[y * (rowSize + 1) + 1 + i] = v;
+    });
+  }
+  const compressed = deflateSync(raw);
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;  // bit depth
+  ihdr[9] = 6;  // color type RGBA
+  ihdr[10] = 0; // compression
+  ihdr[11] = 0; // filter
+  ihdr[12] = 0; // interlace
+  return Buffer.concat([
+    sig,
+    _pngChunk("IHDR", ihdr),
+    _pngChunk("IDAT", compressed),
+    _pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/**
+ * Tiny 2D drawing context backed by an RGBA pixel buffer. Provides
+ * just enough primitives (filled rect, filled circle, hollow circle,
+ * dotted line, drop pin) to render the route-locations stepper
+ * without sharp/libvips/librsvg or any other native dependency.
+ */
+type RgbColor = readonly [number, number, number, number]; // r,g,b,a 0-255
+function _hexToRgba(hex: string, alpha = 255): RgbColor {
+  const h = hex.replace(/^#/, "");
+  const n = parseInt(h, 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff, alpha];
+}
+function _setPixel(buf: Uint8Array, w: number, h: number, x: number, y: number, c: RgbColor) {
+  if (x < 0 || y < 0 || x >= w || y >= h) return;
+  const o = (y * w + x) * 4;
+  // Source-over alpha compositing
+  const sa = c[3] / 255;
+  if (sa >= 1) {
+    buf[o] = c[0]; buf[o + 1] = c[1]; buf[o + 2] = c[2]; buf[o + 3] = 255;
+    return;
+  }
+  const da = buf[o + 3] / 255;
+  const oa = sa + da * (1 - sa);
+  if (oa <= 0) return;
+  buf[o] = Math.round((c[0] * sa + buf[o] * da * (1 - sa)) / oa);
+  buf[o + 1] = Math.round((c[1] * sa + buf[o + 1] * da * (1 - sa)) / oa);
+  buf[o + 2] = Math.round((c[2] * sa + buf[o + 2] * da * (1 - sa)) / oa);
+  buf[o + 3] = Math.round(oa * 255);
+}
+function _fillRect(buf: Uint8Array, w: number, h: number, x: number, y: number, rw: number, rh: number, c: RgbColor) {
+  const x2 = Math.min(w, Math.floor(x + rw));
+  const y2 = Math.min(h, Math.floor(y + rh));
+  for (let py = Math.max(0, Math.floor(y)); py < y2; py += 1) {
+    for (let px = Math.max(0, Math.floor(x)); px < x2; px += 1) {
+      _setPixel(buf, w, h, px, py, c);
+    }
+  }
+}
+function _fillRoundedRect(
+  buf: Uint8Array, w: number, h: number,
+  x: number, y: number, rw: number, rh: number, radius: number, c: RgbColor
+) {
+  const r = Math.min(radius, rw / 2, rh / 2);
+  // Draw straight body parts
+  _fillRect(buf, w, h, x + r, y, rw - 2 * r, rh, c);
+  _fillRect(buf, w, h, x, y + r, rw, rh - 2 * r, c);
+  // Draw the four rounded corners as filled quarter-circles
+  const corners: Array<[number, number]> = [
+    [x + r, y + r],                 // top-left
+    [x + rw - r - 1, y + r],        // top-right
+    [x + r, y + rh - r - 1],        // bottom-left
+    [x + rw - r - 1, y + rh - r - 1], // bottom-right
+  ];
+  for (const [cx, cy] of corners) {
+    for (let py = Math.floor(cy - r); py <= Math.ceil(cy + r); py += 1) {
+      for (let px = Math.floor(cx - r); px <= Math.ceil(cx + r); px += 1) {
+        const dx = px - cx;
+        const dy = py - cy;
+        if (dx * dx + dy * dy <= r * r) {
+          _setPixel(buf, w, h, px, py, c);
+        }
+      }
+    }
+  }
+}
+function _strokeRoundedRect(
+  buf: Uint8Array, w: number, h: number,
+  x: number, y: number, rw: number, rh: number, radius: number,
+  thickness: number, c: RgbColor
+) {
+  const r = Math.min(radius, rw / 2, rh / 2);
+  // Top + bottom edges
+  _fillRect(buf, w, h, x + r, y, rw - 2 * r, thickness, c);
+  _fillRect(buf, w, h, x + r, y + rh - thickness, rw - 2 * r, thickness, c);
+  // Left + right edges
+  _fillRect(buf, w, h, x, y + r, thickness, rh - 2 * r, c);
+  _fillRect(buf, w, h, x + rw - thickness, y + r, thickness, rh - 2 * r, c);
+  // Rounded corners (annulus arcs)
+  const corners: Array<[number, number]> = [
+    [x + r, y + r],
+    [x + rw - r - 1, y + r],
+    [x + r, y + rh - r - 1],
+    [x + rw - r - 1, y + rh - r - 1],
+  ];
+  const outerR = r;
+  const innerR = Math.max(0, r - thickness);
+  for (const [cx, cy] of corners) {
+    for (let py = Math.floor(cy - outerR); py <= Math.ceil(cy + outerR); py += 1) {
+      for (let px = Math.floor(cx - outerR); px <= Math.ceil(cx + outerR); px += 1) {
+        const dx = px - cx;
+        const dy = py - cy;
+        const d2 = dx * dx + dy * dy;
+        if (d2 <= outerR * outerR && d2 >= innerR * innerR) {
+          _setPixel(buf, w, h, px, py, c);
+        }
+      }
+    }
+  }
+}
+function _fillCircle(buf: Uint8Array, w: number, h: number, cx: number, cy: number, r: number, c: RgbColor) {
+  for (let py = Math.floor(cy - r); py <= Math.ceil(cy + r); py += 1) {
+    for (let px = Math.floor(cx - r); px <= Math.ceil(cx + r); px += 1) {
+      const dx = px - cx;
+      const dy = py - cy;
+      if (dx * dx + dy * dy <= r * r) {
+        _setPixel(buf, w, h, px, py, c);
+      }
+    }
+  }
+}
+function _strokeCircle(
+  buf: Uint8Array, w: number, h: number,
+  cx: number, cy: number, outerR: number, innerR: number, c: RgbColor
+) {
+  for (let py = Math.floor(cy - outerR); py <= Math.ceil(cy + outerR); py += 1) {
+    for (let px = Math.floor(cx - outerR); px <= Math.ceil(cx + outerR); px += 1) {
+      const dx = px - cx;
+      const dy = py - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= outerR * outerR && d2 >= innerR * innerR) {
+        _setPixel(buf, w, h, px, py, c);
+      }
+    }
+  }
+}
+function _drawDottedVerticalLine(
+  buf: Uint8Array, w: number, h: number,
+  x: number, y1: number, y2: number, dotSize: number, gapSize: number, c: RgbColor
+) {
+  let y = y1;
+  while (y < y2) {
+    _fillRect(buf, w, h, x - dotSize / 2, y, dotSize, dotSize, c);
+    y += dotSize + gapSize;
+  }
+}
+/**
+ * Draw a filled red drop-pin shape (similar to Material/Google Maps
+ * pin) centered horizontally at cx, with its top tip at topY. The pin
+ * has total height ~ topY+h, width ~ 2*r+something. White inner circle.
+ */
+function _drawPin(
+  buf: Uint8Array, w: number, h: number,
+  cx: number, topY: number, size: number,
+  fill: RgbColor, innerColor: RgbColor
+) {
+  const r = size * 0.42;          // top circle radius
+  const cy = topY + r + 2;         // center of top circle
+  const tipY = topY + size;        // tip position
+  // Tear-drop body: top circle + downward triangle
+  _fillCircle(buf, w, h, cx, cy, r, fill);
+  // Triangle from circle tangent down to tipY
+  for (let py = Math.floor(cy); py <= Math.ceil(tipY); py += 1) {
+    const t = (py - cy) / (tipY - cy); // 0..1
+    const halfW = r * (1 - t * 0.95);
+    if (halfW < 0.5) break;
+    _fillRect(buf, w, h, cx - halfW, py, halfW * 2, 1, fill);
+  }
+  // Inner white circle
+  _fillCircle(buf, w, h, cx, cy - 1, r * 0.42, innerColor);
+}
+
+// ---- TINY BITMAP FONT (5x7) for PNG-renderer text (uppercase only) ----
+// Each glyph is 5 columns x 7 rows, stored as 7 row-bytes (5 LSBs).
+// Used by the route-locations stepper fallback to render labels and
+// the heading without depending on any font / library.
+const _BITMAP_FONT_5x7: Record<string, number[]> = {
+  // Uppercase letters
+  "A": [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+  "B": [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
+  "C": [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
+  "D": [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E],
+  "E": [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
+  "F": [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+  "G": [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0E],
+  "H": [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+  "I": [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
+  "J": [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
+  "K": [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
+  "L": [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+  "M": [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
+  "N": [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11],
+  "O": [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+  "P": [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+  "Q": [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
+  "R": [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+  "S": [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
+  "T": [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+  "U": [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+  "V": [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
+  "W": [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A],
+  "X": [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
+  "Y": [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
+  "Z": [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+  // Digits
+  "0": [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+  "1": [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+  "2": [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
+  "3": [0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E],
+  "4": [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
+  "5": [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
+  "6": [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
+  "7": [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+  "8": [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+  "9": [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
+  // Punctuation
+  " ": [0, 0, 0, 0, 0, 0, 0],
+  "-": [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+  ".": [0, 0, 0, 0, 0, 0x06, 0x06],
+  ",": [0, 0, 0, 0, 0, 0x06, 0x04],
+  ":": [0, 0x06, 0x06, 0, 0x06, 0x06, 0],
+  "/": [0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10],
+  "(": [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
+  ")": [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
+};
+function _drawBitmapText(
+  buf: Uint8Array, w: number, h: number,
+  text: string, x: number, y: number, scale: number, c: RgbColor
+) {
+  const upper = text.toUpperCase();
+  const cellW = 5 * scale + scale; // 5 cols + 1 col gap
+  for (let i = 0; i < upper.length; i += 1) {
+    const ch = upper[i];
+    const glyph = _BITMAP_FONT_5x7[ch] || _BITMAP_FONT_5x7[" "];
+    for (let row = 0; row < 7; row += 1) {
+      const bits = glyph[row];
+      for (let col = 0; col < 5; col += 1) {
+        if (bits & (1 << (4 - col))) {
+          _fillRect(buf, w, h, x + i * cellW + col * scale, y + row * scale, scale, scale, c);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Render the route-locations stepper as a PNG using only the
+ * pure-JS encoder above. Identical in spirit to the SVG → sharp
+ * version, but works in production environments where sharp /
+ * libvips / librsvg isn't available. This is the SECOND-tier
+ * fallback (after the sharp/SVG path, before the Word-table path).
+ */
+function renderRouteLocationsStepperPng(
+  labels: { label: string; pin_type: string }[]
+): Buffer | null {
+  const items = labels.filter((l) => l.label).slice(0, 30);
+  if (items.length === 0) return null;
+
+  // Canvas dimensions
+  const W = 1080;
+  const ROW_H = 110;
+  const HEADING_H = 70;
+  const TOP_PAD = 30;
+  const BOTTOM_PAD = 40;
+  const H = TOP_PAD + HEADING_H + items.length * ROW_H + BOTTOM_PAD;
+  const buf = new Uint8Array(W * H * 4);
+  // Initialise to white background (so the image isn't transparent
+  // when embedded in Word — keeps the visible look matching the SVG).
+  for (let i = 0; i < buf.length; i += 4) {
+    buf[i] = 255; buf[i + 1] = 255; buf[i + 2] = 255; buf[i + 3] = 255;
+  }
+
+  const grey800 = _hexToRgba("#1F2937");
+  const grey400 = _hexToRgba("#9CA3AF");
+  const grey300 = _hexToRgba("#D1D5DB");
+  const black0F = _hexToRgba("#0F172A");
+  const red500 = _hexToRgba("#EC4054");
+  const white = _hexToRgba("#FFFFFF");
+
+  // ---- Heading: "ROUTE SURVEY KEY POINTS"
+  _drawBitmapText(
+    buf, W, H,
+    "ROUTE SURVEY KEY POINTS",
+    40,
+    TOP_PAD + 18,
+    4, // scale
+    grey800
+  );
+
+  const MARK_X = 90;
+  const MARK_R = 22;
+  const RECT_X = MARK_X + 60;
+  const RECT_W = W - RECT_X - 40;
+  const RECT_H = 76;
+  const RECT_RADIUS = 18;
+
+  for (let i = 0; i < items.length; i += 1) {
+    const it = items[i];
+    const cy = TOP_PAD + HEADING_H + i * ROW_H + ROW_H / 2;
+    const isEnd = i === items.length - 1 || it.pin_type === "end";
+
+    // Connector dotted line down to next row
+    if (i < items.length - 1) {
+      _drawDottedVerticalLine(
+        buf, W, H,
+        MARK_X,
+        cy + MARK_R + 6,
+        cy + ROW_H - MARK_R - 6,
+        4, 8, grey400
+      );
+    }
+
+    // Marker
+    if (isEnd) {
+      _drawPin(buf, W, H, MARK_X, cy - 26, 60, red500, white);
+    } else {
+      // Hollow circle: outer dark, inner white
+      _strokeCircle(buf, W, H, MARK_X, cy, MARK_R, MARK_R - 4, grey800);
+    }
+
+    // Label rounded pill
+    const rectY = cy - RECT_H / 2;
+    _fillRoundedRect(buf, W, H, RECT_X, rectY, RECT_W, RECT_H, RECT_RADIUS, white);
+    _strokeRoundedRect(buf, W, H, RECT_X, rectY, RECT_W, RECT_H, RECT_RADIUS, 2, grey300);
+    _drawBitmapText(
+      buf, W, H,
+      it.label,
+      RECT_X + 24,
+      rectY + RECT_H / 2 - 14,
+      4,
+      black0F
+    );
+  }
+
+  console.log("[ROUTE LOCATIONS STEPPER PURE-JS]", {
+    itemCount: items.length,
+    renderedSize: `${W}x${H}`,
+    fallbackPath: "pure-JS PNG renderer (no sharp/libvips needed)",
+  });
+  return encodeRgbaToPng(W, H, buf);
 }
 
 /**
@@ -2561,17 +2954,33 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.error("[export actual] routeMap fetch step threw - ignoring:", err);
   }
 
-  // ----- Generate the route-locations stepper image (hollow circles +
-  // dotted connectors + final red pin) and store it in imageMap so the
-  // post-render pass can inject it right after the route map.
+  // ----- Generate the route-locations stepper image. Three-tier
+  // resolution so the stepper looks good on EVERY environment:
+  //   1. sharp + SVG → PNG (preferred, used locally)
+  //   2. pure-JS PNG renderer (used in production when sharp/libvips
+  //      lacks SVG support — produces an image that visually matches
+  //      the SVG version, no native deps required)
+  //   3. Word-table fallback (only if both PNG paths fail; handled
+  //      by the post-render injection pass)
   try {
     if (routeLocationLabels.length > 0) {
-      // Pass empty title — the project title is now in the Word
-      // header so we don't bake it into the stepper image too.
-      const stepperBuf = await generateRouteLocationsStepper(
+      // Tier 1: sharp + SVG. Pass empty title — the project title is
+      // in the Word header now so we don't bake it into the image.
+      let stepperBuf = await generateRouteLocationsStepper(
         routeLocationLabels,
         ""
       );
+      if (!stepperBuf || stepperBuf.length === 0) {
+        // Tier 2: pure-JS PNG renderer (no native deps).
+        try {
+          stepperBuf = renderRouteLocationsStepperPng(routeLocationLabels);
+        } catch (err) {
+          console.warn(
+            "[export actual] pure-JS PNG stepper renderer threw:",
+            (err as Error)?.message || err
+          );
+        }
+      }
       if (stepperBuf && stepperBuf.length > 0) {
         imageMap.set("routeLocations", {
           buffer: stepperBuf,
@@ -4953,26 +5362,20 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         console.log("[DOCX SECTION TYPE NORMALIZED]", { sectionTypesNormalized });
       }
 
-      // ---- COLLAPSE BLANK PAGES ----
-      // After the title-strip pass, the page breaks that originally
-      // surrounded the {projectNameUpper} title paragraph still remain
-      // — leaving an EMPTY page where the title used to be. Find any
-      // two consecutive page-break paragraphs separated only by blank
-      // glue (whitespace / empty paragraphs that contain no <w:drawing>
-      // and no <w:tbl> — text runs ARE allowed since they may just
-      // contain whitespace) and reduce them to a single page break.
-      // Loops until stable so 3+ consecutive breaks also collapse.
+      // ---- COLLAPSE BLANK PAGES (SECTPR-SAFE) ----
+      // Find pairs of consecutive page-break paragraphs separated only
+      // by blank glue and reduce them to one. Loops until stable.
+      //
+      // SAFETY: NEVER touch a paragraph that contains <w:sectPr>. Those
+      // paragraphs carry section properties (page size, orientation,
+      // margins, headers, footers) that Word requires. Removing one
+      // makes Word say "unreadable content" and force the user to
+      // recover. So the boundary pattern here matches ONLY explicit
+      // page breaks (<w:br w:type="page"/>), not section breaks.
       let blankPagesCollapsed = 0;
       {
-        // A "page boundary" paragraph is one that contains either an
-        // explicit page break (<w:br w:type="page"/>) OR a section break
-        // (<w:sectPr> inside <w:pPr>) — both force a new page start.
         const pageBreakParaPattern =
-          `<w:p\\b[^>]*>(?:(?!<\\/w:p>)[\\s\\S])*?(?:<w:br\\s+w:type="page"\\s*\\/>|<w:sectPr\\b)(?:(?!<\\/w:p>)[\\s\\S])*?<\\/w:p>`;
-        // Glue: any number of paragraphs that DON'T contain a drawing,
-        // a table, or another page boundary. Text runs (even non-empty
-        // ones with just whitespace) ARE allowed — Word treats short
-        // whitespace text as effectively empty for pagination.
+          `<w:p\\b[^>]*>(?:(?!<\\/w:p>)(?!<w:sectPr)[\\s\\S])*?<w:br\\s+w:type="page"\\s*\\/>(?:(?!<\\/w:p>)(?!<w:sectPr)[\\s\\S])*?<\\/w:p>`;
         const blankGluePattern =
           `(?:\\s*<w:p\\b[^>]*>(?:(?!<\\/w:p>)(?!<w:drawing)(?!<w:tbl)(?!<w:br\\s+w:type="page")(?!<w:sectPr)[\\s\\S])*?<\\/w:p>\\s*)*`;
         const collapseRe = new RegExp(
@@ -5003,33 +5406,40 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       // the SECOND boundary along with its empty content.
       // Catches blank pages that the regex collapse missed (unusual
       // glue paragraphs, mixed boundary types, etc.).
+      // SAFETY: this scanner removes the SECOND boundary in a blank
+      // pair. NEVER remove a boundary that contains <w:sectPr> (those
+      // carry section properties Word requires). Only consider
+      // <w:br w:type="page"/> paragraphs as removable boundaries.
       let positionalBlankPagesRemoved = 0;
       {
         const boundaryRe =
-          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?(?:<w:br\s+w:type="page"\s*\/>|<w:sectPr\b)(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
-        const boundaries: Array<{ start: number; end: number }> = [];
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:br\s+w:type="page"\s*\/>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+        const boundaries: Array<{ start: number; end: number; xml: string }> = [];
         let bm: RegExpExecArray | null;
         while ((bm = boundaryRe.exec(xml)) !== null) {
-          boundaries.push({ start: bm.index, end: bm.index + bm[0].length });
+          boundaries.push({
+            start: bm.index,
+            end: bm.index + bm[0].length,
+            xml: bm[0],
+          });
         }
-        // Process from END to START so earlier offsets stay valid.
         for (let i = boundaries.length - 1; i >= 1; i -= 1) {
           const prev = boundaries[i - 1];
           const curr = boundaries[i];
+          // Don't remove a boundary that carries section properties.
+          if (curr.xml.includes("<w:sectPr")) continue;
           const between = xml.slice(prev.end, curr.start);
-          // Check for visible content in between
-          //  - <w:t> with at least one non-whitespace char
-          //  - <w:drawing>
-          //  - <w:tbl> (but NOT just <w:tblPr> alone)
           const hasText =
             /<w:t(?:\s[^>]*)?>(?:(?!<\/w:t>)[\s\S])*?\S(?:(?!<\/w:t>)[\s\S])*?<\/w:t>/.test(
               between
             );
           const hasDrawing = between.includes("<w:drawing");
           const hasTable = /<w:tbl[\s>]/.test(between);
-          if (!hasText && !hasDrawing && !hasTable) {
-            // Blank page — strip from end-of-prev to end-of-curr,
-            // which removes the empty between AND the second boundary.
+          // Also bail if the "between" slice contains a sectPr-bearing
+          // paragraph — removing the second boundary would change the
+          // section-properties paragraph's positioning relative to it.
+          const hasSectPrInBetween = between.includes("<w:sectPr");
+          if (!hasText && !hasDrawing && !hasTable && !hasSectPrInBetween) {
             xml = xml.slice(0, prev.end) + xml.slice(curr.end);
             positionalBlankPagesRemoved += 1;
           }
@@ -5066,15 +5476,26 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             if (bodyClose < 0) break;
             // Find the LAST page-break paragraph BEFORE </w:body>
             pageBreakParaPattern.lastIndex = 0;
-            let lastBreak: { start: number; end: number } | null = null;
+            let lastBreak: { start: number; end: number; xml: string } | null = null;
             let m: RegExpExecArray | null;
             while ((m = pageBreakParaPattern.exec(xml)) !== null) {
               if (m.index >= bodyClose) break;
-              lastBreak = { start: m.index, end: m.index + m[0].length };
+              lastBreak = {
+                start: m.index,
+                end: m.index + m[0].length,
+                xml: m[0],
+              };
             }
             if (!lastBreak) break;
+            // SAFETY: never remove a paragraph carrying <w:sectPr> —
+            // those define section properties Word requires.
+            if (lastBreak.xml.includes("<w:sectPr")) break;
             // Slice between this page break and </w:body>
             const tail = xml.slice(lastBreak.end, bodyClose);
+            // Bail if the tail itself contains a sectPr-bearing
+            // paragraph (we'd be deleting structurally-required
+            // content above it).
+            if (tail.includes("<w:sectPr")) break;
             // Visible content checks (matches the positional scanner)
             const tailHasText =
               /<w:t(?:\s[^>]*)?>(?:(?!<\/w:t>)[\s\S])*?\S(?:(?!<\/w:t>)[\s\S])*?<\/w:t>/.test(
