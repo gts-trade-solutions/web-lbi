@@ -154,6 +154,9 @@ export async function POST(request: Request, context: Ctx) {
       [projectId, pageId]
     );
 
+    // pin_type derived from position so the renderer can use start/end
+    // markers correctly regardless of how many locations the user added.
+    const lastIdx = routeLocations.length - 1;
     const locRows = routeLocations
       .map((x: any, idx: number) => ({
         id: uuidv4(),
@@ -161,7 +164,7 @@ export async function POST(request: Request, context: Ctx) {
         project_id: projectId,
         user_id: authUser.id,
         label: String(x || "").trim(),
-        pin_type: idx === 0 ? "start" : idx === 3 ? "end" : "mid",
+        pin_type: idx === 0 ? "start" : idx === lastIdx ? "end" : "mid",
         sort_order: idx,
       }))
       .filter((r: any) => r.label);

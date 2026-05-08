@@ -940,7 +940,10 @@ async function buildObjectiveRouteMapSection(params: {
 if (routeMapBytes) {
     // ✅ Show location boxes only when at least one location has value.
     // Otherwise show only the map centered.
-    const rawLocs = (routeLocations || []).slice(0, 4);
+    // No fixed limit on locations — accept whatever the user added.
+    // Cap at a reasonable upper bound (50) just to protect from
+    // accidentally huge inputs.
+    const rawLocs = (routeLocations || []).slice(0, 50);
     const hasAnyLocation = rawLocs.some((x) => String(x || "").trim());
 
     const mapImgPara = centeredImageFit(routeMapBytes, 1100, 700);
@@ -955,12 +958,16 @@ if (routeMapBytes) {
       );
       (children as any).push(mapImgPara);
     } else {
-      const locs = [...rawLocs];
-      while (locs.length < 4) locs.push("");
+      // Trim to non-empty labels only — don't render placeholder rows.
+      const locs = rawLocs
+        .map((s) => String(s || "").trim())
+        .filter((s) => s !== "");
+      const lastIdx = locs.length - 1;
 
       const leftRows = locs.map((label, idx) => {
-        const iconText = idx === 3 ? "📍" : "○";
-        const iconColor = idx === 3 ? "B42318" : "101828";
+        const isEnd = idx === lastIdx;
+        const iconText = isEnd ? "📍" : "○";
+        const iconColor = isEnd ? "B42318" : "101828";
 
         return new TableRow({
           cantSplit: true,

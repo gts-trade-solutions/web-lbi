@@ -31,6 +31,42 @@ function getSharp() {
 }
 
 /**
+ * Read width/height from a PNG buffer WITHOUT sharp by parsing the
+ * IHDR chunk directly. Production environments where sharp/libvips
+ * isn't available (e.g. lightweight Linux containers) still need to
+ * compute aspect ratios for logos and other PNGs — this gives a
+ * dependency-free fallback so images aren't forced to stretch.
+ *
+ * PNG layout:
+ *   - 8-byte signature (89 50 4E 47 0D 0A 1A 0A)
+ *   - First chunk MUST be IHDR (length 13)
+ *     - 4 bytes  length
+ *     - 4 bytes  type "IHDR"
+ *     - 4 bytes  width  (big-endian, at file offset 16)
+ *     - 4 bytes  height (big-endian, at file offset 20)
+ */
+function readPngDimensions(buffer: Buffer): { width: number; height: number } | null {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 24) return null;
+  // Verify PNG signature
+  if (
+    buffer[0] !== 0x89 ||
+    buffer[1] !== 0x50 ||
+    buffer[2] !== 0x4e ||
+    buffer[3] !== 0x47 ||
+    buffer[4] !== 0x0d ||
+    buffer[5] !== 0x0a ||
+    buffer[6] !== 0x1a ||
+    buffer[7] !== 0x0a
+  ) {
+    return null;
+  }
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  if (width <= 0 || height <= 0) return null;
+  return { width, height };
+}
+
+/**
  * Compress an image buffer before it is embedded in the DOCX. Display
  * dimensions are controlled separately by the image module's getSize();
  * this function only changes the EMBEDDED bytes so the output file size
@@ -1087,7 +1123,7 @@ async function generateRouteLocationsStepper(
     );
     return null;
   }
-  const items = labels.filter((l) => l.label).slice(0, 8);
+  const items = labels.filter((l) => l.label).slice(0, 30);
   if (items.length === 0) {
     console.warn("[ROUTE LOCATIONS STEPPER] no labels passed in");
     return null;
@@ -1222,7 +1258,7 @@ async function generateRouteLocationsStepper(
 function buildRouteLocationsStepperTableXml(
   labels: { label: string; pin_type: string }[]
 ): string {
-  const items = labels.filter((l) => l.label).slice(0, 8);
+  const items = labels.filter((l) => l.label).slice(0, 30);
   if (items.length === 0) return "";
 
   const escapeXml = (s: string) =>
@@ -1272,7 +1308,7 @@ function buildRouteLocationsStepperTableXml(
     `<w:sz w:val="28"/><w:szCs w:val="28"/>`,
     `<w:color w:val="1F2937"/>`,
     `</w:rPr>`,
-    `<w:t>Locations</w:t>`,
+    `<w:t>ROUTE SURVEY KEY POINTS</w:t>`,
     `</w:r>`,
     `</w:p>`,
     `</w:tc>`,
@@ -5005,6 +5041,63 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         });
       }
 
+      // ---- TRAILING EMPTY PAGE STRIP ----
+      // The body always ends with a paragraph that carries the
+      // body-level <w:sectPr>. If a page-break paragraph sits between
+      // the last visible content and that final sectPr paragraph (or
+      // between the last sectPr-bearing paragraph and the body close),
+      // the document renders an empty trailing page. Remove any such
+      // page breaks.
+      let trailingBlankPagesRemoved = 0;
+      {
+        // Find the index of </w:body>. Everything up to it is body content.
+        const bodyCloseIdx = xml.indexOf("</w:body>");
+        if (bodyCloseIdx > 0) {
+          // Walk all page-break paragraphs in the body, find the LAST one,
+          // and check if NOTHING visible (text/drawing/table) sits between
+          // it and the body close. If so, drop it. Repeat until no more
+          // trailing blank pages found.
+          const pageBreakParaPattern =
+            /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:br\s+w:type="page"\s*\/>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+          let safety = 0;
+          while (safety < 10) {
+            safety += 1;
+            const bodyClose = xml.indexOf("</w:body>");
+            if (bodyClose < 0) break;
+            // Find the LAST page-break paragraph BEFORE </w:body>
+            pageBreakParaPattern.lastIndex = 0;
+            let lastBreak: { start: number; end: number } | null = null;
+            let m: RegExpExecArray | null;
+            while ((m = pageBreakParaPattern.exec(xml)) !== null) {
+              if (m.index >= bodyClose) break;
+              lastBreak = { start: m.index, end: m.index + m[0].length };
+            }
+            if (!lastBreak) break;
+            // Slice between this page break and </w:body>
+            const tail = xml.slice(lastBreak.end, bodyClose);
+            // Visible content checks (matches the positional scanner)
+            const tailHasText =
+              /<w:t(?:\s[^>]*)?>(?:(?!<\/w:t>)[\s\S])*?\S(?:(?!<\/w:t>)[\s\S])*?<\/w:t>/.test(
+                tail
+              );
+            const tailHasDrawing = tail.includes("<w:drawing");
+            const tailHasTable = /<w:tbl[\s>]/.test(tail);
+            if (tailHasText || tailHasDrawing || tailHasTable) {
+              // Last page break has real content after it — leave it alone.
+              break;
+            }
+            // Tail is empty — strip this page break paragraph.
+            xml = xml.slice(0, lastBreak.start) + xml.slice(lastBreak.end);
+            trailingBlankPagesRemoved += 1;
+          }
+        }
+      }
+      if (trailingBlankPagesRemoved > 0) {
+        console.log("[DOCX TRAILING BLANK PAGE STRIP]", {
+          trailingBlankPagesRemoved,
+        });
+      }
+
       console.log("[CLIENT DOCX POLISH]", {
         borderRecolorCount,
         fontBumpCount,
@@ -5859,10 +5952,37 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         }
       }
 
+      // 5. Strip <Template>...</Template> and <HyperlinkBase>...</HyperlinkBase>
+      //    from docProps/app.xml. If the doc has <Template>foo.docx</Template>,
+      //    Word treats it as derived from a template and the FIRST Ctrl+S
+      //    forces Save-As (the user's "Save this file" popup).
+      let appPropsCleaned = false;
+      const appFile = renderedZip.file("docProps/app.xml");
+      if (appFile) {
+        let appXml = appFile.asText();
+        const beforeApp = appXml;
+        appXml = appXml.replace(/<Template\b[^>]*\/>/g, () => {
+          appPropsCleaned = true;
+          return "<Template>Normal.dotm</Template>";
+        });
+        appXml = appXml.replace(/<Template\b[^>]*>[\s\S]*?<\/Template>/g, () => {
+          appPropsCleaned = true;
+          return "<Template>Normal.dotm</Template>";
+        });
+        appXml = appXml.replace(/<HyperlinkBase\b[\s\S]*?<\/HyperlinkBase>/g, () => {
+          appPropsCleaned = true;
+          return "";
+        });
+        if (appXml !== beforeApp) {
+          renderedZip.file("docProps/app.xml", appXml);
+        }
+      }
+
       console.log("[DOCX EDITABILITY PASS]", {
         protectionStripped,
         templateContentTypeFixed,
         contentStatusCleared,
+        appPropsCleaned,
       });
     }
 
@@ -6082,35 +6202,50 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
 
-        // Logo display size: 3" wide ONLY — height is computed from
-        // the source image's true aspect ratio via sharp metadata so the
-        // logo NEVER stretches. The 1" height below is just a safety
-        // fallback used only when sharp can't read the metadata at all.
+        // Logo display size: 3" wide ONLY — height is computed from the
+        // source image's true aspect ratio. Resolution order:
+        //   1. sharp metadata (works locally)
+        //   2. native PNG IHDR parser (works in production even when
+        //      sharp/libvips is missing — fixes logo stretching)
+        //   3. 1" fallback (used only if both readers fail)
         const LOGO_TARGET_W_IN = 3.0;
         const EMU_PER_INCH = 914400;
         let logoEmuW = Math.round(LOGO_TARGET_W_IN * EMU_PER_INCH); // 2743200
         let logoEmuH = Math.round(1.0 * EMU_PER_INCH);               // 914400 fallback
+        let aspectSource: "sharp" | "png-parser" | "fallback" = "fallback";
+        let aspectRatio: number | null = null;
         const sharp = getSharp();
         if (sharp) {
           try {
             const meta = await sharp(logoBuffer).metadata();
             if (meta.width && meta.height && meta.width > 0) {
-              const aspect = meta.height / meta.width;
-              logoEmuH = Math.round(logoEmuW * aspect);
-              console.log("[CLIENT DOCX HEADER] logo aspect ratio from sharp", {
-                pxWidth: meta.width,
-                pxHeight: meta.height,
-                aspect: aspect.toFixed(4),
-                emuW: logoEmuW,
-                emuH: logoEmuH,
-                inchesW: LOGO_TARGET_W_IN,
-                inchesH: (logoEmuH / EMU_PER_INCH).toFixed(3),
-              });
+              aspectRatio = meta.height / meta.width;
+              aspectSource = "sharp";
             }
           } catch (metaErr) {
-            console.warn("[CLIENT DOCX HEADER] sharp metadata failed, using fallback height:", metaErr);
+            console.warn("[CLIENT DOCX HEADER] sharp metadata failed, will try PNG parser:", metaErr);
           }
         }
+        if (aspectRatio === null) {
+          // sharp unavailable or threw → use the native PNG dimension
+          // parser. The logo IS a PNG so this is reliable.
+          const dims = readPngDimensions(logoBuffer);
+          if (dims && dims.width > 0) {
+            aspectRatio = dims.height / dims.width;
+            aspectSource = "png-parser";
+          }
+        }
+        if (aspectRatio !== null) {
+          logoEmuH = Math.round(logoEmuW * aspectRatio);
+        }
+        console.log("[CLIENT DOCX HEADER] logo aspect ratio", {
+          aspectSource,
+          aspect: aspectRatio !== null ? aspectRatio.toFixed(4) : "n/a",
+          emuW: logoEmuW,
+          emuH: logoEmuH,
+          inchesW: LOGO_TARGET_W_IN,
+          inchesH: (logoEmuH / EMU_PER_INCH).toFixed(3),
+        });
 
         console.log("[DOCX TITLE LOGO FIX]", {
           titleSize: "22pt",

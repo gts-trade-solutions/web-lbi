@@ -2607,13 +2607,24 @@ function RouteSetupModal({
   const [conclusionHtml, setConclusionHtml] = useState<string>("");
   const conclusionRef = useRef<any>(null);
 
-  // ✅ Locations (4 inputs)
+  // ✅ Locations — dynamic, no fixed limit. Starts with 4 (typical
+  //    start + 2 stops + end), but the user can add or remove rows.
   const [routeLocations, setRouteLocations] = useState<string[]>(["", "", "", ""]);
   const updateLoc = (idx: number, val: string) => {
     setRouteLocations((p) => {
       const copy = [...p];
       copy[idx] = val;
       return copy;
+    });
+  };
+  const addLocationRow = () => {
+    setRouteLocations((p) => [...p, ""]);
+  };
+  const removeLocationRow = (idx: number) => {
+    setRouteLocations((p) => {
+      // Always keep at least 2 rows so the route has a start and an end.
+      if (p.length <= 2) return p;
+      return p.filter((_, i) => i !== idx);
     });
   };
 
@@ -2789,8 +2800,13 @@ function RouteSetupModal({
 
         const locs = Array.isArray(data?.locations) ? (data.locations as RouteLocationRow[]) : [];
         if (locs.length) {
-          const labels = locs.map((x) => String(x.label || "").trim());
-          setRouteLocations([labels[0] || "", labels[1] || "", labels[2] || "", labels[3] || ""]);
+          // Load ALL saved labels (no longer truncated to 4). Pad up to
+          // a minimum of 2 so the user always sees at least Start + End.
+          const labels = locs
+            .map((x) => String(x.label || ""))
+            .filter((s, i) => s.trim() !== "" || i < locs.length);
+          while (labels.length < 2) labels.push("");
+          setRouteLocations(labels);
         }
       } catch (e: any) {
         setErr(e?.message || String(e));
@@ -3049,41 +3065,110 @@ function RouteSetupModal({
               </>
             )}
 
-            {/* ✅ Locations (4 inputs) */}
+            {/* ✅ Locations — dynamic add/remove (no fixed limit) */}
             <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
               <div style={styles.routeLabel}>Locations</div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "36px 1fr", gap: 12, alignItems: "start" }}>
-                <div style={{ display: "grid", gap: 14, paddingTop: 8, justifyItems: "center" }}>
-                  <div style={locStyles.circle} />
-                  <div style={locStyles.dots} />
-                  <div style={locStyles.circle} />
-                  <div style={locStyles.dots} />
-                  <div style={locStyles.circle} />
-                  <div style={locStyles.dots} />
-                  <div style={locStyles.pin}>📍</div>
+              <div style={{ display: "grid", gridTemplateColumns: "36px 1fr 36px", gap: 12, alignItems: "start" }}>
+                {/* Marker column — circles connected by dots, with a final pin.
+                    Renders one marker (and a connector below it, if not last)
+                    per location row, so the visual stepper grows with the
+                    number of inputs. */}
+                <div style={{ display: "grid", gap: 0, paddingTop: 8, justifyItems: "center", alignContent: "start" }}>
+                  {routeLocations.map((_, idx) => {
+                    const isLast = idx === routeLocations.length - 1;
+                    return (
+                      <div key={`marker-${idx}`} style={{ display: "grid", gap: 0, justifyItems: "center" }}>
+                        {isLast ? (
+                          <div style={{ ...locStyles.pin, marginBottom: 30 }}>📍</div>
+                        ) : (
+                          <>
+                            <div style={locStyles.circle} />
+                            <div style={locStyles.dots} />
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
 
+                {/* Input column */}
                 <div style={{ display: "grid", gap: 12 }}>
-                  {routeLocations.map((val, idx) => (
-                    <input
-                      key={idx}
-                      value={val}
-                      onChange={(e) => updateLoc(idx, e.target.value)}
-                      placeholder={idx === 0 ? "Start location" : idx === 3 ? "End location" : "Stop location"}
+                  {routeLocations.map((val, idx) => {
+                    const isLast = idx === routeLocations.length - 1;
+                    const placeholder =
+                      idx === 0
+                        ? "Start location"
+                        : isLast
+                          ? "End location"
+                          : "Stop location";
+                    return (
+                      <input
+                        key={idx}
+                        value={val}
+                        onChange={(e) => updateLoc(idx, e.target.value)}
+                        placeholder={placeholder}
+                        style={{
+                          height: 44,
+                          borderRadius: 14,
+                          border: "1px solid #D0D5DD",
+                          padding: "0 14px",
+                          fontWeight: 900,
+                          outline: "none",
+                          background: "#fff",
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+
+                {/* Remove-row column — × button on each row except when only 2 left */}
+                <div style={{ display: "grid", gap: 12 }}>
+                  {routeLocations.map((_, idx) => (
+                    <button
+                      key={`rm-${idx}`}
+                      type="button"
+                      onClick={() => removeLocationRow(idx)}
+                      disabled={routeLocations.length <= 2}
+                      title="Remove this location"
                       style={{
                         height: 44,
-                        borderRadius: 14,
-                        border: "1px solid #D0D5DD",
-                        padding: "0 14px",
-                        fontWeight: 900,
-                        outline: "none",
+                        width: 36,
+                        borderRadius: 12,
+                        border: "1px solid #E4E7EC",
                         background: "#fff",
+                        color: routeLocations.length <= 2 ? "#D0D5DD" : "#B91C2A",
+                        fontSize: 22,
+                        fontWeight: 700,
+                        cursor: routeLocations.length <= 2 ? "not-allowed" : "pointer",
+                        lineHeight: 1,
                       }}
-                    />
+                    >
+                      ×
+                    </button>
                   ))}
                 </div>
               </div>
+
+              {/* Add-row button */}
+              <button
+                type="button"
+                onClick={addLocationRow}
+                style={{
+                  marginTop: 4,
+                  alignSelf: "start",
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 10,
+                  border: "1px dashed #6F7A8F",
+                  background: "#F8FAFC",
+                  color: "#1F2937",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                + Add another location
+              </button>
 
               <div style={styles.modalNote}>Example: Kappalur → Salem → Krishnagiri → Hosur</div>
             </div>
