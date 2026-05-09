@@ -24,6 +24,26 @@ function getSharp() {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     _sharp = require("sharp");
+    // Diagnostic: log sharp's actual capabilities so we know in
+    // production exactly which features are available. SVG support
+    // requires libvips compiled with librsvg; text support requires
+    // Pango+FreeType. These are independent — production may have
+    // one without the other.
+    try {
+      const formatNames = _sharp.format ? Object.keys(_sharp.format) : [];
+      const svgIn = _sharp.format?.svg?.input?.buffer === true;
+      const pngOut = _sharp.format?.png?.output?.buffer === true;
+      console.log("[SHARP DIAGNOSTIC]", {
+        sharpVersion: _sharp.versions?.sharp || "unknown",
+        vipsVersion: _sharp.versions?.vips || "unknown",
+        platform: process.platform,
+        svgInputSupported: svgIn,
+        pngOutputSupported: pngOut,
+        availableFormats: formatNames.slice(0, 30),
+      });
+    } catch (diagErr) {
+      console.warn("[SHARP DIAGNOSTIC] failed to read sharp metadata:", diagErr);
+    }
   } catch (err) {
     console.warn("[reenaTemplateExport] sharp not available - skipping image compression:", err);
     _sharp = null;
@@ -332,22 +352,26 @@ function _drawBitmapText(
   buf: Uint8Array, w: number, h: number,
   text: string, x: number, y: number, scale: number, c: RgbColor
 ) {
-  // Supersampled rendering for smoother edges. Steps:
-  //  1. Render at 2x scale into a temporary single-channel mask.
-  //  2. Downsample the 2x mask to 1x by averaging 2x2 blocks — this
-  //     gives anti-aliased edges (each output pixel's alpha is a
-  //     fraction of the input pixels' "on" count).
-  //  3. Composite each mask pixel onto the main buffer with the
-  //     resulting alpha.
+  // High-quality bitmap text rendering. Steps:
+  //  1. Render at 3× scale into a temporary single-channel mask.
+  //  2. Apply a 1-pixel dilation pass to thicken strokes (gives a
+  //     heavier, more readable look).
+  //  3. Apply a 3×3 box blur to soften edges.
+  //  4. Downsample 3× → 1× by averaging 3×3 blocks (9 alpha levels
+  //     per output pixel — proper anti-aliasing).
+  //  5. Composite each output pixel onto the main buffer.
   const upper = text.toUpperCase();
   const cellW = 5 * scale + scale; // 5 cols + 1 col gap
   const renderH = 7 * scale;
   const renderW = upper.length * cellW;
-  // Render at 2x into a binary mask (Uint8Array, 1 byte per pixel)
-  const ssScale = scale * 2;
+
+  const SS = 3; // supersampling factor
+  const ssScale = scale * SS;
   const ssCellW = 5 * ssScale + ssScale;
   const ssH = 7 * ssScale;
   const ssW = upper.length * ssCellW;
+
+  // Step 1: rasterise the bitmap font into the mask at 3× scale
   const mask = new Uint8Array(ssW * ssH);
   for (let i = 0; i < upper.length; i += 1) {
     const ch = upper[i];
@@ -356,33 +380,264 @@ function _drawBitmapText(
       const bits = glyph[row];
       for (let col = 0; col < 5; col += 1) {
         if (bits & (1 << (4 - col))) {
-          // Fill ssScale × ssScale block in the mask
           const baseX = i * ssCellW + col * ssScale;
           const baseY = row * ssScale;
           for (let py = 0; py < ssScale; py += 1) {
+            const yi = (baseY + py) * ssW;
             for (let px = 0; px < ssScale; px += 1) {
-              mask[(baseY + py) * ssW + (baseX + px)] = 255;
+              mask[yi + baseX + px] = 255;
             }
           }
         }
       }
     }
   }
-  // Downsample 2x → 1x with averaging (4 mask pixels → 1 output alpha)
-  for (let oy = 0; oy < renderH; oy += 1) {
-    for (let ox = 0; ox < renderW; ox += 1) {
-      const sx = ox * 2;
-      const sy = oy * 2;
-      let sum = 0;
-      sum += mask[sy * ssW + sx];
-      sum += mask[sy * ssW + (sx + 1)];
-      sum += mask[(sy + 1) * ssW + sx];
-      sum += mask[(sy + 1) * ssW + (sx + 1)];
-      const alpha = Math.round(sum / 4);
-      if (alpha > 0) {
-        _setPixel(buf, w, h, x + ox, y + oy, [c[0], c[1], c[2], Math.round((alpha * c[3]) / 255)]);
+
+  // Step 2: dilate by 1 pixel (thickens strokes for "bolder" look)
+  const dilated = new Uint8Array(ssW * ssH);
+  for (let yy = 0; yy < ssH; yy += 1) {
+    for (let xx = 0; xx < ssW; xx += 1) {
+      if (mask[yy * ssW + xx]) {
+        dilated[yy * ssW + xx] = 255;
+      } else {
+        // If any neighbour is on, set dilated
+        const left = xx > 0 ? mask[yy * ssW + (xx - 1)] : 0;
+        const right = xx + 1 < ssW ? mask[yy * ssW + (xx + 1)] : 0;
+        const up = yy > 0 ? mask[(yy - 1) * ssW + xx] : 0;
+        const down = yy + 1 < ssH ? mask[(yy + 1) * ssW + xx] : 0;
+        if (left || right || up || down) dilated[yy * ssW + xx] = 200;
       }
     }
+  }
+
+  // Step 3: 3×3 box blur — smooths jagged edges into a gradient
+  const blurred = new Uint8Array(ssW * ssH);
+  for (let yy = 0; yy < ssH; yy += 1) {
+    for (let xx = 0; xx < ssW; xx += 1) {
+      let sum = 0;
+      let count = 0;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const ny = yy + dy;
+        if (ny < 0 || ny >= ssH) continue;
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const nx = xx + dx;
+          if (nx < 0 || nx >= ssW) continue;
+          sum += dilated[ny * ssW + nx];
+          count += 1;
+        }
+      }
+      blurred[yy * ssW + xx] = count > 0 ? Math.round(sum / count) : 0;
+    }
+  }
+
+  // Step 4 + 5: downsample 3× → 1× and composite
+  for (let oy = 0; oy < renderH; oy += 1) {
+    for (let ox = 0; ox < renderW; ox += 1) {
+      const sx = ox * SS;
+      const sy = oy * SS;
+      let sum = 0;
+      for (let dy = 0; dy < SS; dy += 1) {
+        const yi = (sy + dy) * ssW;
+        for (let dx = 0; dx < SS; dx += 1) {
+          sum += blurred[yi + sx + dx];
+        }
+      }
+      const alpha = Math.round(sum / (SS * SS));
+      if (alpha > 0) {
+        _setPixel(
+          buf, w, h,
+          x + ox, y + oy,
+          [c[0], c[1], c[2], Math.round((alpha * c[3]) / 255)]
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Render the stepper using sharp.text + sharp.composite — bypasses
+ * SVG entirely. Sharp's text input uses Pango/FreeType (commonly
+ * installed) instead of librsvg (often missing). This means production
+ * environments that have sharp + Pango but lack librsvg still get
+ * REAL FONT TEXT instead of the pixelated bitmap fallback.
+ *
+ * Strategy:
+ *   - Build the canvas with sharp.create (white background)
+ *   - For circles, pin, dotted lines, rounded label boxes: render
+ *     each shape into a small RGBA buffer using the pure-JS drawing
+ *     functions, then composite at the right position
+ *   - For all TEXT (heading + each label): use sharp.text to render
+ *     in a real system font, composite at the right position
+ *
+ * Returns null if sharp is unavailable, sharp.text doesn't work,
+ * or labels list is empty. The caller will then drop to the
+ * pure-JS bitmap fallback.
+ */
+async function renderRouteLocationsStepperViaSharpText(
+  labels: { label: string; pin_type: string }[]
+): Promise<Buffer | null> {
+  const sharp = getSharp();
+  if (!sharp) return null;
+  const items = labels.filter((l) => l.label).slice(0, 30);
+  if (items.length === 0) return null;
+
+  // First try a tiny sharp.text call to confirm text rendering works on
+  // this build of sharp. If it throws, bail and fall through to the
+  // pure-JS path.
+  try {
+    await sharp({
+      text: { text: "test", font: "sans-serif", rgba: true, width: 200 },
+    })
+      .png()
+      .toBuffer();
+  } catch (probeErr) {
+    console.warn(
+      "[ROUTE LOCATIONS STEPPER] sharp.text probe failed — sharp built " +
+        "without Pango/FreeType, dropping to pure-JS bitmap fallback. Error:",
+      (probeErr as Error)?.message || probeErr
+    );
+    return null;
+  }
+
+  // Layout — same dimensions as the pure-JS PNG version
+  const W = 1080;
+  const ROW_H = 110;
+  const HEADING_H = 70;
+  const TOP_PAD = 30;
+  const BOTTOM_PAD = 40;
+  const H = TOP_PAD + HEADING_H + items.length * ROW_H + BOTTOM_PAD;
+  const MARK_X = 90;
+  const MARK_R = 24;
+  const RECT_X = MARK_X + 70;
+  const RECT_W = W - RECT_X - 40;
+  const RECT_H = 88;
+  const RECT_RADIUS = 36;
+
+  type Composite = { input: Buffer; left: number; top: number };
+  const composites: Composite[] = [];
+
+  // Helper: build a small RGBA shape buffer with the pure-JS drawing
+  // functions, then encode it as PNG so sharp can composite it.
+  const shapeAsPng = (width: number, height: number, draw: (buf: Uint8Array) => void): Buffer => {
+    const buf = new Uint8Array(width * height * 4);
+    // Initialise transparent (so compositing onto canvas blends cleanly)
+    for (let i = 3; i < buf.length; i += 4) buf[i] = 0;
+    draw(buf);
+    return encodeRgbaToPng(width, height, buf);
+  };
+
+  const grey800 = _hexToRgba("#1F2937");
+  const grey400 = _hexToRgba("#9CA3AF");
+  const grey300 = _hexToRgba("#D1D5DB");
+  const red500 = _hexToRgba("#EC4054");
+  const white = _hexToRgba("#FFFFFF");
+
+  // ---- Heading TEXT via sharp.text
+  try {
+    const headingPng = await sharp({
+      text: {
+        text: "ROUTE SURVEY KEY POINTS",
+        font: "sans-serif",
+        rgba: true,
+        height: 40,
+      },
+    })
+      .png()
+      .toBuffer();
+    // Tint pixels to dark grey (sharp.text by default renders black on
+    // transparent — that's fine for our dark-grey heading look).
+    composites.push({ input: headingPng, left: 40, top: TOP_PAD + 10 });
+  } catch (err) {
+    console.warn("[STEPPER sharp.text] heading render failed:", err);
+    return null;
+  }
+
+  // ---- Per-row markers + labels
+  for (let i = 0; i < items.length; i += 1) {
+    const it = items[i];
+    const cy = TOP_PAD + HEADING_H + i * ROW_H + ROW_H / 2;
+    const isEnd = i === items.length - 1 || it.pin_type === "end";
+
+    // Connector dotted line
+    if (i < items.length - 1) {
+      const lineH = ROW_H - 2 * MARK_R - 12;
+      const linePng = shapeAsPng(8, lineH, (buf) => {
+        _drawDottedVerticalLine(buf, 8, lineH, 4, 0, lineH, 4, 8, grey400);
+      });
+      composites.push({ input: linePng, left: MARK_X - 4, top: cy + MARK_R + 6 });
+    }
+
+    // Marker (circle or pin)
+    if (isEnd) {
+      const pinPng = shapeAsPng(60, 70, (buf) => {
+        _drawPin(buf, 60, 70, 30, 4, 60, red500, white);
+      });
+      composites.push({ input: pinPng, left: MARK_X - 30, top: cy - 30 });
+    } else {
+      const circlePng = shapeAsPng(60, 60, (buf) => {
+        _strokeCircle(buf, 60, 60, 30, 30, MARK_R, MARK_R - 4, grey800);
+      });
+      composites.push({ input: circlePng, left: MARK_X - 30, top: cy - 30 });
+    }
+
+    // Rounded label pill (background + border, NO text)
+    const pillPng = shapeAsPng(RECT_W, RECT_H, (buf) => {
+      _fillRoundedRect(buf, RECT_W, RECT_H, 0, 0, RECT_W, RECT_H, RECT_RADIUS, white);
+      _strokeRoundedRect(
+        buf, RECT_W, RECT_H,
+        0, 0, RECT_W, RECT_H, RECT_RADIUS, 2, grey300, white
+      );
+    });
+    const rectY = cy - RECT_H / 2;
+    composites.push({ input: pillPng, left: RECT_X, top: rectY });
+
+    // Label TEXT via sharp.text
+    try {
+      const labelPng = await sharp({
+        text: {
+          text: it.label,
+          font: "sans-serif",
+          rgba: true,
+          height: 38,
+        },
+      })
+        .png()
+        .toBuffer();
+      composites.push({
+        input: labelPng,
+        left: RECT_X + 28,
+        top: rectY + Math.round(RECT_H / 2 - 22),
+      });
+    } catch (err) {
+      console.warn("[STEPPER sharp.text] label render failed for", it.label, err);
+      return null;
+    }
+  }
+
+  try {
+    const out = await sharp({
+      create: {
+        width: W,
+        height: H,
+        channels: 4,
+        background: { r: 255, g: 255, b: 255, alpha: 1 },
+      },
+    })
+      .composite(composites)
+      .png()
+      .toBuffer();
+    console.log("[ROUTE LOCATIONS STEPPER GENERATED]", {
+      itemCount: items.length,
+      renderPath: "sharp.text + composite (real font, no SVG/librsvg needed)",
+      bytes: out.length,
+    });
+    return out;
+  } catch (err) {
+    console.warn(
+      "[STEPPER sharp.text] final composite failed:",
+      (err as Error)?.message || err
+    );
+    return null;
   }
 }
 
@@ -2990,14 +3245,29 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   //      by the post-render injection pass)
   try {
     if (routeLocationLabels.length > 0) {
-      // Tier 1: sharp + SVG. Pass empty title — the project title is
-      // in the Word header now so we don't bake it into the image.
+      // Tier 1: sharp + SVG (REAL FONT). Pass empty title — the project
+      // title is in the Word header now so we don't bake it into the image.
       let stepperBuf = await generateRouteLocationsStepper(
         routeLocationLabels,
         ""
       );
+      // Tier 2: sharp.text + composite (REAL FONT, no SVG/librsvg
+      // needed — works as long as sharp is installed with Pango).
       if (!stepperBuf || stepperBuf.length === 0) {
-        // Tier 2: pure-JS PNG renderer (no native deps).
+        try {
+          stepperBuf = await renderRouteLocationsStepperViaSharpText(
+            routeLocationLabels
+          );
+        } catch (err) {
+          console.warn(
+            "[export actual] sharp.text stepper renderer threw:",
+            (err as Error)?.message || err
+          );
+        }
+      }
+      // Tier 3: pure-JS bitmap PNG renderer (no native deps at all,
+      // visible pixelation but functional).
+      if (!stepperBuf || stepperBuf.length === 0) {
         try {
           stepperBuf = renderRouteLocationsStepperPng(routeLocationLabels);
         } catch (err) {
