@@ -94,7 +94,7 @@ export async function GET(request: Request, context: Ctx) {
 
   // Build rows with cumulative KM (first report = 0).
   let total = 0;
-  const aoa: (string | number)[][] = [["S.No", "KM", "Coordinates (Lat, Long)"]];
+  const aoa: (string | number)[][] = [["S.No", "KM", "Location", "Coordinates (Lat, Long)"]];
 
   reports.forEach((r, idx) => {
     const lat = pickLat(r);
@@ -112,12 +112,26 @@ export async function GET(request: Request, context: Ctx) {
     const coords =
       lat !== null && lng !== null ? `${lat.toFixed(6)}, ${lng.toFixed(6)}` : "";
 
-    aoa.push([idx + 1, Number(total.toFixed(2)), coords]);
+    // Location: the cached reverse-geocoded place name the Word export stores
+    // (reports.resolved_location), falling back to other stored location
+    // fields. Blank when none has been resolved yet.
+    const location =
+      String(
+        r.resolved_location ||
+          r.location ||
+          r.address ||
+          r.location_name ||
+          r.place ||
+          r.landmark ||
+          ""
+      ).trim();
+
+    aoa.push([idx + 1, Number(total.toFixed(2)), location, coords]);
   });
 
   // Build the workbook.
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws["!cols"] = [{ wch: 6 }, { wch: 10 }, { wch: 26 }];
+  ws["!cols"] = [{ wch: 6 }, { wch: 10 }, { wch: 34 }, { wch: 26 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "KM & Coordinates");
 
