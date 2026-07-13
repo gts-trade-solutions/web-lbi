@@ -5,6 +5,7 @@ import { ListObjectsV2Command, PutObjectCommand } from "@aws-sdk/client-s3";
 import pool from "../../../../../lib/db";
 import { requireAuth } from "../../../../../lib/auth";
 import { s3Client, S3_BUCKET_NAME, getPublicS3Url } from "../../../../../lib/s3";
+import { logActivity } from "../../../../../lib/activityLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -134,6 +135,16 @@ function normalizeFileKey(value: unknown): string {
   return s.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+// Basename without extension ("IMG_001.webp" -> "img_001"). Master files
+// often say "IMG_001" or "IMG_001.jpg" while the real S3 object is .webp or
+// .png — matching by stem makes the extension irrelevant.
+function fileKeyStem(value: unknown): string {
+  return normalizeFileKey(value).replace(/\.[a-z0-9]{2,5}$/i, "");
+}
+
+// Marker prefix for extension-less entries in the S3 basename index.
+const STEM_PREFIX = "stem::";
+
 /**
  * Walk one or more S3 prefixes and build a basename->Key map. Result is
  * normalised (lower-case basename) so we can match master-file references
@@ -166,6 +177,12 @@ async function buildS3FileIndex(prefixes: string[]): Promise<Map<string, string>
           // First match wins so deeper/duplicate copies don't override the
           // shallower one.
           if (!index.has(base)) index.set(base, key);
+          // Extension-insensitive entry: lets "IMG_001.jpg" in the master
+          // resolve to "IMG_001.webp" in the bucket (and vice versa).
+          const stem = fileKeyStem(key);
+          if (stem && stem !== base && !index.has(`${STEM_PREFIX}${stem}`)) {
+            index.set(`${STEM_PREFIX}${stem}`, key);
+          }
         }
         if (!out.IsTruncated || !out.NextContinuationToken) break;
         token = out.NextContinuationToken;
@@ -195,9 +212,19 @@ function resolveS3KeyForRef(
     // image_key may already be the full S3 key ("reports/photos/xxx/y.jpg").
     const looksLikeKey = ikRaw.includes("/") && /\.[a-z0-9]+$/i.test(ikRaw);
     if (looksLikeKey) return ikRaw.replace(/^\/+/, "");
+    // Extension-insensitive fallback.
+    const ikStem = fileKeyStem(ikRaw);
+    if (ikStem && index.has(`${STEM_PREFIX}${ikStem}`)) {
+      return index.get(`${STEM_PREFIX}${ikStem}`) || null;
+    }
   }
   const fnBase = normalizeFileKey(ref.file_name);
   if (fnBase && index.has(fnBase)) return index.get(fnBase) || null;
+  // Extension-insensitive fallback: "IMG_001" / "IMG_001.jpg" -> IMG_001.webp
+  const fnStem = fileKeyStem(ref.file_name);
+  if (fnStem && index.has(`${STEM_PREFIX}${fnStem}`)) {
+    return index.get(`${STEM_PREFIX}${fnStem}`) || null;
+  }
   return null;
 }
 
@@ -1275,6 +1302,22 @@ export async function POST(request: Request, context: Ctx) {
       s3LookupEnabled: s3Lookup.enabled,
       s3IndexSize: s3Index ? s3Index.size : 0,
       projectVerify,
+    });
+
+    // AUDIT: a bulk import saved many points into THIS project — record who,
+    // how many, and which project (the action behind "points went to the
+    // wrong project").
+    await logActivity(request, {
+      action: "bulk_import",
+      table: "reports",
+      projectId,
+      rowCount: insertedCount + updatedCount,
+      details: {
+        insertedCount,
+        updatedCount,
+        photosMatched,
+        photosMissing,
+      },
     });
 
     return Response.json({

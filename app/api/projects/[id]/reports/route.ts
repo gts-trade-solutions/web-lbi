@@ -83,8 +83,48 @@ export async function GET(request: Request, context: Ctx) {
       `SELECT * FROM reports WHERE ${where.join(" AND ")} ORDER BY ${orderParts.join(", ")}${limitSql}`,
       args
     );
+    const reports = Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
 
-    return Response.json({ reports: Array.isArray(rows) ? rows : [] });
+    // Attach each report's photos (one bulk query) so the UI can show
+    // per-photo Word-export checkboxes directly in the reports table.
+    if (reports.length) {
+      try {
+        const ids = reports.map((r) => String(r.id || "").trim()).filter(Boolean);
+        const placeholders = ids.map(() => "?").join(",");
+        let photoRows: Record<string, unknown>[] = [];
+        try {
+          const [pr] = await pool.query(
+            `SELECT id, report_id, url, file_name, include_in_export FROM report_photos
+             WHERE report_id IN (${placeholders}) ORDER BY created_at ASC`,
+            ids
+          );
+          photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
+        } catch {
+          // Legacy schema without the include_in_export column.
+          const [pr] = await pool.query(
+            `SELECT id, report_id, url, file_name FROM report_photos
+             WHERE report_id IN (${placeholders}) ORDER BY created_at ASC`,
+            ids
+          );
+          photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
+        }
+        const byReport = new Map<string, Record<string, unknown>[]>();
+        for (const p of photoRows) {
+          const key = String(p.report_id || "").trim();
+          if (!key) continue;
+          if (!byReport.has(key)) byReport.set(key, []);
+          byReport.get(key)!.push(p);
+        }
+        for (const r of reports) {
+          (r as Record<string, unknown>).photos = byReport.get(String(r.id || "").trim()) || [];
+        }
+      } catch (photoErr) {
+        // Photos are decoration here — never fail the reports list over them.
+        console.error("[api/projects/[id]/reports] photos attach failed:", photoErr);
+      }
+    }
+
+    return Response.json({ reports });
   } catch (error) {
     if (unauthorized(error)) {
       return Response.json({ error: "Unauthorized" }, { status: 401 });

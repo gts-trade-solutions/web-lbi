@@ -1397,8 +1397,13 @@ function normalizeCategoryKey(value: unknown): string {
   if (c.includes("junction_left") || /\bleft\b/.test(c) && c.includes("junction")) return "junction_left";
   if (c.includes("junction_right") || /\bright\b/.test(c) && c.includes("junction")) return "junction_right";
   if (c.includes("junction") || c.includes("intersection") || c.includes("crossroad")) return "junction";
-  // Plain "Bridge" / "Flyover" / "Overpass" — falls through to bridge.jpg.
-  if (c.includes("bridge") || c.includes("flyover") || c.includes("overpass") || c.includes("viaduct")) {
+  // Flyover / overpass get their OWN icon (checked BEFORE the generic bridge
+  // rule so "Flyover" no longer borrows the bridge image).
+  if (c.includes("flyover") || c.includes("overpass") || c.includes("over_bridge")) return "flyover";
+  // Service road / service lane get their own icon.
+  if (c.includes("service")) return "service_road";
+  // Plain "Bridge" / "Viaduct" — falls through to bridge.png.
+  if (c.includes("bridge") || c.includes("viaduct")) {
     return "bridge";
   }
 
@@ -1476,6 +1481,9 @@ const CATEGORY_ICON_MAP: Record<string, string> = {
   petrol: "public/images/report-icons/petrol_bunk.png",
   road: "public/images/report-icons/narrow_road.png",
   electric_sign: "public/images/report-icons/electric_signboard.png",
+  // New custom icons.
+  flyover: "public/images/report-icons/flyover.png",
+  service_road: "public/images/report-icons/service_road.png",
 };
 
 // ---- ON-THE-FLY ICON GENERATION FOR NEW / UNKNOWN CATEGORIES ----
@@ -2813,6 +2821,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
 
   // ----- Step 4: Photos.
   let photos: Row[] = [];
+  // Rows the user explicitly unticked in the photo picker (include_in_export=0).
+  let excludedPhotoRows: Row[] = [];
   let photosQueryError: unknown = null;
   console.error("[PHOTOS_DEBUG_2026_04_27_B] entering photos query block", {
     reportIdsLength: reportIds.length,
@@ -2823,27 +2833,50 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     try {
       const placeholders = reportIds.map(() => "?").join(",");
       // Pull image_key + point_key when those columns exist so the
-      // diagnostic logs can show the master-file linkage.
+      // diagnostic logs can show the master-file linkage. include_in_export
+      // is the user's per-photo Word selection (photo picker checkboxes).
+      const sqlWithInclude = `SELECT id, report_id, url, file_name, image_key, point_key, path, created_at, include_in_export
+         FROM report_photos
+         WHERE report_id IN (${placeholders})
+         ORDER BY created_at ASC`;
       const sql = `SELECT id, report_id, url, file_name, image_key, point_key, path, created_at
          FROM report_photos
          WHERE report_id IN (${placeholders})
          ORDER BY created_at ASC`;
-      console.error("[PHOTOS_DEBUG_2026_04_27_B] sql", { sql, args: reportIds });
+      console.error("[PHOTOS_DEBUG_2026_04_27_B] sql", { sql: sqlWithInclude, args: reportIds });
       try {
-        const [photoRows] = await pool.execute(sql, reportIds);
+        const [photoRows] = await pool.execute(sqlWithInclude, reportIds);
         photos = Array.isArray(photoRows) ? (photoRows as Row[]) : [];
-      } catch (selectErr) {
-        // Fallback: schemas without image_key / point_key / path columns.
-        console.warn(
-          "[PHOTOS_DEBUG_2026_04_27_B] full SELECT failed, falling back to legacy columns:",
-          selectErr
-        );
-        const fallbackSql = `SELECT id, report_id, url, file_name, created_at
-           FROM report_photos
-           WHERE report_id IN (${placeholders})
-           ORDER BY created_at ASC`;
-        const [photoRows] = await pool.execute(fallbackSql, reportIds);
-        photos = Array.isArray(photoRows) ? (photoRows as Row[]) : [];
+      } catch {
+        try {
+          // Fallback: schemas without the include_in_export column.
+          const [photoRows] = await pool.execute(sql, reportIds);
+          photos = Array.isArray(photoRows) ? (photoRows as Row[]) : [];
+        } catch (selectErr) {
+          // Fallback: schemas without image_key / point_key / path columns.
+          console.warn(
+            "[PHOTOS_DEBUG_2026_04_27_B] full SELECT failed, falling back to legacy columns:",
+            selectErr
+          );
+          const fallbackSql = `SELECT id, report_id, url, file_name, created_at
+             FROM report_photos
+             WHERE report_id IN (${placeholders})
+             ORDER BY created_at ASC`;
+          const [photoRows] = await pool.execute(fallbackSql, reportIds);
+          photos = Array.isArray(photoRows) ? (photoRows as Row[]) : [];
+        }
+      }
+      // Respect the photo-picker selection: photos unticked by the user
+      // (include_in_export = 0) never reach the DOCX. Rows without the
+      // column (legacy schema fallback) are always included.
+      excludedPhotoRows = photos.filter(
+        (p) => p.include_in_export != null && Number(p.include_in_export) === 0
+      );
+      photos = photos.filter(
+        (p) => p.include_in_export == null || Number(p.include_in_export) !== 0
+      );
+      if (excludedPhotoRows.length) {
+        console.log("[export photos] excluded by user selection:", excludedPhotoRows.length);
       }
       console.error("[PHOTOS_DEBUG_2026_04_27_B] query returned rows:", photos.length);
     } catch (err) {
@@ -2953,6 +2986,15 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     if (!key) continue;
     if (!photosByReportId.has(key)) photosByReportId.set(key, []);
     photosByReportId.get(key)!.push(p);
+  }
+
+  // Reports where the user unticked EVERY photo. The S3 filename fallback
+  // below must not "recover" a photo for these — the empty photo block is
+  // the user's explicit choice, not a broken link.
+  const reportsFullyExcludedByUser = new Set<string>();
+  for (const p of excludedPhotoRows) {
+    const key = String(p.report_id || "").trim();
+    if (key && !photosByReportId.has(key)) reportsFullyExcludedByUser.add(key);
   }
 
   // Spec-mandated point_key fallback. When a report has no row in
@@ -3428,7 +3470,9 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       // no report in this export. Photos that belong to another EXISTING
       // report sharing this point_key are excluded, so the same photo can no
       // longer leak into a second report's block.
-      const photosByPk = rowPointKey
+      // When the user unticked EVERY photo of this report in the photo
+      // picker, honour that: no orphan may be borrowed via point_key.
+      const photosByPk = rowPointKey && !reportsFullyExcludedByUser.has(rid)
         ? (photosByPointKey.get(rowPointKey) || []).filter(
             (p) => !knownReportIdSet.has(String(p.report_id || "").trim())
           )
@@ -3631,7 +3675,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       //   2. r.file_name appended onto common upload prefixes
       // On hit we fetch the buffer AND insert a report_photos row so next
       // exports skip this fallback entirely.
-      if (!fetchedAny && reportPhotos.length === 0) {
+      if (!fetchedAny && reportPhotos.length === 0 && !reportsFullyExcludedByUser.has(rid)) {
         const fileNameRaw = String(r.file_name || "").trim();
         const imageKeyRaw = String(r.image_key || "").trim();
         const candidates: string[] = [];
@@ -3642,6 +3686,20 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         if (fileNameRaw) {
           const base = (process.env.NEXT_PUBLIC_S3_BUCKET_URL || "").replace(/\/+$/, "");
           if (base) {
+            // The master file's extension often doesn't match the real image
+            // (says .jpg, object is .webp/.png) — try every common variant so
+            // the operator never has to fix extensions by hand.
+            const cleanName = fileNameRaw.replace(/^\/+/, "");
+            const stem = cleanName.replace(/\.[a-z0-9]{2,5}$/i, "");
+            const nameVariants = Array.from(
+              new Set([
+                cleanName,
+                `${stem}.jpg`,
+                `${stem}.jpeg`,
+                `${stem}.png`,
+                `${stem}.webp`,
+              ])
+            );
             // Prefixes the bulk-import + manual-upload paths actually use.
             const prefixes = [
               `reports/photos/${rid}/`,
@@ -3651,7 +3709,9 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               `reports/photos/`,
             ];
             for (const pfx of prefixes) {
-              candidates.push(`${base}/${pfx}${fileNameRaw.replace(/^\/+/, "")}`);
+              for (const name of nameVariants) {
+                candidates.push(`${base}/${pfx}${name}`);
+              }
             }
           }
         }
@@ -6795,7 +6855,42 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       }
       console.log("[DOCX TITLE+GA BIND]", { gaParagraphsBound: gaKeepFlagsAdded });
 
+      // ---- UNIFORM FONT SIZE (client requirement): ALL text in the Word
+      // file is 16pt. Word stores half-points, so 16pt = w:val="32". This
+      // runs LAST, right before the final document.xml save, so every run
+      // injected by the passes above is covered too. styles.xml is patched
+      // separately below so runs with no explicit size inherit 16pt as well.
+      let uniformSizeCount = 0;
+      xml = xml.replace(
+        /<w:sz(Cs)?\s+w:val="[^"]+"\s*\/>/g,
+        (_m: string, cs: string | undefined) => {
+          uniformSizeCount += 1;
+          return `<w:sz${cs || ""} w:val="32"/>`;
+        }
+      );
+      console.log("[DOCX UNIFORM 16PT]", { runsResized: uniformSizeCount });
+
       renderedZip.file("word/document.xml", xml);
+    }
+
+    // ---- UNIFORM FONT SIZE in styles.xml: document defaults and every
+    // named style also become 16pt, so text that inherits its size from a
+    // style (no explicit w:sz on the run) renders at 16pt too.
+    {
+      const stylesFile = renderedZip.file("word/styles.xml");
+      if (stylesFile) {
+        let stylesXml = stylesFile.asText();
+        let stylesSizeCount = 0;
+        stylesXml = stylesXml.replace(
+          /<w:sz(Cs)?\s+w:val="[^"]+"\s*\/>/g,
+          (_m: string, cs: string | undefined) => {
+            stylesSizeCount += 1;
+            return `<w:sz${cs || ""} w:val="32"/>`;
+          }
+        );
+        if (stylesSizeCount > 0) renderedZip.file("word/styles.xml", stylesXml);
+        console.log("[DOCX UNIFORM 16PT styles.xml]", { stylesResized: stylesSizeCount });
+      }
     }
 
     // ---- ENSURE OUTPUT IS FREELY EDITABLE ----

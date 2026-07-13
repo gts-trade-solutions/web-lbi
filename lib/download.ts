@@ -3017,15 +3017,29 @@ function enrichPointsAlways(points: any[]): NormalizedPoint[] {
  * Extra photos (report_photos)
  * ========================= */
 async function getExtraPhotosForReport(supabase: any, reportId: string) {
-  const { data, error } = await supabase
+  // Prefer selecting the photo-picker flag; fall back for legacy schemas
+  // that don't have the include_in_export column yet.
+  let res = await supabase
     .from("report_photos")
-    .select("url, created_at")
+    .select("url, created_at, include_in_export")
     .eq("report_id", reportId)
     .order("created_at", { ascending: true })
     .limit(300);
+  if (res.error) {
+    res = await supabase
+      .from("report_photos")
+      .select("url, created_at")
+      .eq("report_id", reportId)
+      .order("created_at", { ascending: true })
+      .limit(300);
+  }
 
+  const { data, error } = res;
   if (error || !Array.isArray(data)) return [];
-  const refs = data.map((r: any) => String(r?.url || "").trim()).filter(Boolean);
+  const refs = data
+    .filter((r: any) => r?.include_in_export == null || Number(r.include_in_export) !== 0)
+    .map((r: any) => String(r?.url || "").trim())
+    .filter(Boolean);
   return Array.from(new Set(refs));
 }
 

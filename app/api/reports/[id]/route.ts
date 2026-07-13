@@ -1,5 +1,6 @@
 import pool from "../../../../lib/db";
 import { requireAuth } from "../../../../lib/auth";
+import { logActivity } from "../../../../lib/activityLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -74,6 +75,17 @@ export async function PUT(request: Request, context: Ctx) {
 
     const [rows] = await pool.query("SELECT * FROM reports WHERE id = ? LIMIT 1", [reportId]);
     const report = Array.isArray(rows) && rows.length ? rows[0] : null;
+
+    // AUDIT: report edited from the web UI (category / difficulty / etc.).
+    await logActivity(request, {
+      action: "update",
+      table: "reports",
+      entityId: reportId,
+      projectId: (report as any)?.project_id ? String((report as any).project_id) : null,
+      rowCount: affectedRows,
+      details: { changedFields: updates },
+    });
+
     return Response.json({ report });
   } catch (error) {
     if (unauthorized(error)) {
@@ -90,9 +102,31 @@ export async function DELETE(request: Request, context: Ctx) {
     const reportId = String(context.params?.id || "").trim();
     if (!reportId) return Response.json({ error: "Report id is required" }, { status: 400 });
 
+    // Capture the report BEFORE deletion so the audit log records what was removed.
+    let preRow: any = null;
+    try {
+      const [pre] = await pool.query("SELECT * FROM reports WHERE id = ? LIMIT 1", [reportId]);
+      preRow = Array.isArray(pre) && pre.length ? pre[0] : null;
+    } catch {
+      /* best-effort pre-image */
+    }
+
     const [result] = await pool.query("DELETE FROM reports WHERE id = ?", [reportId]);
     const affectedRows = Number((result as any)?.affectedRows || 0);
     if (!affectedRows) return Response.json({ error: "Report not found" }, { status: 404 });
+
+    // AUDIT: report deleted from the web UI.
+    await logActivity(request, {
+      action: "delete",
+      table: "reports",
+      entityId: reportId,
+      projectId: preRow?.project_id ? String(preRow.project_id) : null,
+      rowCount: affectedRows,
+      details: preRow
+        ? { category: preRow.category, point_key: preRow.point_key, description: String(preRow.description || "").slice(0, 200) }
+        : null,
+    });
+
     return Response.json({ ok: true });
   } catch (error) {
     if (unauthorized(error)) {

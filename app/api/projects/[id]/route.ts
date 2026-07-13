@@ -1,6 +1,7 @@
 import pool from "../../../../lib/db";
 import { requireAuth } from "../../../../lib/auth";
 import { ensureTrashColumns } from "../../../../lib/projects-trash";
+import { logActivity } from "../../../../lib/activityLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -168,6 +169,16 @@ export async function DELETE(request: Request, context: RouteContext) {
         return Response.json({ error: "Project not found" }, { status: 404 });
       }
 
+      // AUDIT: project permanently deleted.
+      await logActivity(request, {
+        action: "delete",
+        table: "projects",
+        entityId: projectId,
+        projectId,
+        rowCount: affectedRows,
+        details: { permanent: true },
+      });
+
       return Response.json({ ok: true, permanent: true });
     }
 
@@ -182,6 +193,16 @@ export async function DELETE(request: Request, context: RouteContext) {
     if (!affectedRows) {
       return Response.json({ error: "Project not found" }, { status: 404 });
     }
+
+    // AUDIT: project moved to the recycle bin (soft delete).
+    await logActivity(request, {
+      action: "delete",
+      table: "projects",
+      entityId: projectId,
+      projectId,
+      rowCount: affectedRows,
+      details: { recycled: true },
+    });
 
     return Response.json({ ok: true, recycled: true });
   } catch (error) {

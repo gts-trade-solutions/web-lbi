@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import pool from "../../../../lib/db";
 import { makeAuthCookieHeader, signToken } from "../../../../lib/auth";
+import { logActivity } from "../../../../lib/activityLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,6 +64,11 @@ export async function POST(request: Request) {
     console.log("[auth/login] user found:", Boolean(user));
 
     if (!user) {
+      await logActivity(request, {
+        action: "login_failed",
+        actorEmail: email,
+        details: { reason: "unknown email" },
+      });
       return Response.json({ error: "Invalid email or password" }, { status: 401 });
     }
 
@@ -80,6 +86,12 @@ export async function POST(request: Request) {
     console.log("[auth/login] bcrypt compare:", passwordOk ? "passed" : "failed");
 
     if (!passwordOk) {
+      await logActivity(request, {
+        action: "login_failed",
+        actorId: user.id,
+        actorEmail: user.email,
+        details: { reason: "wrong password" },
+      });
       return Response.json({ error: "Invalid email or password" }, { status: 401 });
     }
 
@@ -92,6 +104,14 @@ export async function POST(request: Request) {
 
     const token = signToken(safeUser);
     const cookieHeader = makeAuthCookieHeader(token);
+
+    // AUDIT: successful login — who opened the app, when, from which IP.
+    await logActivity(request, {
+      action: "login",
+      actorId: user.id,
+      actorEmail: user.email,
+      details: { name: user.name || null, role: safeUser.role },
+    });
 
     return new Response(
       JSON.stringify({

@@ -26,7 +26,7 @@ function headerCell(text: string) {
     children: [
       new Paragraph({
         alignment: AlignmentType.CENTER,
-        children: [new TextRun({ text, color: "FFFFFF", bold: true })],
+        children: [new TextRun({ text, color: "FFFFFF", bold: true, size: 32 })],
       }),
     ],
   });
@@ -34,7 +34,8 @@ function headerCell(text: string) {
 
 function normalCell(text: string) {
   return new TableCell({
-    children: [new Paragraph({ children: [new TextRun(text || "")] })],
+    // size is half-points: 32 = 16pt (uniform document font size).
+    children: [new Paragraph({ children: [new TextRun({ text: text || "", size: 32 })] })],
   });
 }
 
@@ -70,7 +71,10 @@ export async function GET(request: Request, { params }: { params: { id: string }
       "SELECT * FROM report_photos WHERE report_id = ? ORDER BY created_at ASC",
       [reportId]
     );
-    const photos = Array.isArray(photoRows) ? (photoRows as any[]) : [];
+    // Skip photos the user unticked in the photo picker (include_in_export=0).
+    const photos = (Array.isArray(photoRows) ? (photoRows as any[]) : []).filter(
+      (p: any) => p.include_in_export == null || Number(p.include_in_export) !== 0
+    );
 
     const [pointRows] = await pool.query(
       "SELECT * FROM report_path_points WHERE report_id = ? ORDER BY seq ASC",

@@ -35,6 +35,7 @@ type ReportRow = {
   created_at: string;
   difficulty?: VehicleMovement | null; // ✅ DB column
   sort_order?: number | null; // ✅ NEW (for inserting at exact position)
+  photos?: ReportPhotoRow[]; // ✅ per-photo Word-export checkboxes in the table
 };
 
 type WatermarkOpts = { enabled: boolean; text: string };
@@ -542,6 +543,23 @@ function parseStageRanges(input: string, total: number) {
 const MAP_PREVIEW_HEIGHT = 320;
 const GA_PREVIEW_HEIGHT = 220;
 
+// Parse a single "lat, long" cell into numbers. Accepts comma or space
+// separators and plain decimal degrees ("22.52518, 88.30578"). Returns null
+// coords when the text can't be read as two numbers.
+function parseLatLng(text: string): { lat: number | null; lon: number | null } {
+  const raw = String(text || "").trim();
+  if (!raw) return { lat: null, lon: null };
+  let parts = raw.split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 1) parts = raw.split(/\s+/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length !== 2) return { lat: null, lon: null };
+  const lat = Number(parts[0]);
+  const lon = Number(parts[1]);
+  return {
+    lat: Number.isFinite(lat) ? lat : null,
+    lon: Number.isFinite(lon) ? lon : null,
+  };
+}
+
 // ✅ spacing used for sort_order
 const SORT_STEP = 10;
 // ✅ if gap becomes too small, we renumber everything to 10,20,30...
@@ -816,6 +834,66 @@ export default function ProjectReportsPage() {
   const selectedIdsInOrder = useMemo(() => {
     return filteredSortedReports.filter((r) => selected[r.id]).map((r) => r.id);
   }, [filteredSortedReports, selected]);
+
+  // In-page photo popup (lightbox) for the table thumbnails. Stores which
+  // report + photo index is open; the photo list itself is derived from the
+  // live `reports` state so the Word checkbox inside stays in sync.
+  const [photoPreview, setPhotoPreview] = useState<{ reportId: string; index: number } | null>(null);
+
+  // Tick/untick one photo of a report for the Word export, straight from the
+  // table row. Optimistic update; reverts if the server rejects the change.
+  const [photoToggling, setPhotoToggling] = useState<Record<string, boolean>>({});
+  const togglePhotoInclude = async (reportId: string, photo: ReportPhotoRow) => {
+    const currentlyIncluded =
+      photo.include_in_export == null || Number(photo.include_in_export) !== 0;
+    const next = !currentlyIncluded;
+    const apply = (value: number) =>
+      setReports((prev) =>
+        prev.map((r) =>
+          r.id === reportId
+            ? {
+                ...r,
+                photos: (r.photos || []).map((p) =>
+                  p.id === photo.id ? { ...p, include_in_export: value } : p
+                ),
+              }
+            : r
+        )
+      );
+    setPhotoToggling((prev) => ({ ...prev, [photo.id]: true }));
+    apply(next ? 1 : 0);
+    try {
+      await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}/photos`, {
+        method: "PATCH",
+        body: JSON.stringify({ photoId: photo.id, include: next }),
+      });
+    } catch (e: any) {
+      apply(next ? 0 : 1);
+      alert(e?.message || "Failed to save photo selection");
+    } finally {
+      setPhotoToggling((prev) => {
+        const copy = { ...prev };
+        delete copy[photo.id];
+        return copy;
+      });
+    }
+  };
+
+  // Open the animated route map (satellite flythrough over the report points).
+  // Selection is stashed in localStorage so huge id lists don't blow up the URL.
+  const openRouteMap = () => {
+    if (!projectId) return;
+    if (selectedIdsInOrder.length) {
+      try {
+        localStorage.setItem(`routemap_sel_${projectId}`, JSON.stringify(selectedIdsInOrder));
+      } catch {
+        /* ignore quota errors — page falls back to all reports */
+      }
+      window.open(`/projects/${encodeURIComponent(projectId)}/route3d?sel=1`, "_blank");
+    } else {
+      window.open(`/projects/${encodeURIComponent(projectId)}/route3d`, "_blank");
+    }
+  };
 
   const toggleOne = (id: string) => setSelected((prev) => ({ ...prev, [id]: !prev[id] }));
 
@@ -1459,7 +1537,7 @@ export default function ProjectReportsPage() {
     });
   }
 
-  const insertReportAfter = async (afterId: string, payload: { category: string; description: string; remarksAction: string; difficulty: VehicleMovement; files: File[]; pointsText?: string }) => {
+  const insertReportAfter = async (afterId: string, payload: { category: string; description: string; remarksAction: string; difficulty: VehicleMovement; files: File[]; pointsText?: string; latlong?: string }) => {
     if (!projectId) return;
 
     // make sure we have latest list order in memory
@@ -1501,6 +1579,14 @@ export default function ProjectReportsPage() {
 
     const nowIso = new Date().toISOString();
 
+    // Parse the typed "lat, long" so the new report gets ITS OWN location
+    // instead of inheriting the previous row's coordinates.
+    const { lat: newLat, lon: newLon } = parseLatLng(payload.latlong || "");
+    const coordFields =
+      newLat != null && newLon != null
+        ? { latitude: newLat, longitude: newLon, loc_lat: newLat, loc_lon: newLon }
+        : {};
+
     let ins: { report?: { id?: string; sort_order?: number } } = {};
     try {
       ins = await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}/reports`, {
@@ -1517,6 +1603,7 @@ export default function ProjectReportsPage() {
           difficulty: payload.difficulty ? payload.difficulty : "green",
           created_at: nowIso,
           sort_order: newOrder,
+          ...coordFields,
         }),
       });
     } catch (err: any) {
@@ -1597,6 +1684,142 @@ export default function ProjectReportsPage() {
             }}
           />
         )}
+
+        {/* ✅ PHOTO PREVIEW POPUP (click a table thumbnail) */}
+        {photoPreview &&
+          (() => {
+            const rep = reports.find((r) => r.id === photoPreview.reportId);
+            const list = rep?.photos || [];
+            if (!list.length) return null;
+            const idx = Math.max(0, Math.min(photoPreview.index, list.length - 1));
+            const cur = list[idx];
+            const included =
+              cur.include_in_export == null || Number(cur.include_in_export) !== 0;
+            const go = (dir: number) =>
+              setPhotoPreview((p) =>
+                p ? { ...p, index: (idx + dir + list.length) % list.length } : p
+              );
+            return (
+              <div
+                style={{ ...styles.modalOverlay, zIndex: 1200 }}
+                onMouseDown={() => setPhotoPreview(null)}
+              >
+                <div
+                  style={{
+                    background: "#fff",
+                    borderRadius: 18,
+                    border: "1px solid #EAECF0",
+                    boxShadow: "0 20px 60px rgba(16,24,40,0.35)",
+                    padding: 14,
+                    width: "min(880px, 96vw)",
+                    display: "grid",
+                    gap: 10,
+                  }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Photo preview"
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontWeight: 950, color: "#101828", fontSize: 15 }}>
+                        {rep?.category || "Report photo"}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 800,
+                          color: "#667085",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
+                        {cur.file_name || cur.url || ""}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPhotoPreview(null)}
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 12,
+                        border: "1px solid #EAECF0",
+                        background: "#fff",
+                        fontWeight: 900,
+                        fontSize: 16,
+                        cursor: "pointer",
+                        flexShrink: 0,
+                      }}
+                      title="Close (or click outside)"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  {cur.url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={cur.url}
+                      alt={cur.file_name || "Report photo"}
+                      style={{
+                        width: "100%",
+                        maxHeight: "62vh",
+                        objectFit: "contain",
+                        borderRadius: 12,
+                        background: "#F2F4F7",
+                      }}
+                    />
+                  ) : (
+                    <div style={{ height: 240, borderRadius: 12, background: "#F2F4F7" }} />
+                  )}
+
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    {list.length > 1 && (
+                      <>
+                        <button type="button" style={styles.btnGhost} onClick={() => go(-1)}>
+                          ← Prev
+                        </button>
+                        <button type="button" style={styles.btnGhost} onClick={() => go(1)}>
+                          Next →
+                        </button>
+                        <span style={{ fontSize: 12, fontWeight: 900, color: "#475467" }}>
+                          Photo {idx + 1} / {list.length}
+                        </span>
+                      </>
+                    )}
+                    <label
+                      style={{
+                        marginLeft: "auto",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "8px 14px",
+                        borderRadius: 12,
+                        border: included ? "2px solid #12B76A" : "2px solid #D0D5DD",
+                        background: included ? "#F6FEF9" : "#fff",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                        fontSize: 13,
+                        color: included ? "#027A48" : "#667085",
+                        opacity: photoToggling[cur.id] ? 0.6 : 1,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={included}
+                        disabled={!!photoToggling[cur.id]}
+                        onChange={() => togglePhotoInclude(photoPreview.reportId, cur)}
+                        style={{ width: 18, height: 18, cursor: "pointer", accentColor: "#12B76A" }}
+                      />
+                      {included ? "In Word file" : "Not in Word file"}
+                    </label>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
         {/* ✅ EDIT REPORT MODAL */}
         {editOpen && editReportRow && projectId && (
@@ -2103,9 +2326,26 @@ export default function ProjectReportsPage() {
               style={styles.btnGhost}
               onClick={openPhotoUpload}
               disabled={stats.selectedCount !== 1}
-              title={stats.selectedCount !== 1 ? "Select exactly 1 report" : "Upload photos to selected report"}
+              title={
+                stats.selectedCount !== 1
+                  ? "Select exactly 1 report"
+                  : "View/upload photos and choose which go into the Word file"
+              }
             >
-              Upload photos
+              Photos
+            </button>
+
+            <button
+              style={styles.btnGhost}
+              onClick={openRouteMap}
+              disabled={loading || !filteredSortedReports.length}
+              title={
+                stats.selectedCount
+                  ? `Animated route map of ${stats.selectedCount} selected reports`
+                  : "Animated route map of all reports"
+              }
+            >
+              🗺️ Route map
             </button>
 
             <button
@@ -2167,6 +2407,9 @@ export default function ProjectReportsPage() {
                     <th className="col-desc" style={styles.th}>
                       Description
                     </th>
+                    <th className="col-photos" style={styles.th}>
+                      Photos (tick = in Word)
+                    </th>
                     <th className="col-created" style={styles.th}>
                       Created
                     </th>
@@ -2220,6 +2463,77 @@ export default function ProjectReportsPage() {
                             <div style={styles.descCell}>
                               {desc ? desc : <span style={{ color: "#98A2B3", fontWeight: 800 }}>No description</span>}
                             </div>
+                          </td>
+
+                          <td className="col-photos" style={styles.td}>
+                            {!r.photos?.length ? (
+                              <span style={{ color: "#98A2B3", fontWeight: 800 }}>—</span>
+                            ) : (
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                                {r.photos.map((p) => {
+                                  const included =
+                                    p.include_in_export == null ||
+                                    Number(p.include_in_export) !== 0;
+                                  return (
+                                    <div
+                                      key={p.id}
+                                      style={{
+                                        position: "relative",
+                                        width: 56,
+                                        height: 56,
+                                        borderRadius: 8,
+                                        overflow: "hidden",
+                                        border: included ? "2px solid #12B76A" : "2px solid #D0D5DD",
+                                        opacity: photoToggling[p.id] ? 0.5 : included ? 1 : 0.55,
+                                        flexShrink: 0,
+                                      }}
+                                      title={`${p.file_name || "Photo"} — ${included ? "in Word file" : "NOT in Word file"}. Click the image to view full size.`}
+                                    >
+                                      {p.url ? (
+                                        // eslint-disable-next-line @next/next/no-img-element
+                                        <img
+                                          src={p.url}
+                                          alt={p.file_name || "Report photo"}
+                                          onClick={() =>
+                                            setPhotoPreview({
+                                              reportId: r.id,
+                                              index: (r.photos || []).findIndex((x) => x.id === p.id),
+                                            })
+                                          }
+                                          style={{
+                                            width: "100%",
+                                            height: "100%",
+                                            objectFit: "cover",
+                                            cursor: "zoom-in",
+                                            display: "block",
+                                            background: "#F2F4F7",
+                                          }}
+                                        />
+                                      ) : (
+                                        <div style={{ width: "100%", height: "100%", background: "#F2F4F7" }} />
+                                      )}
+                                      <input
+                                        type="checkbox"
+                                        checked={included}
+                                        disabled={!!photoToggling[p.id]}
+                                        onChange={() => togglePhotoInclude(r.id, p)}
+                                        title={included ? "Untick to leave out of the Word file" : "Tick to include in the Word file"}
+                                        style={{
+                                          position: "absolute",
+                                          top: 2,
+                                          left: 2,
+                                          width: 16,
+                                          height: 16,
+                                          cursor: "pointer",
+                                          accentColor: "#12B76A",
+                                          background: "#fff",
+                                        }}
+                                      />
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </td>
 
                           <td className="col-created" style={styles.td}>
@@ -2324,7 +2638,7 @@ export default function ProjectReportsPage() {
 
                         {/* ✅ BUTTON BETWEEN ROWS (Insert after this row) */}
                         <tr>
-                          <td colSpan={8} style={{ padding: 0, borderBottom: "1px solid #F2F4F7" }}>
+                          <td colSpan={9} style={{ padding: 0, borderBottom: "1px solid #F2F4F7" }}>
                             <div style={{ padding: "8px 12px", display: "flex", justifyContent: "center" }}>
                               <button
                                 type="button"
@@ -2371,6 +2685,9 @@ export default function ProjectReportsPage() {
               }
               .col-cat {
                 width: 180px;
+              }
+              .col-photos {
+                width: 210px;
               }
               .col-created {
                 width: 190px;
@@ -2432,12 +2749,13 @@ function InsertReportModal({
 }: {
   afterIndex: number;
   onClose: () => void;
-  onCreate: (payload: { category: string; description: string; remarksAction: string; difficulty: VehicleMovement; files: File[]; pointsText?: string }) => void | Promise<void>;
+  onCreate: (payload: { category: string; description: string; remarksAction: string; difficulty: VehicleMovement; files: File[]; pointsText?: string; latlong?: string }) => void | Promise<void>;
 }) {
   const [category, setCategory] = useState("");
   const [customCategory, setCustomCategory] = useState("");
   const [description, setDescription] = useState("");
   const [remarksAction, setRemarksAction] = useState("");
+  const [latlong, setLatlong] = useState("");
   const [pointsText, setPointsText] = useState("");
   const [difficulty, setDifficulty] = useState<VehicleMovement>("");
   const [files, setFiles] = useState<File[]>([]);
@@ -2466,6 +2784,7 @@ function InsertReportModal({
       remarksAction: remarksAction.trim(),
       difficulty,
       files,
+      latlong: latlong.trim(),
       pointsText: pointsText.trim(),
     });
     } finally {
@@ -2534,6 +2853,28 @@ function InsertReportModal({
               }}
             />
           </div>
+        </div>
+
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={styles.routeLabel}>Location (lat, long)</div>
+          <div style={styles.modalHint}>
+            The new report&apos;s own position — shown on the map and used in exports. Put both in one box:{" "}
+            <b>22.52518, 88.30578</b>. Leave blank to copy the row above.
+          </div>
+          <input
+            value={latlong}
+            onChange={(e) => setLatlong(e.target.value)}
+            placeholder="22.52518, 88.30578"
+            style={{
+              height: 44,
+              borderRadius: 14,
+              border: "1px solid #D0D5DD",
+              padding: "0 14px",
+              fontWeight: 800,
+              outline: "none",
+              background: "#fff",
+            }}
+          />
         </div>
 
         <div style={{ display: "grid", gap: 8 }}>
@@ -2905,6 +3246,7 @@ type ReportPhotoRow = {
   id: string;
   url?: string | null;
   file_name?: string | null;
+  include_in_export?: number | boolean | null;
 };
 
 /** ✅ Modal to edit an existing report's core fields */
@@ -3303,6 +3645,53 @@ function PhotoUploadModal({
   const [files, setFiles] = useState<File[]>([]);
   const [saving, setSaving] = useState(false);
 
+  // Existing photos of this report, with per-photo "include in Word" ticks.
+  const [existing, setExisting] = useState<ReportPhotoRow[]>([]);
+  const [loadingExisting, setLoadingExisting] = useState(true);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  const isIncluded = (p: ReportPhotoRow) =>
+    p.include_in_export == null || Number(p.include_in_export) !== 0;
+
+  const loadExisting = async () => {
+    setLoadingExisting(true);
+    try {
+      const data = await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}/photos`);
+      setExisting(Array.isArray(data?.photos) ? data.photos : []);
+    } catch {
+      setExisting([]);
+    } finally {
+      setLoadingExisting(false);
+    }
+  };
+
+  useEffect(() => {
+    loadExisting();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportId]);
+
+  const toggleInclude = async (p: ReportPhotoRow) => {
+    const next = !isIncluded(p);
+    setTogglingId(p.id);
+    setExisting((prev) =>
+      prev.map((x) => (x.id === p.id ? { ...x, include_in_export: next ? 1 : 0 } : x))
+    );
+    try {
+      await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}/photos`, {
+        method: "PATCH",
+        body: JSON.stringify({ photoId: p.id, include: next }),
+      });
+    } catch (e: any) {
+      // Revert the optimistic tick on failure.
+      setExisting((prev) =>
+        prev.map((x) => (x.id === p.id ? { ...x, include_in_export: next ? 0 : 1 } : x))
+      );
+      alert(e?.message || "Failed to save photo selection");
+    } finally {
+      setTogglingId(null);
+    }
+  };
+
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const addFiles = (list: FileList | null) => {
@@ -3342,7 +3731,99 @@ function PhotoUploadModal({
         aria-modal="true"
         aria-label="Upload photos"
       >
-        <div style={styles.modalTitle}>Upload Photos</div>
+        <div style={styles.modalTitle}>Report Photos</div>
+        <div style={styles.modalHint}>
+          Tick the photos you want in the Word file — unticked photos stay saved but are left out of the
+          export. The Word template places at most <b>2 ticked photos</b> per report.
+        </div>
+
+        {loadingExisting ? (
+          <div style={{ padding: 12, fontWeight: 800, color: "#667085" }}>Loading photos...</div>
+        ) : !existing.length ? (
+          <div
+            style={{
+              padding: 12,
+              borderRadius: 14,
+              border: "1px dashed #D0D5DD",
+              background: "#F9FAFB",
+              fontWeight: 800,
+              color: "#667085",
+            }}
+          >
+            No photos uploaded for this report yet.
+          </div>
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+              gap: 10,
+            }}
+          >
+            {existing.map((p) => {
+              const included = isIncluded(p);
+              return (
+                <label
+                  key={p.id}
+                  title={p.file_name || undefined}
+                  style={{
+                    border: included ? "2px solid #12B76A" : "2px solid #EAECF0",
+                    background: included ? "#F6FEF9" : "#fff",
+                    borderRadius: 12,
+                    padding: 6,
+                    cursor: "pointer",
+                    opacity: togglingId === p.id ? 0.6 : 1,
+                    display: "grid",
+                    gap: 6,
+                  }}
+                >
+                  {p.url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={p.url}
+                      alt={p.file_name || "Report photo"}
+                      style={{
+                        width: "100%",
+                        height: 110,
+                        objectFit: "cover",
+                        borderRadius: 8,
+                        background: "#F2F4F7",
+                      }}
+                      onError={(e) => {
+                        (e.currentTarget as HTMLImageElement).style.opacity = "0.25";
+                      }}
+                    />
+                  ) : (
+                    <div style={{ width: "100%", height: 110, borderRadius: 8, background: "#F2F4F7" }} />
+                  )}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={included}
+                      onChange={() => toggleInclude(p)}
+                      disabled={togglingId === p.id}
+                      style={{ width: 16, height: 16, cursor: "pointer", flexShrink: 0 }}
+                    />
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 800,
+                        color: included ? "#027A48" : "#667085",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {included ? "In Word file" : "Not in Word"}
+                    </span>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        )}
+
+        <div style={{ fontWeight: 950, color: "#101828", fontSize: 13, marginTop: 6 }}>Add more photos</div>
         <div style={styles.modalHint}>
           Upload photos for this report. (Bucket: <b>{REPORT_PHOTO_BUCKET}</b>, Table: <b>{REPORT_IMAGE_TABLE}</b>)
         </div>
@@ -3426,7 +3907,7 @@ function PhotoUploadModal({
 
         <div style={styles.modalActions}>
           <button style={styles.btnGhost} onClick={onClose} disabled={saving}>
-            Cancel
+            Close
           </button>
           <button style={styles.btnPrimary} onClick={upload} disabled={saving}>
             {saving ? "Uploading..." : "Upload"}
@@ -4566,6 +5047,10 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 16,
     display: "grid",
     gap: 10,
+    // Tall content (e.g. many photos picked in the Edit/Add report modals)
+    // must scroll inside the card instead of overflowing the screen.
+    maxHeight: "90vh",
+    overflowY: "auto",
   },
   modalTitle: { fontSize: 16, fontWeight: 950, color: "#101828" },
   modalHint: { fontSize: 12, fontWeight: 800, color: "#667085", lineHeight: 1.35 },

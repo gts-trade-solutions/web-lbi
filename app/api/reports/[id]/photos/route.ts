@@ -52,12 +52,30 @@ function unauthorized(error: unknown) {
   return (error as { message?: string })?.message === "Unauthorized";
 }
 
+// Per-photo Word-export selection flag. 1 (default) = photo is included in
+// DOCX exports, 0 = user unticked it in the photo picker. Added lazily so
+// existing databases upgrade themselves on first use.
+async function ensureIncludeInExportColumn() {
+  try {
+    const cols = await getColumns();
+    if (!cols.has("include_in_export")) {
+      await pool.query(
+        "ALTER TABLE report_photos ADD COLUMN include_in_export TINYINT(1) NOT NULL DEFAULT 1"
+      );
+      console.log("[api/reports/:id/photos] added include_in_export column");
+    }
+  } catch (err) {
+    console.error("[api/reports/:id/photos] ensure include_in_export failed:", err);
+  }
+}
+
 export async function GET(request: Request, context: Ctx) {
   try {
     requireAuth(request);
     const reportId = String(context.params?.id || "").trim();
     if (!reportId) return Response.json({ error: "Report id is required" }, { status: 400 });
 
+    await ensureIncludeInExportColumn();
     const [rows] = await pool.query(
       "SELECT * FROM report_photos WHERE report_id = ? ORDER BY created_at ASC",
       [reportId]
@@ -69,6 +87,48 @@ export async function GET(request: Request, context: Ctx) {
     }
     console.error("[api/reports/:id/photos] GET error:", error);
     return Response.json({ error: "Failed to fetch report photos" }, { status: 500 });
+  }
+}
+
+// PATCH /api/reports/:id/photos — update per-photo Word-export selection.
+// Body: { photoId, include } for one photo, or
+//       { selections: [{ id, include }, ...] } for several at once.
+export async function PATCH(request: Request, context: Ctx) {
+  try {
+    requireAuth(request);
+    const reportId = String(context.params?.id || "").trim();
+    if (!reportId) return Response.json({ error: "Report id is required" }, { status: 400 });
+
+    const body = await request.json().catch(() => ({} as any));
+    const selections: Array<{ id: string; include: boolean }> = Array.isArray(body?.selections)
+      ? body.selections
+          .map((s: any) => ({ id: String(s?.id || "").trim(), include: !!s?.include }))
+          .filter((s: any) => s.id)
+      : [];
+    const singleId = String(body?.photoId || body?.id || "").trim();
+    if (!selections.length && singleId) {
+      selections.push({ id: singleId, include: !!body?.include });
+    }
+    if (!selections.length) {
+      return Response.json({ error: "photoId (or selections[]) is required" }, { status: 400 });
+    }
+
+    await ensureIncludeInExportColumn();
+    let updated = 0;
+    for (const s of selections) {
+      const [result] = await pool.query(
+        "UPDATE report_photos SET include_in_export = ? WHERE id = ? AND report_id = ?",
+        [s.include ? 1 : 0, s.id, reportId]
+      );
+      updated += Number((result as { affectedRows?: number })?.affectedRows || 0);
+    }
+    return Response.json({ ok: true, updated });
+  } catch (error) {
+    if (unauthorized(error)) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    console.error("[api/reports/:id/photos] PATCH error:", error);
+    return Response.json({ error: "Failed to update photo selection" }, { status: 500 });
   }
 }
 

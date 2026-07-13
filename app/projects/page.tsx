@@ -331,20 +331,47 @@ function parseSeparateDMPart(value: string, kind: "lat" | "lon"): number | null 
   return valueNum;
 }
 
-function parseSingleCoordinate(value: string, kind: "lat" | "lon"): number | null {
-  const raw = String(value || "").trim();
+// Robust coordinate parser. Reads every GPS format the survey files mix:
+//   • plain decimal            26.878483   (and dirty "26.878483," with junk)
+//   • degrees + decimal minutes N24 16.368  /  E72 29.293
+//   • degrees-minutes-seconds   26° 3'49.42"N  (hemisphere letter at EITHER end)
+// The hemisphere letter (N/S/E/W) sets the sign; S and W are negative. When no
+// letter is present, a leading minus on the number is honoured. `kind` is kept
+// for signature compatibility but no longer needed (the letter disambiguates).
+function parseSingleCoordinate(value: string, _kind: "lat" | "lon"): number | null {
+  let raw = String(value || "").trim();
+  if (!raw) return null;
+  // Strip surrounding quotes and stray leading/trailing commas or spaces.
+  raw = raw.replace(/^[\s"',]+|[\s"',]+$/g, "").trim();
   if (!raw) return null;
 
-  const plain = Number(raw);
-  if (Number.isFinite(plain)) return plain;
+  let sign = 1;
+  const dirMatch = raw.match(/[NSEW]/i);
+  if (dirMatch) {
+    const d = dirMatch[0].toUpperCase();
+    if (d === "S" || d === "W") sign = -1;
+    raw = raw.replace(/[NSEW]/gi, " ");
+  }
 
-  const dm = parseSeparateDMPart(raw, kind);
-  if (dm != null) return dm;
+  // Split into numeric tokens on °, ', ", and whitespace → [deg, min?, sec?].
+  const nums = raw
+    .replace(/[°'"′″]/g, " ")
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s !== "" && Number.isFinite(Number(s)))
+    .map(Number);
+  if (!nums.length) return null;
 
-  const neDecimal = parseNEToDecimalDecimalPart(raw, kind);
-  if (neDecimal != null) return neDecimal;
+  const deg = Math.abs(nums[0]);
+  let dec: number;
+  if (nums.length === 1) dec = deg;
+  else if (nums.length === 2) dec = deg + nums[1] / 60;
+  else dec = deg + nums[1] / 60 + nums[2] / 3600;
 
-  return null;
+  if (dirMatch) dec = sign * dec;
+  else if (nums[0] < 0) dec = -dec;
+
+  return Number.isFinite(dec) ? dec : null;
 }
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
@@ -467,6 +494,19 @@ async function parseCombinedFile(file: File): Promise<ParsedCombinedRow[]> {
   const iKey = colIndex(headers, ["point_key", "point", "seq", "key"]);
   const iLat = colIndex(headers, ["latitude", "lat"]);
   const iLon = colIndex(headers, ["longitude", "lon", "lng"]);
+  // Combined "lat, long" column — both coordinates in ONE cell.
+  const iPair = colIndex(headers, [
+    "lat_long",
+    "latlong",
+    "lat,_long",
+    "lat_lng",
+    "latlng",
+    "lat/long",
+    "coordinates",
+    "coords",
+    "gps",
+    "location",
+  ]);
   const iCat = colIndex(headers, ["category", "report_category"]);
   const iDesc = colIndex(headers, ["description", "report_description", "desc", "observations"]);
   // Spec: support every filename column alias the master file may carry
@@ -506,9 +546,9 @@ async function parseCombinedFile(file: File): Promise<ParsedCombinedRow[]> {
     "remarks_action_status",
   ]);
 
-  if (iKey < 0 || iCat < 0 || iLat < 0 || iLon < 0) {
+  if (iKey < 0 || iCat < 0 || ((iLat < 0 || iLon < 0) && iPair < 0)) {
     throw new Error(
-      "Master file must include separate columns: point_key, latitude, longitude, and category"
+      'Master file must include columns: point_key, category, and either latitude + longitude or one combined "lat, long" column'
     );
   }
 
@@ -518,11 +558,17 @@ async function parseCombinedFile(file: File): Promise<ParsedCombinedRow[]> {
     const point_key = (r[iKey] ?? "").trim();
     if (!point_key) continue;
 
-    const latRaw = (r[iLat] ?? "").trim();
-    const lonRaw = (r[iLon] ?? "").trim();
-
-    const latitude = parseSingleCoordinate(latRaw, "lat");
-    const longitude = parseSingleCoordinate(lonRaw, "lon");
+    let latitude: number | null = null;
+    let longitude: number | null = null;
+    if (iLat >= 0 && iLon >= 0) {
+      latitude = parseSingleCoordinate((r[iLat] ?? "").trim(), "lat");
+      longitude = parseSingleCoordinate((r[iLon] ?? "").trim(), "lon");
+    }
+    if ((!Number.isFinite(latitude) || !Number.isFinite(longitude)) && iPair >= 0) {
+      const pair = parseLatLongCell((r[iPair] ?? "").trim());
+      latitude = pair.lat;
+      longitude = pair.lon;
+    }
 
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
 
@@ -541,6 +587,141 @@ async function parseCombinedFile(file: File): Promise<ParsedCombinedRow[]> {
     });
   }
 
+  return out;
+}
+
+// ========= WEB GRID (type the master data in the browser instead of Excel) =========
+// One editable row of the in-web bulk grid. All values are strings exactly as
+// typed; parseGridRows() applies the SAME normalization as parseCombinedFile,
+// so grid entry and Excel upload feed the import pipeline identically.
+type BulkGridRow = {
+  point_key: string;
+  latlong: string; // ONE cell: "22.52518, 88.30578" (also N/E and deg-min formats)
+  category: string;
+  description: string;
+  action: string; // difficulty (green/yellow/red) and/or remarks text
+  file_name: string; // optional image filename(s), comma-separated like Excel
+};
+
+const GRID_COLUMNS: Array<{ key: keyof BulkGridRow; label: string; width: number }> = [
+  { key: "point_key", label: "point_key", width: 80 },
+  { key: "latlong", label: "lat, long (one cell)", width: 210 },
+  { key: "category", label: "category", width: 170 },
+  { key: "description", label: "description", width: 260 },
+  { key: "action", label: "action / difficulty", width: 140 },
+  { key: "file_name", label: "file_name (optional)", width: 180 },
+];
+
+function emptyGridRow(): BulkGridRow {
+  return {
+    point_key: "",
+    latlong: "",
+    category: "",
+    description: "",
+    action: "",
+    file_name: "",
+  };
+}
+
+// Split one "lat, long" cell into coordinates. Accepts "22.5, 88.3",
+// "22.5 88.3", "N22.5 E88.3", "N 22 30.5, E 88 18.2" (deg-min) and
+// semicolon separators — every format parseSingleCoordinate understands.
+function parseLatLongCell(value: string): { lat: number | null; lon: number | null } {
+  const raw = String(value || "").trim();
+  if (!raw) return { lat: null, lon: null };
+
+  let parts = raw.split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 1) parts = raw.split(/\s+/).map((s) => s.trim()).filter(Boolean);
+  // "N 22.5 E 88.3" style: rejoin direction letters with their numbers.
+  if (parts.length === 4 && /^[NS]$/i.test(parts[0]) && /^[EW]$/i.test(parts[2])) {
+    parts = [`${parts[0]}${parts[1]}`, `${parts[2]}${parts[3]}`];
+  }
+  if (parts.length !== 2) return { lat: null, lon: null };
+  return {
+    lat: parseSingleCoordinate(parts[0], "lat"),
+    lon: parseSingleCoordinate(parts[1], "lon"),
+  };
+}
+
+// Standard description texts per category — offered as a dropdown in the
+// grid's description cell so the operator picks instead of typing. Trailing
+// spaces are intentional: the measured value is typed right after. Keys are
+// lowercase canonical category names (after normalizeCategoryName).
+const DESCRIPTION_TEMPLATES: Record<string, string[]> = {
+  "low tension cable": ["Low tension cable cross above the road height is "],
+  "high tension cable": ["High tension cable cross above the road height is "],
+  "tree branches": ["Tree branches crossing above the road height is "],
+  signboard: ["Signboard crossing above the road Height is "],
+  "side signboard": ["Side Signboard crossing above the road Height is "],
+  "electric sign board": ["Signboard crossing above the road Height is "],
+  "camera pole": ["Camera Pole crossing above the road Height is "],
+  "signal pole": ["Signal Pole Crossing above the road height is "],
+  "towerline cable": ["Tower line cross above the road height is "],
+  towerline: ["Tower line cross above the road height is "],
+  "railway level crossing": ["Railway Barrier Height is m, Railway Crossing Cable Height is "],
+  "take diversion": ["Take diversion Due to road work under Progress"],
+  "toll plaza": ["Toll Plaza, Height is , Width is "],
+  "underpass bridge": ["Underpass bridge crossing above the road height is "],
+  "footpath bridge": ["Footpath Bridge crossing above the road height is "],
+  parking: ["Parking place is available on LHS", "Parking place is available on RHS"],
+  "petrol bunk": ["Petrol Bunk available in LHS", "Petrol Bunk available in RHS"],
+  tunnel: ["Tunnel crossing above the road height is "],
+  bridge: [
+    "Bridge,\nspans of m length each,\n•i – beams girder structure,\n•No of beams – 4,\n•Width is 0.5m,\n•Height is 1.5m,\n•Road width is m,\n•Side wall height is 1m on both sides",
+    "Bridge,\nspan of m length,\n•RCC Box slab structure\n•Width is 0.6m,\nRoad width is m.\nSide wall height is 1m on both sides",
+  ],
+};
+
+// Templates for the row's category; unknown/empty category offers them all.
+function descriptionTemplatesFor(category: string): string[] {
+  const key = normalizeCategoryName(String(category || "")).toLowerCase().trim();
+  const exact = DESCRIPTION_TEMPLATES[key];
+  if (exact?.length) return exact;
+  return Object.values(DESCRIPTION_TEMPLATES).flat();
+}
+
+// localStorage key for the web-grid draft (auto-saved while typing).
+const GRID_DRAFT_KEY = "bulk_grid_draft_v1";
+
+// Restore a draft row defensively; also migrates drafts saved before the
+// latitude/longitude columns were merged into one "lat, long" cell.
+function draftToGridRow(x: any): BulkGridRow {
+  const legacyPair = [x?.latitude, x?.longitude]
+    .map((v) => String(v ?? "").trim())
+    .filter(Boolean)
+    .join(", ");
+  return {
+    point_key: String(x?.point_key ?? ""),
+    latlong: String(x?.latlong ?? "").trim() || legacyPair,
+    category: String(x?.category ?? ""),
+    description: String(x?.description ?? ""),
+    action: String(x?.action ?? ""),
+    file_name: String(x?.file_name ?? ""),
+  };
+}
+
+function parseGridRows(rows: BulkGridRow[]): ParsedCombinedRow[] {
+  const out: ParsedCombinedRow[] = [];
+  for (const r of rows) {
+    const point_key = r.point_key.trim();
+    if (!point_key) continue;
+
+    const { lat: latitude, lon: longitude } = parseLatLongCell(r.latlong);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
+
+    const rawAction = r.action.trim();
+    out.push({
+      point_key,
+      latitude: latitude as number,
+      longitude: longitude as number,
+      category: normalizeCategoryName(r.category.trim()),
+      description: r.description.trim() || null,
+      file_name: r.file_name.trim() || null,
+      image_key: null,
+      difficulty: normalizeDifficulty(rawAction),
+      remarks_action: rawAction || null,
+    });
+  }
   return out;
 }
 
@@ -700,6 +881,13 @@ function normalizeFileKey(value: string) {
     .trim() || "";
 }
 
+// Filename without its extension ("IMG_001.webp" -> "img_001"). Lets a master
+// row that says "IMG_001" or "IMG_001.jpg" match an uploaded "IMG_001.webp" —
+// the user should never have to fix jpg/png/webp extensions by hand.
+function fileNameStem(value: unknown): string {
+  return normalizeFileName(value).replace(/\.[a-z0-9]{2,5}$/i, "");
+}
+
 
 export default function ProjectsPage() {
   const router = useRouter();
@@ -738,6 +926,149 @@ export default function ProjectsPage() {
 
   const [masterFile, setMasterFile] = useState<File | null>(null);
   const [imageFiles, setImageFiles] = useState<File[]>([]);
+
+  // Bulk data entry mode: type/paste the data in an Excel-style grid right
+  // in the browser (default), or upload an Excel master file.
+  const [entryMode, setEntryMode] = useState<"file" | "grid">("grid");
+  const [gridRows, setGridRows] = useState<BulkGridRow[]>(() =>
+    Array.from({ length: 10 }, () => emptyGridRow())
+  );
+  const [gridSavedAt, setGridSavedAt] = useState<string>("");
+  const [gridLoading, setGridLoading] = useState(false);
+
+  // Restore the auto-saved grid draft once on load.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(GRID_DRAFT_KEY);
+      if (!raw) return;
+      const arr = JSON.parse(raw);
+      const hasContent =
+        Array.isArray(arr) &&
+        arr.some(
+          (x) => x && Object.values(x).some((v) => String(v ?? "").trim() !== "")
+        );
+      if (hasContent) setGridRows(arr.map(draftToGridRow));
+    } catch {
+      /* corrupt draft — start fresh */
+    }
+  }, []);
+
+  // Auto-save the grid draft 2 seconds after the last edit, so typed data
+  // survives a refresh or crash. (Editing resets the 2 s timer.)
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        localStorage.setItem(GRID_DRAFT_KEY, JSON.stringify(gridRows));
+        setGridSavedAt(new Date().toLocaleTimeString());
+      } catch {
+        /* storage full/blocked — typing continues, just no draft */
+      }
+    }, 2000);
+    return () => clearTimeout(t);
+  }, [gridRows]);
+
+  // Load the selected project's EXISTING reports into the grid so they can be
+  // edited (and new rows added) in the same Excel-style surface. On Run Import
+  // the bulk API upserts by (project_id, point_key), so edited rows update the
+  // existing reports in place and brand-new point_keys create new reports.
+  // True when the grid has any non-empty cell (used to warn before replacing).
+  const gridHasContent = () =>
+    gridRows.some((r) => Object.values(r).some((v) => String(v ?? "").trim() !== ""));
+
+  const loadProjectReportsIntoGrid = async (projectIdArg?: string) => {
+    const pid = projectIdArg || bulkProjectId;
+    if (!pid) return alert("Select a project first.");
+    setGridLoading(true);
+    try {
+      const res = await fetch(
+        `/api/projects/${encodeURIComponent(pid)}/reports?sort=asc`,
+        { method: "GET", credentials: "include", headers: authHeaders() }
+      );
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.error || "Failed to load reports");
+      const reports: any[] = Array.isArray(data?.reports) ? data.reports : [];
+      if (!reports.length) {
+        // Empty project: give a fresh grid ready for new reports.
+        setGridRows(Array.from({ length: 10 }, () => emptyGridRow()));
+        setEntryMode("grid");
+        alert("This project has no reports yet — the grid is ready for you to add new ones.");
+        return;
+      }
+
+      const rows: BulkGridRow[] = reports.map((r) => {
+        const lat = r.loc_lat ?? r.latitude ?? "";
+        const lon = r.loc_lon ?? r.longitude ?? "";
+        const latlong = lat !== "" && lon !== "" ? `${lat}, ${lon}` : "";
+        // Prefer the human remarks text; fall back to the difficulty colour.
+        const action = String(r.remarks_action || r.difficulty || "").trim();
+        return {
+          point_key: String(r.point_key ?? "").trim(),
+          latlong,
+          category: String(r.category ?? "").trim(),
+          description: String(r.description ?? "").trim(),
+          action,
+          file_name: "",
+        };
+      });
+      // A couple of blank rows at the end so it's obvious where to add new ones.
+      rows.push(emptyGridRow(), emptyGridRow());
+      setGridRows(rows);
+      setEntryMode("grid");
+    } catch (e: any) {
+      alert(e?.message || "Failed to load reports");
+    } finally {
+      setGridLoading(false);
+    }
+  };
+
+  // Switch the selected project. In grid mode we reload that project's reports
+  // straight into the grid (so "change project → grid changes"). If the grid
+  // holds unsaved work, confirm before replacing it.
+  const handleBulkProjectChange = async (newId: string) => {
+    if (newId === bulkProjectId) return;
+    if (entryMode === "grid" && gridHasContent()) {
+      const ok = window.confirm(
+        "Load this project's reports into the grid? Any unsaved changes in the grid will be replaced."
+      );
+      if (!ok) return;
+    }
+    setBulkProjectId(newId);
+    setSummary(null);
+    if (entryMode === "grid") {
+      await loadProjectReportsIntoGrid(newId);
+    }
+  };
+
+  // Create a brand-new project without leaving the bulk-import page, select it,
+  // and give a fresh grid to start adding its reports.
+  const createProjectInline = async () => {
+    const name = window.prompt("New project name:");
+    if (name == null) return;
+    const trimmed = name.trim();
+    if (!trimmed) return alert("Project name is required.");
+    setGridLoading(true);
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.error || "Failed to create project");
+      const newId = String(data?.project?.id || "").trim();
+      await load();
+      if (newId) setBulkProjectId(newId);
+      setGridRows(Array.from({ length: 10 }, () => emptyGridRow()));
+      setEntryMode("grid");
+      setSummary(null);
+      alert(`Project "${trimmed}" created. Add its reports in the grid, then Run Import.`);
+    } catch (e: any) {
+      alert(e?.message || "Failed to create project");
+    } finally {
+      setGridLoading(false);
+    }
+  };
 
   const masterInputRef = useRef<HTMLInputElement | null>(null);
   const imagesInputRef = useRef<HTMLInputElement | null>(null);
@@ -1276,7 +1607,12 @@ export default function ProjectsPage() {
 
   const runImportSingleMaster = async () => {
     if (!bulkProjectId) return alert("Select a project.");
-    if (!masterFile) return alert("Select master file.");
+    if (entryMode === "file" && !masterFile) return alert("Select master file.");
+    if (entryMode === "grid" && !parseGridRows(gridRows).length) {
+      return alert(
+        'Fill at least one valid grid row (point_key, "lat, long" and category are required).'
+      );
+    }
     // imageFiles MAY be empty: the server-side S3 lookup will then try to
     // resolve the master file's file_name / image_key references against
     // images already uploaded to the bucket. The post-import summary will
@@ -1315,7 +1651,8 @@ export default function ProjectsPage() {
       // the MySQL stack — the bulk-import API upserts by (project_id, point_key)
       // so re-importing the same file is now safe (each point updates in place).
 
-      const combinedRows = await parseCombinedFile(masterFile);
+      const combinedRows =
+        entryMode === "grid" ? parseGridRows(gridRows) : await parseCombinedFile(masterFile!);
       console.log("[bulk import] parsed rows:", combinedRows.length);
       console.log("[bulk import] selected images:", imageFiles.length);
       console.log("[bulk import] importing project:", bulkProjectId);
@@ -1595,12 +1932,61 @@ export default function ProjectsPage() {
       // we did NOT manually upload here, so this loop only needs to handle
       // rows whose images live in `imageFiles` for this run.
       const uploadedImageMap = new Map<string, File>();
+      // Extension-insensitive index: "img_001" -> File, so "IMG_001" or
+      // "IMG_001.jpg" in the master matches an uploaded "IMG_001.webp"
+      // automatically (exact filename match still wins).
+      const uploadedImageStemMap = new Map<string, File>();
       for (const file of imageFiles) {
         const normalized = normalizeFileName(file.name);
         if (normalized && !uploadedImageMap.has(normalized)) {
           uploadedImageMap.set(normalized, file);
         }
+        const stem = fileNameStem(file.name);
+        if (stem && !uploadedImageStemMap.has(stem)) {
+          uploadedImageStemMap.set(stem, file);
+        }
       }
+      const findUploadedImage = (name: string): File | null => {
+        const norm = normalizeFileName(name);
+        if (!norm) return null;
+        return (
+          uploadedImageMap.get(norm) || uploadedImageStemMap.get(fileNameStem(name)) || null
+        );
+      };
+
+      // AUTO multi-image by point number: selected images named "<pk>.<n>"
+      // (1.1.jpg, 1.2.png, 1.3.webp → point 1) or exactly "<pk>" attach to
+      // that point automatically — no need to type "1.1,1.2,1.3" in
+      // file_name. Grouped by the integer part of the filename stem and
+      // sorted by the sub-number so photo order is stable.
+      const filesByPointGroup = new Map<string, Array<{ file: File; sub: number }>>();
+      for (const file of imageFiles) {
+        const stem = fileNameStem(file.name);
+        const m = stem.match(/^(\d+)(?:[._-](\d+))?$/);
+        if (!m) continue;
+        const group = String(Number(m[1]));
+        const sub = m[2] != null ? Number(m[2]) : 0;
+        const list = filesByPointGroup.get(group) || [];
+        list.push({ file, sub });
+        filesByPointGroup.set(group, list);
+      }
+      for (const list of Array.from(filesByPointGroup.values())) {
+        list.sort((a, b) => a.sub - b.sub);
+      }
+      // Safety: if two point_keys share the same integer part (e.g. "1.0"
+      // and "1.5"), "1.x" images are ambiguous — auto-attach is skipped for
+      // that group and only typed file_name matching applies.
+      const pointGroupCounter = new Map<string, number>();
+      for (const row of combinedRows) {
+        const m = String(row.point_key || "").trim().match(/^(\d+)(?:\.\d+)?$/);
+        if (!m) continue;
+        const g = String(Number(m[1]));
+        pointGroupCounter.set(g, (pointGroupCounter.get(g) || 0) + 1);
+      }
+      const pointGroupOf = (pk: string): string | null => {
+        const m = String(pk || "").trim().match(/^(\d+)(?:\.0*)?$/);
+        return m ? String(Number(m[1])) : null;
+      };
 
       // Diagnostics retained for the existing UI summary.
       const mapByFileName = new Map<string, ParsedImageMapRow>();
@@ -1610,13 +1996,24 @@ export default function ProjectsPage() {
       });
       const missingFilesInUpload: string[] = [];
       for (const [name] of mapByFileName) {
-        if (!uploadedImageMap.has(name)) missingFilesInUpload.push(name);
+        if (!findUploadedImage(name)) missingFilesInUpload.push(name);
       }
+      const mapStems = new Set<string>();
+      imageMap.forEach((r) => {
+        const s = fileNameStem(r.file_name);
+        if (s) mapStems.add(s);
+      });
       const extraFilesNotInMap: string[] = [];
       imageFiles.forEach((f) => {
-        if (!mapByFileName.has(normalizeFileName(f.name))) {
-          extraFilesNotInMap.push(f.name);
+        if (mapByFileName.has(normalizeFileName(f.name)) || mapStems.has(fileNameStem(f.name))) {
+          return;
         }
+        // Not referenced by file_name, but auto-attaches by point number
+        // ("1.2.jpg" -> point 1) — not an "extra" file.
+        const m = fileNameStem(f.name).match(/^(\d+)(?:[._-](\d+))?$/);
+        const g = m ? String(Number(m[1])) : null;
+        if (g && pointGroupCounter.get(g) === 1) return;
+        extraFilesNotInMap.push(f.name);
       });
 
       // Spec-required tallies.
@@ -1676,9 +2073,8 @@ export default function ProjectsPage() {
         for (let mIdx = 0; mIdx < fileNamesToTry.length; mIdx += 1) {
           const candidateRaw = fileNamesToTry[mIdx];
           const candidateNorm = normalizeFileName(candidateRaw);
-          const candidateFile = candidateNorm
-            ? uploadedImageMap.get(candidateNorm) || null
-            : null;
+          // Exact match first, then extension-insensitive (jpg/png/webp).
+          const candidateFile = findUploadedImage(candidateRaw);
 
           // Spec Part 3 log key — fires per split filename.
           console.log("[bulk] image match", {
@@ -1706,6 +2102,30 @@ export default function ProjectsPage() {
               normName: candidateNorm,
               file: candidateFile,
               imageKey: splitImageKeys[mIdx] || splitImageKeys[0] || null,
+            });
+          }
+        }
+
+        // AUTO multi-image: nothing typed in file_name → attach every
+        // selected image named "<pk>" or "<pk>.<n>" for this point.
+        if (!rawFileName) {
+          const g = pointGroupOf(point_key);
+          const autoFiles =
+            g && pointGroupCounter.get(g) === 1 ? filesByPointGroup.get(g) || [] : [];
+          for (const { file } of autoFiles) {
+            matches.push({
+              rawName: file.name,
+              normName: normalizeFileName(file.name),
+              file,
+              imageKey: null,
+            });
+          }
+          if (autoFiles.length) {
+            console.log("[bulk] AUTO multi-image matched", {
+              point_key,
+              group: g,
+              count: autoFiles.length,
+              files: autoFiles.map((x) => x.file.name),
             });
           }
         }
@@ -1973,6 +2393,10 @@ export default function ProjectsPage() {
 
           <button style={styles.btnGhost} onClick={openBin}>
             🗑 Recycle Bin
+          </button>
+
+          <button style={styles.btnGhost} onClick={() => router.push("/activity")}>
+            📜 Activity Log
           </button>
 
           <div style={styles.exportGroup}>
@@ -2290,18 +2714,29 @@ export default function ProjectsPage() {
       )}
 
       {bulkOpen && (
-        <div style={styles.modalOverlay} onClick={() => setBulkOpen(false)}>
-          <div style={styles.modalWide} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.bulkFullPage}>
+          <div style={styles.bulkFullPageCard}>
             <div
               style={{
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "center",
                 gap: 10,
+                flexWrap: "wrap",
               }}
             >
-              <div style={{ fontSize: 18, fontWeight: 800 }}>
-                Bulk Import (Single Master File + Images)
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <button
+                  style={styles.btnGhost}
+                  onClick={() => setBulkOpen(false)}
+                  disabled={importing}
+                  title="Back to the projects list"
+                >
+                  ← Back
+                </button>
+                <div style={{ fontSize: 18, fontWeight: 800 }}>
+                  Bulk Import — enter data in the web or upload Excel
+                </div>
               </div>
               <button style={styles.btnGhost} onClick={resetBulk} disabled={importing}>
                 Clear
@@ -2353,17 +2788,44 @@ export default function ProjectsPage() {
             >
               <div>
                 <div style={styles.formLabel}>Select Project</div>
-                <select
-                  style={styles.input as any}
-                  value={bulkProjectId}
-                  onChange={(e) => setBulkProjectId(e.target.value)}
-                >
-                  {projects.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {safeName(p)} ({p.id.slice(0, 8)}…)
-                    </option>
-                  ))}
-                </select>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <select
+                    style={{ ...(styles.input as any), flex: 1 }}
+                    value={bulkProjectId}
+                    onChange={(e) => handleBulkProjectChange(e.target.value)}
+                    disabled={importing || gridLoading}
+                  >
+                    {projects.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {safeName(p)} ({p.id.slice(0, 8)}…)
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={createProjectInline}
+                    disabled={importing || gridLoading}
+                    title="Create a brand-new project and start adding its reports here"
+                    style={{
+                      padding: "0 14px",
+                      borderRadius: 10,
+                      border: "1px solid #111",
+                      background: "#111",
+                      color: "#fff",
+                      fontWeight: 900,
+                      fontSize: 13,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    ＋ New project
+                  </button>
+                </div>
+                {entryMode === "grid" && (
+                  <div style={{ fontSize: 12, color: "#667085", marginTop: 6 }}>
+                    Changing the project here loads <b>its</b> reports into the grid to edit.
+                  </div>
+                )}
               </div>
 
               <div>
@@ -2381,6 +2843,36 @@ export default function ProjectsPage() {
               </div>
             </div>
 
+            {/* Data entry mode: upload the Excel master file, or type/paste the
+                same data in an Excel-style grid right here in the web. */}
+            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+              {(
+                [
+                  { key: "grid", label: "⌨️ Enter data in web (Excel grid)" },
+                  { key: "file", label: "📄 Upload Excel file" },
+                ] as const
+              ).map((m) => (
+                <button
+                  key={m.key}
+                  type="button"
+                  onClick={() => setEntryMode(m.key)}
+                  disabled={importing}
+                  style={{
+                    padding: "9px 16px",
+                    borderRadius: 999,
+                    border: entryMode === m.key ? "2px solid #111" : "1px solid #D0D5DD",
+                    background: entryMode === m.key ? "#111" : "#fff",
+                    color: entryMode === m.key ? "#fff" : "#344054",
+                    fontWeight: 900,
+                    fontSize: 13,
+                    cursor: "pointer",
+                  }}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+
             <div
               style={{
                 display: "grid",
@@ -2389,35 +2881,75 @@ export default function ProjectsPage() {
                 marginTop: 12,
               }}
             >
-              <div>
-                <div style={styles.formLabel}>Master file</div>
-                <input
-                  ref={masterInputRef}
-                  type="file"
-                  accept=".csv,.txt,.xlsx,.xls"
-                  onChange={handleMasterFileChange}
-                />
-                {masterFile && (
-                  <div style={styles.fileMeta}>
-                    {masterFile.name} • {masterFile.size} bytes
-                  </div>
-                )}
-                {masterPreview && <pre style={styles.previewBox}>{masterPreview}</pre>}
-                {previewReady && (
-                  <div style={{ marginTop: 10 }}>
-                    <button
-                      type="button"
-                      style={styles.btnPrimary}
-                      onClick={downloadPreviewExcel}
-                    >
-                      Download Preview Excel
-                    </button>
-                    <div style={{ fontSize: 12, color: "#667085", marginTop: 6 }}>
-                      Download this file, correct location / kms if needed, then upload the corrected Excel again.
+              {entryMode === "file" ? (
+                <div>
+                  <div style={styles.formLabel}>Master file</div>
+                  <input
+                    ref={masterInputRef}
+                    type="file"
+                    accept=".csv,.txt,.xlsx,.xls"
+                    onChange={handleMasterFileChange}
+                  />
+                  {masterFile && (
+                    <div style={styles.fileMeta}>
+                      {masterFile.name} • {masterFile.size} bytes
                     </div>
+                  )}
+                  {masterPreview && <pre style={styles.previewBox}>{masterPreview}</pre>}
+                  {previewReady && (
+                    <div style={{ marginTop: 10 }}>
+                      <button
+                        type="button"
+                        style={styles.btnPrimary}
+                        onClick={downloadPreviewExcel}
+                      >
+                        Download Preview Excel
+                      </button>
+                      <div style={{ fontSize: 12, color: "#667085", marginTop: 6 }}>
+                        Download this file, correct location / kms if needed, then upload the corrected Excel again.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <div style={styles.formLabel}>Master data (web grid)</div>
+                  <button
+                    type="button"
+                    onClick={() => loadProjectReportsIntoGrid()}
+                    disabled={importing || gridLoading || !bulkProjectId}
+                    style={{
+                      marginTop: 4,
+                      marginBottom: 4,
+                      padding: "9px 14px",
+                      borderRadius: 10,
+                      border: "1px solid #111",
+                      background: "#111",
+                      color: "#fff",
+                      fontWeight: 900,
+                      fontSize: 13,
+                      cursor: "pointer",
+                    }}
+                    title="Load this project's existing reports into the grid so you can edit them and add new ones"
+                  >
+                    {gridLoading ? "Loading…" : "✎ Edit existing reports (load into grid)"}
+                  </button>
+                  <div style={{ fontSize: 12, color: "#667085", marginTop: 6 }}>
+                    <b>To edit:</b> click the button above to pull this project&apos;s existing reports into the
+                    grid — change any cell, and <b>add new rows at the bottom</b> for new reports. Saving keeps
+                    existing points (matched by point_key) updated and inserts the new ones.
+                    <br />
+                    <b>To add fresh:</b> just type rows. Copy from Excel and <b>paste into any cell</b> (separate
+                    lat + long columns merge automatically). Both coordinates go in <b>one cell</b>:{" "}
+                    <b>22.52518, 88.30578</b>. Required per row: point_key, lat long, category. Auto-saved every
+                    2 seconds.
+                    <br />
+                    <b>Photos attach automatically:</b> name images by point number —{" "}
+                    <b>1.1.jpg, 1.2.jpg, 1.3.jpg</b> all go to point 1 (any of jpg/png/webp) — and leave
+                    file_name <b>empty</b>. Typed file names still work and win when provided.
                   </div>
-                )}
-              </div>
+                </div>
+              )}
 
               <div>
                 <div style={styles.formLabel}>Select Images (bulk)</div>
@@ -2433,6 +2965,15 @@ export default function ProjectsPage() {
                 </div>
               </div>
             </div>
+
+            {entryMode === "grid" && (
+              <BulkExcelGrid
+                rows={gridRows}
+                setRows={setGridRows}
+                disabled={importing}
+                savedAt={gridSavedAt}
+              />
+            )}
 
             {summary && (
               <div style={{ ...styles.stateBox, marginTop: 12 }}>
@@ -2548,6 +3089,295 @@ export default function ProjectsPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ========= In-web Excel-style grid for bulk data entry =========
+const gridBtnSmall: React.CSSProperties = {
+  padding: "7px 12px",
+  borderRadius: 10,
+  border: "1px solid #D0D5DD",
+  background: "#fff",
+  color: "#344054",
+  fontWeight: 900,
+  fontSize: 12,
+  cursor: "pointer",
+};
+const gridTh: React.CSSProperties = {
+  padding: "8px 8px",
+  fontSize: 12,
+  fontWeight: 900,
+  color: "#475467",
+  background: "#F9FAFB",
+  borderBottom: "1px solid #EAECF0",
+  borderRight: "1px solid #F2F4F7",
+  textAlign: "left",
+  whiteSpace: "nowrap",
+};
+const gridTd: React.CSSProperties = {
+  padding: 0,
+  borderBottom: "1px solid #F2F4F7",
+  borderRight: "1px solid #F2F4F7",
+};
+
+function BulkExcelGrid({
+  rows,
+  setRows,
+  disabled,
+  savedAt,
+}: {
+  rows: BulkGridRow[];
+  setRows: React.Dispatch<React.SetStateAction<BulkGridRow[]>>;
+  disabled?: boolean;
+  savedAt?: string;
+}) {
+  const validCount = parseGridRows(rows).length;
+
+  const setCell = (rowIdx: number, key: keyof BulkGridRow, value: string) => {
+    setRows((prev) => prev.map((r, i) => (i === rowIdx ? { ...r, [key]: value } : r)));
+  };
+
+  // Paste straight from Excel: a multi-cell clipboard (tabs/newlines) fills
+  // the grid starting at the cell being pasted into, adding rows as needed.
+  const handlePaste = (
+    rowIdx: number,
+    colIdx: number,
+    e: React.ClipboardEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => {
+    const text = e.clipboardData.getData("text");
+    if (!text || (!text.includes("\t") && !text.includes("\n"))) return;
+    // A multi-line paste WITHOUT tabs into the description cell is one
+    // multi-line description (e.g. a bridge template), not multiple rows —
+    // let the textarea take it as-is.
+    if (GRID_COLUMNS[colIdx]?.key === "description" && !text.includes("\t")) return;
+    e.preventDefault();
+    const lines = text.replace(/\r/g, "").split("\n").filter((l) => l.trim() !== "");
+    if (!lines.length) return;
+    setRows((prev) => {
+      const next = prev.map((r) => ({ ...r }));
+      lines.forEach((line, li) => {
+        const cells = line.split("\t");
+        const target = rowIdx + li;
+        while (next.length <= target) next.push(emptyGridRow());
+        // Walk clipboard cells and grid columns with independent indices:
+        // when Excel still has SEPARATE latitude + longitude columns, the two
+        // numeric cells are merged into the single "lat, long" grid column.
+        let ci = 0;
+        let gi = colIdx;
+        while (ci < cells.length) {
+          const col = GRID_COLUMNS[gi];
+          if (!col) break;
+          let value = cells[ci].trim();
+          if (col.key === "latlong" && ci + 1 < cells.length) {
+            const nextCell = cells[ci + 1].trim();
+            const cellIsFullPair =
+              parseLatLongCell(value).lat != null && parseLatLongCell(value).lon != null;
+            if (
+              !cellIsFullPair &&
+              parseSingleCoordinate(value, "lat") != null &&
+              parseSingleCoordinate(nextCell, "lon") != null
+            ) {
+              value = `${value}, ${nextCell}`;
+              ci += 1;
+            }
+          }
+          next[target][col.key] = value;
+          ci += 1;
+          gi += 1;
+        }
+      });
+      return next;
+    });
+  };
+
+  const addRows = (n: number) =>
+    setRows((prev) => [...prev, ...Array.from({ length: n }, () => emptyGridRow())]);
+  const removeRow = (idx: number) =>
+    setRows((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== idx) : [emptyGridRow()]));
+  const clearAll = () => {
+    if (confirm("Clear all grid rows?")) setRows(Array.from({ length: 5 }, () => emptyGridRow()));
+  };
+  const autoNumber = () =>
+    setRows((prev) => prev.map((r, i) => ({ ...r, point_key: String(i + 1) })));
+
+  const cellInput: React.CSSProperties = {
+    width: "100%",
+    border: "none",
+    outline: "none",
+    padding: "8px 8px",
+    fontSize: 13,
+    fontWeight: 700,
+    color: "#101828",
+    background: "transparent",
+  };
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <datalist id="bulk-grid-categories">
+        {CATEGORY_OPTIONS.map((c) => (
+          <option key={c} value={c} />
+        ))}
+      </datalist>
+      <datalist id="bulk-grid-actions">
+        <option value="green" />
+        <option value="yellow" />
+        <option value="red" />
+      </datalist>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+        <button type="button" onClick={() => addRows(1)} disabled={disabled} style={gridBtnSmall}>
+          + Add row
+        </button>
+        <button type="button" onClick={() => addRows(10)} disabled={disabled} style={gridBtnSmall}>
+          + Add 10 rows
+        </button>
+        <button
+          type="button"
+          onClick={autoNumber}
+          disabled={disabled}
+          style={gridBtnSmall}
+          title="Fill point_key as 1, 2, 3... in row order"
+        >
+          Auto-number
+        </button>
+        <button type="button" onClick={clearAll} disabled={disabled} style={gridBtnSmall}>
+          Clear grid
+        </button>
+        <span
+          style={{
+            marginLeft: "auto",
+            fontSize: 12,
+            fontWeight: 900,
+            color: validCount ? "#027A48" : "#B42318",
+          }}
+        >
+          {validCount} valid row{validCount === 1 ? "" : "s"} ready to import
+        </span>
+        {savedAt ? (
+          <span style={{ fontSize: 12, fontWeight: 800, color: "#667085" }}>
+            ✓ Auto-saved {savedAt}
+          </span>
+        ) : null}
+      </div>
+
+      <div style={{ overflowX: "auto", border: "1px solid #EAECF0", borderRadius: 12, maxHeight: "62vh", overflowY: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 1080 }}>
+          <thead>
+            <tr>
+              <th style={{ ...gridTh, width: 40 }}>#</th>
+              {GRID_COLUMNS.map((c) => (
+                <th key={c.key} style={{ ...gridTh, minWidth: c.width }}>
+                  {c.label}
+                </th>
+              ))}
+              <th style={{ ...gridTh, width: 40 }} />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, ri) => (
+              <tr key={ri}>
+                <td
+                  style={{
+                    ...gridTd,
+                    textAlign: "center",
+                    color: "#98A2B3",
+                    fontWeight: 900,
+                    fontSize: 12,
+                    padding: "8px 4px",
+                  }}
+                >
+                  {ri + 1}
+                </td>
+                {GRID_COLUMNS.map((c, ci) =>
+                  c.key === "description" ? (
+                    <td key={c.key} style={gridTd}>
+                      <div style={{ display: "flex", alignItems: "stretch" }}>
+                        <textarea
+                          value={row.description}
+                          disabled={disabled}
+                          rows={row.description.includes("\n") ? 4 : 1}
+                          onChange={(e) => setCell(ri, "description", e.target.value)}
+                          onPaste={(e) => handlePaste(ri, ci, e)}
+                          placeholder="Type — or pick a standard text ▸"
+                          style={{ ...cellInput, resize: "vertical", lineHeight: 1.35 }}
+                        />
+                        <select
+                          value=""
+                          disabled={disabled}
+                          onChange={(e) => {
+                            if (e.target.value) setCell(ri, "description", e.target.value);
+                          }}
+                          title="Insert a standard description for this category"
+                          style={{
+                            width: 24,
+                            border: "none",
+                            borderLeft: "1px solid #F2F4F7",
+                            background: "#F9FAFB",
+                            cursor: "pointer",
+                            color: "#475467",
+                            fontWeight: 900,
+                          }}
+                        >
+                          <option value="">▾</option>
+                          {descriptionTemplatesFor(row.category).map((t) => (
+                            <option key={t} value={t}>
+                              {t.replace(/\n/g, " ").slice(0, 70)}
+                              {t.replace(/\n/g, " ").length > 70 ? "…" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </td>
+                  ) : (
+                    <td key={c.key} style={gridTd}>
+                      <input
+                        value={row[c.key]}
+                        disabled={disabled}
+                        onChange={(e) => setCell(ri, c.key, e.target.value)}
+                        onPaste={(e) => handlePaste(ri, ci, e)}
+                        list={
+                          c.key === "category"
+                            ? "bulk-grid-categories"
+                            : c.key === "action"
+                              ? "bulk-grid-actions"
+                              : undefined
+                        }
+                        placeholder={
+                          c.key === "point_key"
+                            ? String(ri + 1)
+                            : c.key === "latlong"
+                              ? "22.52518, 88.30578"
+                              : ""
+                        }
+                        style={cellInput}
+                      />
+                    </td>
+                  )
+                )}
+                <td style={{ ...gridTd, textAlign: "center" }}>
+                  <button
+                    type="button"
+                    onClick={() => removeRow(ri)}
+                    disabled={disabled}
+                    title="Remove this row"
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      color: "#B42318",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                      fontSize: 14,
+                    }}
+                  >
+                    ✕
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -2747,6 +3577,25 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 10px 30px rgba(0,0,0,0.15)",
     maxHeight: "90vh",
     overflow: "auto",
+  },
+  // Bulk import is a FULL PAGE (covers the projects list, scrolls like a
+  // normal page) instead of a cramped modal — the web grid needs the room.
+  bulkFullPage: {
+    position: "fixed",
+    inset: 0,
+    background: "#F7F8FA",
+    overflowY: "auto",
+    zIndex: 9999,
+    padding: 24,
+  },
+  bulkFullPageCard: {
+    width: "min(1280px, 100%)",
+    margin: "0 auto",
+    background: "#fff",
+    borderRadius: 16,
+    border: "1px solid #EAECF0",
+    padding: 20,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.08)",
   },
   formRow: { marginTop: 10 },
   formLabel: { fontSize: 12, fontWeight: 800, color: "#344054", marginBottom: 6 },
