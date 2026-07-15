@@ -153,6 +153,10 @@ export default function RouteMapPage() {
   const routeLinesRef = useRef<any[]>([]);
   const activeTourRef = useRef<"report" | "location" | null>(null);
   const locAnimRef = useRef<any>(null);
+  // Bumped on every stop/start so a tile warm-up that was aborted mid-flight
+  // (user paused / restarted during the ~1.6s warm) can be told apart from the
+  // current one and won't kick off a duplicate animation loop.
+  const warmGenRef = useRef(0);
 
   // ---- Animated tours: focus each stop in order, 3 seconds per stop ----
   const SECONDS_PER_POINT = 3;
@@ -162,6 +166,8 @@ export default function RouteMapPage() {
     setPlaying(false);
     setBanner("");
     activeTourRef.current = null;
+    warmGenRef.current += 1; // invalidate any in-flight tile warm-up
+
     if (animTimerRef.current) {
       clearTimeout(animTimerRef.current);
       animTimerRef.current = null;
@@ -171,6 +177,32 @@ export default function RouteMapPage() {
       locAnimRef.current.raf = 0;
     }
   };
+
+  // Pre-load the satellite tiles for a spot before the tour reveals it, so play
+  // never starts on the bare (grey/empty) map. Centres+zooms the camera there
+  // and resolves once the map fires `tilesloaded` — or after a short timeout so
+  // a slow network can never stall the tour.
+  const warmTiles = (lat: number, lng: number, zoom: number) =>
+    new Promise<void>((resolve) => {
+      const g = (window as any).google;
+      const map = mapRef.current;
+      if (!g?.maps?.event || !map) return resolve();
+      let done = false;
+      let listener: any = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        try { listener?.remove?.(); } catch { /* ignore */ }
+        resolve();
+      };
+      // Attach the listener BEFORE moving so the resulting tile load is caught.
+      listener = g.maps.event.addListenerOnce(map, "tilesloaded", finish);
+      try {
+        map.setCenter({ lat, lng });
+        map.setZoom(zoom);
+      } catch { /* ignore */ }
+      setTimeout(finish, 1600);
+    });
 
   // Run an animated tour over a list of point indices.
   //   mode "report"   -> full report popup (category, observation, remarks, photo)
@@ -285,12 +317,6 @@ export default function RouteMapPage() {
     if (a.progress === 0) {
       a.casing.setPath([a.path[0]]);
       a.line.setPath([a.path[0]]);
-      // Zoom in a bit and center on the start so the camera can smoothly
-      // follow the line (live-navigation feel) instead of jumping.
-      try {
-        map?.setZoom(Math.min(16, Math.max((map.getZoom() || 12) + 2, 14)));
-        map?.setCenter({ lat: a.path[0].lat, lng: a.path[0].lng });
-      } catch { /* ignore */ }
     }
     a.lastTs = 0;
     const tick = (ts: number) => {
@@ -333,7 +359,23 @@ export default function RouteMapPage() {
         activeTourRef.current = null;
       }
     };
-    a.raf = requestAnimationFrame(tick);
+    // On a fresh start, warm the start tiles so the line doesn't begin drawing
+    // over an empty grey map; otherwise resume ticking immediately.
+    const beginTick = () => {
+      a.lastTs = 0;
+      a.raf = requestAnimationFrame(tick);
+    };
+    if (a.progress === 0 && map) {
+      const startZoom = Math.min(16, Math.max((map.getZoom() || 12) + 2, 14));
+      const gen = warmGenRef.current;
+      warmTiles(a.path[0].lat, a.path[0].lng, startZoom).then(() => {
+        if (warmGenRef.current === gen && playingRef.current && activeTourRef.current === "location") {
+          beginTick();
+        }
+      });
+    } else {
+      beginTick();
+    }
   };
 
   const toggleLocations = () => {
@@ -361,8 +403,31 @@ export default function RouteMapPage() {
   };
 
   const togglePlay = () => {
-    if (playingRef.current && activeTourRef.current === "report") stopAnim();
-    else runTour(allIndices(), "report", current < 0 ? 0 : current);
+    if (playingRef.current && activeTourRef.current === "report") {
+      stopAnim();
+      return;
+    }
+    const idxs = allIndices();
+    if (!idxs.length) return;
+    const start = current < 0 ? 0 : current;
+    const firstPt = points[idxs[start]] ?? points[idxs[0]];
+    if (!firstPt) {
+      runTour(idxs, "report", start);
+      return;
+    }
+    // Flip the button to "playing" right away, warm the first point's tiles,
+    // then start the tour so it never opens on an empty grey map. If the user
+    // pauses during the (brief) warm-up, don't start.
+    stopAnim();
+    playingRef.current = true;
+    setPlaying(true);
+    activeTourRef.current = "report";
+    const gen = warmGenRef.current;
+    warmTiles(firstPt.lat, firstPt.lng, 16).then(() => {
+      if (warmGenRef.current === gen && playingRef.current && activeTourRef.current === "report") {
+        runTour(idxs, "report", start);
+      }
+    });
   };
 
   // ---- 1. Load report points ----
@@ -512,6 +577,10 @@ export default function RouteMapPage() {
           mapTypeControl: true,
           streetViewControl: false,
           fullscreenControl: true,
+          // Colour shown while satellite tiles are still loading (when the
+          // camera pans/zooms to a new point). A dark backdrop blends with the
+          // imagery instead of flashing an ugly light-grey box.
+          backgroundColor: "#0f1e2b",
         });
         map.fitBounds(bounds, 60);
         mapRef.current = map;
@@ -676,7 +745,7 @@ export default function RouteMapPage() {
           ) : mapError ? (
             <div style={styles.overlay}>{mapError}</div>
           ) : null}
-          <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+          <div ref={containerRef} style={{ width: "100%", height: "100%", background: "#0f1e2b" }} />
 
           {ready && banner ? (
             <div style={styles.banner}>{banner}</div>

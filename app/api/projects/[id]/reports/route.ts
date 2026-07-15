@@ -71,6 +71,10 @@ export async function GET(request: Request, context: Ctx) {
     const orderParts: string[] = [];
     if (has(cols, "sort_order")) orderParts.push(`sort_order ${sort}`);
     if (has(cols, "created_at")) orderParts.push(`created_at ${sort}`);
+    // Deterministic final tie-breaker: sort_order + second-precision created_at
+    // can both tie (bulk-import inserts many rows/second with sort_order i+1),
+    // which would let rows swap order between reloads and exports.
+    if (has(cols, "id")) orderParts.push(`id ${sort}`);
     if (!orderParts.length) orderParts.push("id ASC");
 
     const limitSql = limit ? " LIMIT ? OFFSET ?" : "";

@@ -23,19 +23,23 @@ async function safeQuery(sql: string, args: unknown[] = []): Promise<Row[]> {
  * Coordinate + KM extraction mirrors lib/reenaTemplateExport.ts so the Excel
  * KM column matches the Word export exactly.
  */
-function pickLat(r: Row): number | null {
-  for (const c of [r.latitude, r.lat, r.ne_latitude, r.ne_lat, r.loc_lat]) {
+// Skip null/undefined/blank BEFORE Number(): Number(null) and Number("") are 0
+// (finite), which would turn a no-GPS report into coordinate (0,0) and wreck the
+// cumulative KM column with a ~8,600 km phantom jump. Kept in sync with
+// lib/reenaTemplateExport.ts so Word and Excel KM match.
+function firstFiniteCoord(candidates: unknown[]): number | null {
+  for (const c of candidates) {
+    if (c === null || typeof c === "undefined" || String(c).trim() === "") continue;
     const n = Number(c);
     if (Number.isFinite(n)) return n;
   }
   return null;
 }
+function pickLat(r: Row): number | null {
+  return firstFiniteCoord([r.latitude, r.lat, r.ne_latitude, r.ne_lat, r.loc_lat]);
+}
 function pickLng(r: Row): number | null {
-  for (const c of [r.longitude, r.lng, r.ne_longitude, r.ne_lng, r.lon, r.loc_lon]) {
-    const n = Number(c);
-    if (Number.isFinite(n)) return n;
-  }
-  return null;
+  return firstFiniteCoord([r.longitude, r.lng, r.ne_longitude, r.ne_lng, r.lon, r.loc_lon]);
 }
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;

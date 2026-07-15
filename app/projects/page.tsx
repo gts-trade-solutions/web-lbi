@@ -22,8 +22,8 @@ type ProjectRow = {
 
 type ParsedPointRow = {
   point_key: string;
-  latitude: number;
-  longitude: number;
+  latitude: number | null;
+  longitude: number | null;
   category: string;
   normalizedCategory?: string | null;
   description?: string | null;
@@ -39,8 +39,10 @@ type ParsedImageMapRow = {
 
 type ParsedCombinedRow = {
   point_key: string;
-  latitude: number;
-  longitude: number;
+  // null when the row has no GPS — such rows are still imported/edited so a
+  // no-GPS report isn't dropped.
+  latitude: number | null;
+  longitude: number | null;
   category: string;
   description?: string | null;
   file_name?: string | null;
@@ -706,17 +708,27 @@ function parseGridRows(rows: BulkGridRow[]): ParsedCombinedRow[] {
     const point_key = r.point_key.trim();
     if (!point_key) continue;
 
-    const { lat: latitude, lon: longitude } = parseLatLongCell(r.latlong);
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
+    const { lat, lon } = parseLatLongCell(r.latlong);
+    const hasCoords = Number.isFinite(lat) && Number.isFinite(lon);
 
+    const category = normalizeCategoryName(r.category.trim());
+    const description = r.description.trim();
     const rawAction = r.action.trim();
+    const fileName = r.file_name.trim();
+
+    // Keep a row that has a point number AND at least one other value — even
+    // with NO GPS — so no-GPS reports can be edited/added in the grid instead
+    // of being silently dropped. A point number with nothing else is skipped
+    // (a stray/leftover row).
+    if (!hasCoords && !category && !description && !rawAction && !fileName) continue;
+
     out.push({
       point_key,
-      latitude: latitude as number,
-      longitude: longitude as number,
-      category: normalizeCategoryName(r.category.trim()),
-      description: r.description.trim() || null,
-      file_name: r.file_name.trim() || null,
+      latitude: hasCoords ? (lat as number) : null,
+      longitude: hasCoords ? (lon as number) : null,
+      category,
+      description: description || null,
+      file_name: fileName || null,
       image_key: null,
       difficulty: normalizeDifficulty(rawAction),
       remarks_action: rawAction || null,
@@ -774,10 +786,16 @@ async function uploadFileToS3(args: {
   // even if the multipart filename gets mangled by an intermediate proxy.
   fd.append("fileName", String(args.fileName || args.file.name));
 
+  // Send the bearer token too (not just the cookie) so uploads still auth when
+  // the cookie is missing (privacy settings / SameSite), matching every other
+  // write call.
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
   const res = await fetch("/api/upload", {
     method: "POST",
     body: fd,
     credentials: "include",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
@@ -936,36 +954,63 @@ export default function ProjectsPage() {
   const [gridSavedAt, setGridSavedAt] = useState<string>("");
   const [gridLoading, setGridLoading] = useState(false);
 
-  // Restore the auto-saved grid draft once on load.
+  // The project a restored draft belongs to. Used so the grid rows and the
+  // selected project can never get out of sync (which used to let one project's
+  // typed rows import into a DIFFERENT project after a reload).
+  const draftProjectRef = useRef<string>("");
+
+  // Restore the auto-saved grid draft once on load. The draft carries the
+  // project id it was typed for, so we can re-select that project below and
+  // never import into the wrong one. (Legacy drafts were a bare array.)
   useEffect(() => {
     try {
       const raw = localStorage.getItem(GRID_DRAFT_KEY);
       if (!raw) return;
-      const arr = JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.rows) ? parsed.rows : [];
+      const draftProject = Array.isArray(parsed) ? "" : String(parsed?.projectId || "");
       const hasContent =
         Array.isArray(arr) &&
-        arr.some(
-          (x) => x && Object.values(x).some((v) => String(v ?? "").trim() !== "")
-        );
-      if (hasContent) setGridRows(arr.map(draftToGridRow));
+        arr.some((x) => x && Object.values(x).some((v) => String(v ?? "").trim() !== ""));
+      if (hasContent) {
+        setGridRows(arr.map(draftToGridRow));
+        draftProjectRef.current = draftProject;
+        // Pre-select the draft's project so the dropdown matches the rows; if
+        // that project no longer exists, load() below validates and clears it.
+        if (draftProject) setBulkProjectId(draftProject);
+      }
     } catch {
       /* corrupt draft — start fresh */
     }
   }, []);
 
   // Auto-save the grid draft 2 seconds after the last edit, so typed data
-  // survives a refresh or crash. (Editing resets the 2 s timer.)
+  // survives a refresh or crash. Stored WITH the project id so rows never drift
+  // onto another project. (Editing resets the 2 s timer.)
   useEffect(() => {
     const t = setTimeout(() => {
       try {
-        localStorage.setItem(GRID_DRAFT_KEY, JSON.stringify(gridRows));
+        localStorage.setItem(
+          GRID_DRAFT_KEY,
+          JSON.stringify({ projectId: bulkProjectId || "", rows: gridRows })
+        );
         setGridSavedAt(new Date().toLocaleTimeString());
       } catch {
         /* storage full/blocked — typing continues, just no draft */
       }
     }, 2000);
     return () => clearTimeout(t);
-  }, [gridRows]);
+  }, [gridRows, bulkProjectId]);
+
+  // Clear the persisted grid draft (call after a successful import).
+  const clearGridDraft = () => {
+    try {
+      localStorage.removeItem(GRID_DRAFT_KEY);
+    } catch {
+      /* ignore */
+    }
+    draftProjectRef.current = "";
+  };
 
   // Load the selected project's EXISTING reports into the grid so they can be
   // edited (and new rows added) in the same Excel-style surface. On Run Import
@@ -1072,6 +1117,40 @@ export default function ProjectsPage() {
 
   const masterInputRef = useRef<HTMLInputElement | null>(null);
   const imagesInputRef = useRef<HTMLInputElement | null>(null);
+  const importDocxRef = useRef<HTMLInputElement | null>(null);
+  const [importingDocx, setImportingDocx] = useState(false);
+
+  // Convert an old survey report (Word .docx or PowerPoint .pptx) into a new
+  // project. The server parses the report's tables + photos and creates the
+  // project; then we open it so the user can review/fix in the grid.
+  const importOldDocx = async (file: File) => {
+    setImportingDocx(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/projects/import-docx", {
+        method: "POST",
+        credentials: "include",
+        headers: authHeaders(),
+        body: fd,
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.detail || data?.error || "Import failed");
+      await load();
+      alert(
+        `Imported "${data.projectName}"\n\n` +
+          `Points: ${data.reportsCreated} (${data.withCoords} with GPS)\n` +
+          `Photos: ${data.photosUploaded}` +
+          (data.photosFailed ? ` (${data.photosFailed} failed)` : "") +
+          `\n\nOpening the project so you can review it.`
+      );
+      if (data.projectId) router.push(`/projects/${data.projectId}`);
+    } catch (e: any) {
+      alert(e?.message || "Failed to import the report");
+    } finally {
+      setImportingDocx(false);
+    }
+  };
 
   const [summary, setSummary] = useState<ImportSummary | null>(null);
   const [masterPreview, setMasterPreview] = useState<string>("");
@@ -1143,7 +1222,19 @@ export default function ProjectsPage() {
       setProjects(rows);
       await hydrateLastModifiedNames(rows);
 
-      if (!bulkProjectId && rows.length) setBulkProjectId(rows[0].id);
+      // Keep the bulk-import project selection valid. If a restored draft
+      // pre-selected a project that still exists, keep it (rows stay with their
+      // project); if it's gone, drop the stale draft so its rows can't import
+      // into some other project. Otherwise default to the newest project.
+      setBulkProjectId((cur) => {
+        if (cur && rows.some((p) => p.id === cur)) return cur;
+        if (cur && draftProjectRef.current === cur) {
+          // The draft's project vanished — discard the orphaned rows.
+          clearGridDraft();
+          setGridRows(Array.from({ length: 10 }, () => emptyGridRow()));
+        }
+        return rows.length ? rows[0].id : "";
+      });
     } catch (e: any) {
       const msg = String(e?.message || e || "").toLowerCase();
       if (msg.includes("auth") || msg.includes("session") || msg.includes("jwt")) {
@@ -1508,16 +1599,28 @@ export default function ProjectsPage() {
 
       if (index > 0) {
         const prev = sorted[index - 1];
-        legKm = await getRoadDistanceKm(
-          prev.latitude,
-          prev.longitude,
-          row.latitude,
-          row.longitude
-        );
-        cumulativeKm += legKm;
+        // Only measure a leg when BOTH endpoints have GPS; a no-GPS point
+        // doesn't contribute distance (and mustn't be read as 0,0).
+        if (
+          prev.latitude != null &&
+          prev.longitude != null &&
+          row.latitude != null &&
+          row.longitude != null
+        ) {
+          legKm = await getRoadDistanceKm(
+            prev.latitude,
+            prev.longitude,
+            row.latitude,
+            row.longitude
+          );
+          cumulativeKm += legKm;
+        }
       }
 
-      const location = await getLocationName(row.latitude, row.longitude);
+      const location =
+        row.latitude != null && row.longitude != null
+          ? await getLocationName(row.latitude, row.longitude)
+          : "";
 
       previewRowsResult.push({
         sl_no: index + 1,
@@ -1610,7 +1713,7 @@ export default function ProjectsPage() {
     if (entryMode === "file" && !masterFile) return alert("Select master file.");
     if (entryMode === "grid" && !parseGridRows(gridRows).length) {
       return alert(
-        'Fill at least one valid grid row (point_key, "lat, long" and category are required).'
+        "Fill at least one grid row — a point number plus a coordinate, category, description, action or file name. (GPS is optional, so no-GPS points can be added/edited.)"
       );
     }
     // imageFiles MAY be empty: the server-side S3 lookup will then try to
@@ -1749,6 +1852,18 @@ export default function ProjectsPage() {
       const duplicateMappingFiles = getDuplicates(imageMap.map((r) => r.file_name));
       const invalidCategories: string[] = [];
 
+      // Warn when the same point number appears on more than one row — only the
+      // first is kept (they upsert to the same report), so this would otherwise
+      // silently drop the later rows' data.
+      const duplicatePointKeys = getDuplicates(
+        combinedRows.map((r) => String(r.point_key || "").trim()).filter(Boolean)
+      );
+      if (duplicatePointKeys.length) {
+        errors.push(
+          `Duplicate point numbers found (only the first row of each is kept): ${duplicatePointKeys.join(", ")}`
+        );
+      }
+
       if (duplicateSelectedImages.length) {
         errors.push(
           `Duplicate selected image names found: ${duplicateSelectedImages.join(", ")}`
@@ -1838,7 +1953,7 @@ export default function ProjectsPage() {
         `/api/projects/${encodeURIComponent(bulkProjectId)}/bulk-import`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...authHeaders() },
           credentials: "include",
           body: JSON.stringify({
             rows: apiRows,
@@ -1892,7 +2007,7 @@ export default function ProjectsPage() {
           `/api/projects/${encodeURIComponent(bulkProjectId)}/bulk-import`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...authHeaders() },
             credentials: "include",
             body: JSON.stringify({
               rows: [
@@ -2349,6 +2464,9 @@ export default function ProjectsPage() {
           : "Bulk import completed."
       );
 
+      // Clear the saved draft so its (now-imported) rows can't be accidentally
+      // re-imported into a different project after a reload.
+      clearGridDraft();
       setBulkOpen(false);
       resetBulk();
       await load();
@@ -2397,6 +2515,26 @@ export default function ProjectsPage() {
 
           <button style={styles.btnGhost} onClick={() => router.push("/activity")}>
             📜 Activity Log
+          </button>
+
+          <input
+            ref={importDocxRef}
+            type="file"
+            accept=".docx,.pptx"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0] || null;
+              if (f) importOldDocx(f);
+              if (importDocxRef.current) importDocxRef.current.value = "";
+            }}
+          />
+          <button
+            style={styles.btnGhost}
+            onClick={() => importDocxRef.current?.click()}
+            disabled={importingDocx}
+            title="Convert an old survey report (Word .docx or PowerPoint .pptx) into a new project with points & photos"
+          >
+            {importingDocx ? "Converting…" : "📄➜ Import old report (Word/PPT)"}
           </button>
 
           <div style={styles.exportGroup}>

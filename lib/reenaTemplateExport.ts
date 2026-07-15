@@ -991,7 +991,16 @@ function normalizeS3Url(raw: string | null | undefined): string | null {
  *      derived from the original URL's object key (handles private buckets).
  *
  * Never throws - all failures return null and are logged.
+ *
+ * Transient failures (throttle 429, 5xx, timeout, network blip) are RETRIED
+ * with backoff. Without this, a big report (500+ points ~ 1000 photos) that
+ * briefly gets throttled by S3 would silently drop every photo after that
+ * point — the "photos come up to report N then Photo not available" bug.
  */
+const RETRYABLE: unique symbol = Symbol("retryable-image-fetch");
+type ImageFetchResult = { buffer: Buffer; contentType: string; url: string } | null | typeof RETRYABLE;
+const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 async function fetchImageBuffer(
   url: string,
   label: string
@@ -1029,7 +1038,11 @@ async function fetchImageBuffer(
         contentType,
         contentLength,
       });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        // Throttling (429) and server errors (5xx) are transient — ask the
+        // caller to retry. 404/403 and other 4xx are permanent.
+        return res.status === 429 || res.status >= 500 ? RETRYABLE : null;
+      }
       const ab = await res.arrayBuffer();
       const buf = Buffer.from(ab);
       if (!buf.length) {
@@ -1100,30 +1113,50 @@ async function fetchImageBuffer(
         target,
         aborted ? "" : err
       );
-      return null;
+      // Timeout / network error is transient — retryable.
+      return RETRYABLE;
     } finally {
       clearTimeout(timeoutId);
     }
   };
 
-  // Attempt 1: direct fetch.
-  const direct = await tryFetch(normalized, "direct");
-  if (direct) return direct;
-
-  // Attempt 2: signed URL fallback for private buckets.
   const key = extractS3Key(normalized);
-  if (key) {
-    try {
-      const signed = await getReadSignedUrl(key, 600);
-      const second = await tryFetch(signed, "signed");
-      if (second) return second;
-    } catch (err) {
-      console.error(`[image fetch] ${label} signed-url generation failed`, err);
+  // Up to 4 tries with growing backoff, so a burst of S3 throttling / transient
+  // timeouts during a large export doesn't permanently drop the rest of the
+  // photos. Each try does direct fetch, then a signed-URL fallback.
+  const BACKOFF_MS = [400, 1200, 3000];
+  for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt += 1) {
+    const suffix = attempt ? `#retry${attempt}` : "";
+
+    // Direct fetch.
+    const direct: ImageFetchResult = await tryFetch(normalized, `direct${suffix}`);
+    if (direct && direct !== RETRYABLE) return direct;
+
+    // Signed URL fallback for private buckets.
+    let signed: ImageFetchResult = null;
+    if (key) {
+      try {
+        const signedUrl = await getReadSignedUrl(key, 600);
+        signed = await tryFetch(signedUrl, `signed${suffix}`);
+        if (signed && signed !== RETRYABLE) return signed;
+      } catch (err) {
+        console.error(`[image fetch] ${label} signed-url generation failed`, err);
+      }
+    } else if (attempt === 0) {
+      console.warn(`[image fetch] ${label} could not extract S3 key from`, normalized);
     }
-  } else {
-    console.warn(`[image fetch] ${label} could not extract S3 key from`, normalized);
+
+    // If neither attempt was transient, it's a permanent failure (404/403/
+    // non-image) — retrying won't help, so stop now.
+    if (direct !== RETRYABLE && signed !== RETRYABLE) return null;
+
+    if (attempt < BACKOFF_MS.length) {
+      console.warn(`[image fetch] ${label} transient failure — retrying in ${BACKOFF_MS[attempt]}ms`);
+      await sleepMs(BACKOFF_MS[attempt]);
+    }
   }
 
+  console.error(`[image fetch] ${label} gave up after retries (still throttled/timing out)`);
   return null;
 }
 
@@ -1188,23 +1221,34 @@ function valueOrEmDash(v: unknown): string {
   return s ? s : "—";
 }
 
-// The REMARKS / ACTION column falls back to the difficulty colour token when
-// there is no written remark. Show readable action text for the bare colour
-// words instead of "green" / "yellow" / "red". A real remark already typed by
-// the user (e.g. "NORMAL PASS") is matched by none of these and returned as-is.
-function formatRemarksAction(v: unknown): string {
-  const s = String(v ?? "").trim();
-  if (!s) return "—";
-  switch (s.toLowerCase()) {
-    case "green":
-      return "Go ahead normal pass";
-    case "yellow":
-      return "Go ahead with caution";
-    case "red":
-      return "Stop";
-    default:
-      return s;
-  }
+// Standard "action" wording for each difficulty colour, shown in the
+// REMARKS / ACTION column of the Word file:
+//   green  → go ahead (normal pass)
+//   yellow → go ahead with caution
+//   red    → don't go / stop
+function actionForDifficulty(key: string): string {
+  if (key === "red") return "Don't go, Stop";
+  if (key === "yellow") return "Go ahead with caution";
+  return "Go ahead, Normal pass"; // green / default
+}
+
+// Build the REMARKS / ACTION cell. It ALWAYS leads with the standard action for
+// the point's difficulty colour, then appends any specific written remark that
+// adds information (so nothing typed by the user is lost). Bare colour/status
+// words and remarks that just repeat the action are dropped to avoid noise.
+function formatRemarksAction(written: unknown, difficultyKey: string): string {
+  const action = actionForDifficulty(difficultyKey);
+  const note = String(written ?? "").trim();
+  if (!note) return action;
+  const noteLc = note.toLowerCase();
+  // Only drop notes that are a bare COLOUR word or plainly repeat the action —
+  // never drop a real status word like "stop"/"caution", which carries meaning.
+  // (Genuine repeats such as "caution" on a yellow row are still caught by the
+  // action-includes check below, so nothing meaningful is lost.)
+  const REDUNDANT = ["red", "yellow", "green", "normal", "normal pass", "ok", "-", "—"];
+  if (REDUNDANT.includes(noteLc)) return action;
+  if (action.toLowerCase().includes(noteLc)) return action;
+  return `${action} — ${note}`;
 }
 
 function cleanFileName(name: string, fallback: string) {
@@ -1270,8 +1314,14 @@ function normalizeDifficulty(value: unknown) {
 // Spec-mandated EXACT-match keyword sets. EXACT (Array.includes(v))
 // not substring, so noise words in remarks/action don't hijack the
 // table colour.
-const RED_KEYWORDS = ["red", "critical", "hard", "fail", "not pass"];
-const YELLOW_KEYWORDS = ["yellow", "warning", "caution", "medium"];
+const RED_KEYWORDS = [
+  "red", "critical", "hard", "fail", "not pass",
+  // stop / no-go status words a surveyor might type instead of a colour, so a
+  // "Stop" point is never shaded green and labelled "Go ahead".
+  "stop", "dont go", "don't go", "do not go", "no go", "no-go", "halt",
+  "blocked", "closed", "danger",
+];
+const YELLOW_KEYWORDS = ["yellow", "warning", "caution", "cautious", "medium", "go ahead with caution"];
 const GREEN_KEYWORDS = ["green", "normal", "normal pass", "pass", "ok", ""];
 
 function getDifficultyTableColors(value: unknown): {
@@ -2219,21 +2269,23 @@ function resolveImageUrl(row: Row | null | undefined, urlCol: string, keyCol: st
  * Pull the first defined coordinate from a report row.
  * `reports` table has both `latitude/longitude` and `loc_lat/loc_lon` columns.
  */
-function pickLat(r: Row): number | null {
-  const candidates = [r.latitude, r.lat, r.ne_latitude, r.ne_lat, r.loc_lat];
+// IMPORTANT: skip null/undefined/blank BEFORE Number(), because Number(null),
+// Number(""), and Number(" ") all equal 0 (a finite value). Without this guard
+// a report with no GPS would be read as coordinate (0,0), injecting a ~8,600 km
+// phantom leg into the cumulative KM column and printing a fake "N0 0.000".
+function firstFiniteCoord(candidates: unknown[]): number | null {
   for (const c of candidates) {
+    if (c === null || typeof c === "undefined" || String(c).trim() === "") continue;
     const n = Number(c);
     if (Number.isFinite(n)) return n;
   }
   return null;
 }
+function pickLat(r: Row): number | null {
+  return firstFiniteCoord([r.latitude, r.lat, r.ne_latitude, r.ne_lat, r.loc_lat]);
+}
 function pickLng(r: Row): number | null {
-  const candidates = [r.longitude, r.lng, r.ne_longitude, r.ne_lng, r.lon, r.loc_lon];
-  for (const c of candidates) {
-    const n = Number(c);
-    if (Number.isFinite(n)) return n;
-  }
-  return null;
+  return firstFiniteCoord([r.longitude, r.lng, r.ne_longitude, r.ne_lng, r.lon, r.loc_lon]);
 }
 
 /**
@@ -3943,7 +3995,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       location: locationText || "-",
       category: valueOrDash(r.category),
       observation: valueOrEmDash(r.description ?? r.observation),
-      remarks: formatRemarksAction(r.remarks_action ?? r.difficulty ?? r.status),
+      remarks: formatRemarksAction(r.remarks_action, tableColors.key),
       photo: photoTagValue,
       photoKey: photoTagValue,
       observationPhotoKey: photoTagValue,
@@ -4210,13 +4262,16 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       const s = String(v).trim();
       return s !== "" && s !== "-" && s !== "—";
     };
+    // NOTE: `remarks` is intentionally NOT counted — it is now always populated
+    // with the difficulty-based action text ("Go ahead…" etc.), so it would
+    // make every row look "meaningful" and defeat this empty-row filter. A row
+    // is real only if it has GPS / location / category / observation / photo.
     return (
       meaningful(r.gpsLat) ||
       meaningful(r.gpsLon) ||
       meaningful(r.location) ||
       meaningful(r.category) ||
       meaningful(r.observation) ||
-      meaningful(r.remarks) ||
       !!r.observationPhotoKey
     );
   };

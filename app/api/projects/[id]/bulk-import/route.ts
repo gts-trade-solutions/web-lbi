@@ -56,7 +56,10 @@ function unauthorized(error: unknown) {
 }
 
 function toNumOrNull(v: unknown): number | null {
-  if (v === null || typeof v === "undefined" || v === "") return null;
+  // Treat null/undefined/blank (incl. whitespace-only) as missing. Number("")
+  // and Number("   ") are 0 (finite), which would wrongly store a no-coordinate
+  // point at (0,0).
+  if (v === null || typeof v === "undefined" || String(v).trim() === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
@@ -596,12 +599,12 @@ export async function POST(request: Request, context: Ctx) {
         file_name: rowFileName,
         image_key: rowImageKey,
       });
-      // The action/actions/difficulty source column is saved into BOTH
-      // reports.difficulty AND reports.remarks_action per the import spec, so
-      // downstream consumers (DOCX export, project page) can read either field.
-      const action =
-        (r.remarks_action ? String(r.remarks_action).trim() : null) ||
-        (r.difficulty ? String(r.difficulty).trim() : null);
+      // Difficulty (a short colour/status token) and the free-text remark are
+      // DISTINCT and go in their OWN columns. Never write the long remark text
+      // into `difficulty` (VARCHAR(64)) — that used to overflow the column and
+      // make the DOCX export read a "Red - road washed out" remark as green.
+      const difficultyVal = r.difficulty ? String(r.difficulty).trim().slice(0, 60) : null;
+      const remarksVal = r.remarks_action ? String(r.remarks_action).trim() : null;
 
       console.log("[bulk import save row]", {
         projectId,
@@ -611,8 +614,8 @@ export async function POST(request: Request, context: Ctx) {
         loc_lon: lng,
         category,
         description,
-        difficulty: action,
-        remarks_action: action,
+        difficulty: difficultyVal,
+        remarks_action: remarksVal,
       });
 
       const [existing] = await pool.query(
@@ -633,13 +636,15 @@ export async function POST(request: Request, context: Ctx) {
       const fields: Array<{ col: string; value: unknown }> = [];
       if (has("category")) fields.push({ col: "category", value: category });
       if (has("description")) fields.push({ col: "description", value: description });
-      if (has("difficulty")) fields.push({ col: "difficulty", value: action });
-      if (has("remarks_action")) fields.push({ col: "remarks_action", value: action });
+      if (has("difficulty")) fields.push({ col: "difficulty", value: difficultyVal });
+      if (has("remarks_action")) fields.push({ col: "remarks_action", value: remarksVal });
       if (has("loc_lat")) fields.push({ col: "loc_lat", value: lat });
       if (has("loc_lon")) fields.push({ col: "loc_lon", value: lng });
       if (has("latitude")) fields.push({ col: "latitude", value: lat });
       if (has("longitude")) fields.push({ col: "longitude", value: lng });
-      if (has("sort_order")) fields.push({ col: "sort_order", value: i + 1 });
+      // sort_order is set only when INSERTing a new report (see insertOnlyFields
+      // below) so re-importing a subset never renumbers / reshuffles the
+      // existing reports' order.
       if (has("status")) fields.push({ col: "status", value: "active" });
       if (has("file_name")) fields.push({ col: "file_name", value: rowFileName });
       if (has("image_key")) fields.push({ col: "image_key", value: rowImageKey });
@@ -649,6 +654,9 @@ export async function POST(request: Request, context: Ctx) {
       const insertOnlyFields: Array<{ col: string; value: unknown }> = [];
       if (has("user_id")) insertOnlyFields.push({ col: "user_id", value: userId });
       if (has("created_by")) insertOnlyFields.push({ col: "created_by", value: userId });
+      // Only set order on INSERT so re-importing never overwrites an existing
+      // report's position.
+      if (has("sort_order")) insertOnlyFields.push({ col: "sort_order", value: i + 1 });
       // Any remaining NOT NULL no-default column the live schema declares.
       // We satisfy it with a safe placeholder so MySQL doesn't reject the
       // INSERT. The list of columns we can naturally fill is hard-coded above;
@@ -996,18 +1004,12 @@ export async function POST(request: Request, context: Ctx) {
       }
 
       if (refs.length && s3Lookup.enabled && s3Index) {
-        // Spec-mandated idempotency: wipe ALL prior photos for THIS report
-        // before inserting anything new. Runs ONCE per row, BEFORE the refs
-        // loop, so multi-photo reports do not lose earlier inserts. Note:
-        // this also drops manually-uploaded photos on re-import, which is
-        // the contract the spec asks for ("DELETE FROM report_photos WHERE
-        // report_id = ?").
-        try {
-          await pool.query("DELETE FROM report_photos WHERE report_id = ?", [reportId]);
-        } catch (delErr) {
-          console.warn("[bulk import photo] per-report DELETE failed - continuing:", delErr);
-        }
-
+        // Idempotency is done PER FILE just before each INSERT (delete only the
+        // same report+file_name row, preserving include_in_export). The old
+        // blanket "DELETE all photos for this report" was removed because it
+        // wiped photos that then failed to re-resolve (renamed file, UUID-
+        // prefixed upload key, unresolved ref) and locally-uploaded photos from
+        // this same request — causing net photo loss on re-import.
         for (const ref of refs) {
           const key = resolveS3KeyForRef(ref, s3Index);
           const normalizedFileName = normalizeFileKey(ref.file_name || "");
@@ -1070,6 +1072,37 @@ export async function POST(request: Request, context: Ctx) {
 
           const baseName =
             normalizedFileName || normalizeFileKey(key);
+          const fileNameForRow = ref.file_name || baseName || null;
+
+          // Per-file idempotency: replace ONLY this report's row for the same
+          // file_name (keeping every other photo), and carry over the user's
+          // include_in_export choice so re-import doesn't silently re-tick a
+          // photo they had excluded from the Word export.
+          let preservedInclude: number | null = null;
+          if (fileNameForRow) {
+            if (photoHas("include_in_export")) {
+              try {
+                const [prev] = await pool.query(
+                  "SELECT include_in_export FROM report_photos WHERE report_id = ? AND file_name = ? LIMIT 1",
+                  [reportId, fileNameForRow]
+                );
+                const prevRow = Array.isArray(prev) ? (prev[0] as any) : null;
+                if (prevRow && prevRow.include_in_export != null) {
+                  preservedInclude = Number(prevRow.include_in_export);
+                }
+              } catch {
+                /* ignore — fall back to default include */
+              }
+            }
+            try {
+              await pool.query(
+                "DELETE FROM report_photos WHERE report_id = ? AND file_name = ?",
+                [reportId, fileNameForRow]
+              );
+            } catch (delErr) {
+              console.warn("[bulk import photo] per-file DELETE failed - continuing:", delErr);
+            }
+          }
 
           // Build INSERT only with columns that actually exist in this DB.
           // The id column carries a generated UUID for schemas where the
@@ -1083,11 +1116,13 @@ export async function POST(request: Request, context: Ctx) {
           ];
           if (photoHas("path")) photoFields.push({ col: "path", value: key });
           if (photoHas("file_name"))
-            photoFields.push({ col: "file_name", value: ref.file_name || baseName || null });
+            photoFields.push({ col: "file_name", value: fileNameForRow });
           if (photoHas("image_key"))
             photoFields.push({ col: "image_key", value: ref.image_key || null });
           if (photoHas("point_key"))
             photoFields.push({ col: "point_key", value: point_key });
+          if (photoHas("include_in_export"))
+            photoFields.push({ col: "include_in_export", value: preservedInclude != null ? preservedInclude : 1 });
 
           const colsList = photoFields.map((f) => f.col);
           const placeholders = photoFields.map(() => "?").join(", ");

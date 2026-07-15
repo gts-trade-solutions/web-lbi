@@ -41,3 +41,6 @@ next-env.d.ts
 supabase/.env
 env.bad.txt
 env.bak.txt
+
+# Locally-saved imported photos (S3 fallback)
+/public/uploads/
