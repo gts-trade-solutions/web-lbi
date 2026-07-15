@@ -1196,7 +1196,9 @@ function formatLatLine(prefix: "N" | "S" | "E" | "W", v: unknown): string {
   const abs = Math.abs(n);
   const deg = Math.floor(abs);
   const minutes = ((abs - deg) * 60).toFixed(3);
-  return `${prefix}${deg} ${minutes}`;
+  // Non-breaking space (U+00A0) between degrees and minutes so Word never
+  // splits a coordinate mid-value ("N22 46.051" -> "N22" / "46.051").
+  return `${prefix}${deg}\u00A0${minutes}`;
 }
 
 function formatGpsLat(lat: unknown): string {
