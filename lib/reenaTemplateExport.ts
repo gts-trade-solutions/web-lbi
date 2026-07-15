@@ -782,16 +782,18 @@ async function optimizeDocxImage(
       optimized = await sharp(input)
         .rotate()
         .resize({
-          width: 1400,
-          height: 900,
+          // 1120×720 is still ~150 DPI at the printed photo size (7.5"), so it
+          // stays crisp, but it's ~35% fewer pixels than 1400×900 — that plus
+          // q72 roughly HALVES each photo's bytes. On a 1000+ photo report that
+          // cuts the Word file size and the peak memory dramatically, letting
+          // very large reports export in one file.
+          width: 1120,
+          height: 720,
           fit: "inside",
           withoutEnlargement: true,
         })
         .jpeg({
-          // Spec: q78 mozjpeg keeps photos visually indistinguishable
-          // from q80 while shaving ~5% per image — meaningful across
-          // 395+ photos in one export.
-          quality: 78,
+          quality: 72,
           mozjpeg: true,
         })
         .toBuffer();
@@ -3429,12 +3431,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   let photoFetchSuccess = 0;
   let photoFetchFailed = 0;
 
-  // Hard cap on the photo-fetch phase. The browser typically aborts a
-  // streaming response after ~120s of idle time; exporting 400 photos
-  // sequentially with a 10s/photo timeout could hit that ceiling. Once this
-  // budget is exhausted the remaining rows render with the "Photo not
-  // available." fallback instead of trying to fetch.
-  const PHOTO_PHASE_DEADLINE_MS = 100_000;
+  // Safety cap on the photo-fetch phase (prevents a hung S3 from making the
+  // export run forever). Once exhausted, remaining rows render the "Photo not
+  // available." fallback. This SCALES with the report count — a flat 100s used
+  // to silently drop every photo after ~report 226 on big reports (500+ pts).
+  // ~700ms/report budget, min 4 min, capped at 20 min. For very large reports
+  // the server's reverse-proxy read timeout must also be raised to match.
+  const PHOTO_PHASE_DEADLINE_MS = Math.min(1_200_000, Math.max(240_000, reports.length * 700));
   const phaseStartedAt = Date.now();
   let phaseDeadlineHit = false;
 
@@ -3606,58 +3609,32 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       let fetchedAny = false;
       let lastFetchFailureReason: string | null = null;
       const fetchedBuffers: Array<{ buffer: Buffer; contentType: string }> = [];
-      for (const p of selectedPhotos) {
-        const candidate = normalizeS3Url(p?.url);
-        const ctx = {
-          index: i,
-          report_id: rid,
-          point_key: r.point_key,
-          file_name: p?.file_name,
-          image_key: p?.image_key,
-        };
-        if (!candidate) {
-          lastFetchFailureReason = "row has no url and no path";
-          console.warn("[PHOTO CHECK 3 - FETCH SKIPPED INVALID URL]", ctx);
-          continue;
-        }
-        console.log("[PHOTO CHECK 3 - FETCH START]", { ...ctx, url: candidate });
-        try {
-          const fetched = await fetchImageBuffer(candidate, `photo[${rid}]`);
-          if (fetched) {
-            console.log("[PHOTO CHECK 4 - FETCH RESPONSE]", {
-              ...ctx,
-              url: candidate,
-              ok: true,
-              contentType: fetched.contentType,
-            });
-            console.log("[PHOTO CHECK 5 - BUFFER CREATED]", {
-              ...ctx,
-              url: candidate,
-              bufferSize: fetched.buffer.length,
-            });
+      // Fetch this report's (up to 2) photos IN PARALLEL, preserving order — so
+      // a 2-photo report doesn't pay two sequential fetch/timeouts, halving the
+      // photo-phase time on big reports.
+      const settledPhotos = await Promise.all(
+        selectedPhotos.map(async (p) => {
+          const candidate = normalizeS3Url(p?.url);
+          if (!candidate) {
+            return { ok: false as const, reason: "row has no url and no path" };
           }
-          if (fetched && Buffer.isBuffer(fetched.buffer) && fetched.buffer.length > 0) {
-            fetchedBuffers.push({ buffer: fetched.buffer, contentType: fetched.contentType });
-            console.log("[PHOTO CHECK 7 - BUFFER READY]", {
-              ...ctx,
-              bufferIndex: fetchedBuffers.length - 1,
-              bufferSize: fetched.buffer.length,
-            });
-          } else {
-            lastFetchFailureReason = "fetchImageBuffer returned no buffer (404/403/non-image/oversize/timeout)";
-            console.warn("[PHOTO CHECK 7 - PHOTO BUFFER MISSING]", {
-              ...ctx,
-              attemptedUrl: candidate,
-            });
+          try {
+            const fetched = await fetchImageBuffer(candidate, `photo[${rid}]`);
+            if (fetched && Buffer.isBuffer(fetched.buffer) && fetched.buffer.length > 0) {
+              return { ok: true as const, buffer: fetched.buffer, contentType: fetched.contentType };
+            }
+            return {
+              ok: false as const,
+              reason: "fetchImageBuffer returned no buffer (404/403/non-image/oversize/timeout)",
+            };
+          } catch (err) {
+            return { ok: false as const, reason: `fetch threw: ${(err as Error)?.message || String(err)}` };
           }
-        } catch (err) {
-          lastFetchFailureReason = `fetch threw: ${(err as Error)?.message || String(err)}`;
-          console.error("[PHOTO CHECK 3 - FETCH ERROR]", {
-            ...ctx,
-            url: candidate,
-            message: (err as Error)?.message,
-          });
-        }
+        })
+      );
+      for (const s of settledPhotos) {
+        if (s.ok) fetchedBuffers.push({ buffer: s.buffer, contentType: s.contentType });
+        else lastFetchFailureReason = s.reason;
       }
 
       // Assemble the final photo buffer(s). 2 photos → store each
