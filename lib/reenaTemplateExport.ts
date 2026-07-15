@@ -5333,12 +5333,15 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
 
       // -- OBSERVATION TABLE WIDTH + COLUMN GRID rewrite.
       // The reference screenshot uses these column proportions:
-      //   GPS LOCATION   : 8.5%   →  850 / 5000 in pct, ≈ 1218 dxa
-      //   KM             : 6.8%   →  680 / 5000 in pct, ≈  974 dxa
-      //   LOCATION       : 17.5%  → 1750 / 5000 in pct, ≈ 2508 dxa
-      //   CATEGORY       : 10.5%  → 1050 / 5000 in pct, ≈ 1505 dxa
-      //   OBSERVATION    : 40.5%  → 4050 / 5000 in pct, ≈ 5803 dxa
-      //   REMARKS/ACTION : 16.2%  → 1620 / 5000 in pct, ≈ 2322 dxa
+      //   GPS LOCATION   : 17.0%  (widened so "GPS LOCATION" header and each
+      //                            coordinate line like "N28 33.274" stay on
+      //                            one line instead of wrapping)
+      //   KM             : 6.8%
+      //   LOCATION       : 17.5%
+      //   CATEGORY       : auto-sizes to the category icon
+      //   OBSERVATION    : 32.0%  (reduced to give the width to GPS; still the
+      //                            widest column, plenty for the description)
+      //   REMARKS/ACTION : 16.2%
       // We assume a usable content width of 14330 dxa (A4 ≈ 11906,
       // Letter ≈ 12240; the template uses landscape so 14330 is a
       // safe approximation). Each cell width is set in DXA so total
@@ -5352,7 +5355,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       const PX_TO_DXA = 15; // 96 px = 1 in = 1440 dxa
       // Icon width + a little horizontal cell padding (left/right margins).
       const CATEGORY_COL_DXA = CATEGORY_ICON_SIZE[0] * PX_TO_DXA + 260;
-      const OTHER_PCTS = [8.5, 6.8, 17.5, 40.5, 16.2]; // GPS, KM, LOC, OBS, REM
+      const OTHER_PCTS = [17, 6.8, 17.5, 32, 16.2]; // GPS, KM, LOC, OBS, REM
       const OTHER_SUM = OTHER_PCTS.reduce((a, b) => a + b, 0);
       const REMAINING_DXA = Math.max(0, TOTAL_DXA - CATEGORY_COL_DXA);
       const OTHER_DXA = OTHER_PCTS.map((p) =>
