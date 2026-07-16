@@ -31,11 +31,28 @@ export type DocxReport = {
   getPhoto: (zipPath: string) => Buffer | null;
 };
 
+// Build the relationship-id → media-target map from a .docx/.pptx _rels XML.
+// Extracts Id and Target per <Relationship> element ORDER-INDEPENDENTLY — some
+// Word/PPT writers emit `Target="..." Id="..."` (Target first), which an
+// Id-then-Target regex silently misses, dropping every image (0 photos).
+function buildRelMap(relsXml: string): Record<string, string> {
+  const relMap: Record<string, string> = {};
+  for (const m of Array.from(relsXml.matchAll(/<Relationship\b[^>]*>/g))) {
+    const el = m[0];
+    const id = el.match(/\bId="([^"]+)"/);
+    const target = el.match(/\bTarget="([^"]+)"/);
+    if (id && target) relMap[id[1]] = target[1];
+  }
+  return relMap;
+}
+
 // Column header → field. Order-independent; matched against each header cell.
 const HEADER_KEYS: Record<string, RegExp> = {
-  // Match a real coordinate column ("NE COORDINATE", "GPS LOCATION",
-  // "Co-ordinates") but NOT a "GPS No" point-number column.
-  coord: /co-?ordinate|gps\s*location/i,
+  // Match a real coordinate column but NOT a "GPS No" point-number column.
+  // Tolerates the real header spellings seen across reports: "NE COORDINATE",
+  // "NE CO Ordinates" (space), "NE CORDINATE" (typo, one O), "Co-ordinates",
+  // "GPS LOCATION".
+  coord: /co[\s-]?o?rdinate|gps\s*location/i,
   km: /^km|kms/i,
   place: /^location$/i,
   category: /category/i,
@@ -191,8 +208,7 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
   const relsXml = zip.file("word/_rels/document.xml.rels")?.asText() || "";
 
   // relationship id -> media target (relative to word/)
-  const relMap: Record<string, string> = {};
-  for (const m of Array.from(relsXml.matchAll(/Id="([^"]+)"[^>]*Target="([^"]+)"/g))) relMap[m[1]] = m[2];
+  const relMap = buildRelMap(relsXml);
   const imagesIn = (s: string): string[] => {
     const ids: string[] = [];
     for (const m of Array.from(s.matchAll(/r:embed="([^"]+)"/g))) ids.push(m[1]);
@@ -407,8 +423,7 @@ export function parsePptxReport(buffer: Buffer): DocxReport {
     const sx = zip.file(sn)?.asText() || "";
     const relsPath = sn.replace(/slides\/(slide\d+)\.xml/, "slides/_rels/$1.xml.rels");
     const relsXml = zip.file(relsPath)?.asText() || "";
-    const relMap: Record<string, string> = {};
-    for (const m of Array.from(relsXml.matchAll(/Id="([^"]+)"[^>]*Target="([^"]+)"/g))) relMap[m[1]] = m[2];
+    const relMap = buildRelMap(relsXml);
     const ids: string[] = [];
     for (const m of Array.from(sx.matchAll(/r:embed="([^"]+)"/g))) ids.push(m[1]);
     const media = Array.from(
