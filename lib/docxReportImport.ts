@@ -326,9 +326,27 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
         rowPhotos.push(...imagesIn(c));
       });
 
-      // Difficulty from this row's colour (box fill / cell shading / text
-      // highlight). Defaults to green ("normal pass") when the row has none.
-      const difficulty = difficultyFromXml(rows[ri]) || "green";
+      // Difficulty: read the colour ONLY from the "VEHICLE MOVEMENT" column's
+      // green/yellow/red square. Scanning the WHOLE row wrongly picked up the
+      // yellow highlight on photo labels (e.g. "W-7m"/"W-14m"), turning green
+      // points yellow. When there's no such column (e.g. Tambaram, whose colour
+      // is uniform cell shading) fall back to scanning the whole row.
+      const vmCols = header
+        .map((h, ci) => (/vehicle|movement/i.test(h) ? ci : -1))
+        .filter((ci) => ci >= 0);
+      // Some layouts have TWO "VEHICLE MOVEMENT" columns — one holds the PHOTOS
+      // (whose yellow "W-7m" labels must NOT count), the other the colour
+      // square. Prefer VM cells that contain NO image (the square). Fall back to
+      // all VM cells, then to the whole row (Tambaram-style uniform shading).
+      const vmSquareCells = vmCols
+        .map((ci) => dataCells[ci] || "")
+        .filter((cell) => imagesIn(cell).length === 0);
+      const diffXml = vmSquareCells.length
+        ? vmSquareCells.join("")
+        : vmCols.length
+          ? vmCols.map((ci) => dataCells[ci] || "").join("")
+          : rows[ri];
+      const difficulty = difficultyFromXml(diffXml) || "green";
 
       points.push({
         point_key: String(points.length + 1),
