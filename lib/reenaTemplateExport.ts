@@ -6892,15 +6892,18 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       }
       console.log("[DOCX TITLE+GA BIND]", { gaParagraphsBound: gaKeepFlagsAdded });
 
-      // ---- UNIFORM FONT SIZE (client requirement): ALL text in the Word
-      // file is 16pt. Word stores half-points, so 16pt = w:val="32". This
-      // runs LAST, right before the final document.xml save, so every run
-      // injected by the passes above is covered too. styles.xml is patched
-      // separately below so runs with no explicit size inherit 16pt as well.
+      // ---- UNIFORM BODY FONT SIZE (client requirement): body text is 16pt.
+      // Word stores half-points, so 16pt = w:val="32". Text already LARGER than
+      // 16pt (the 46pt report title, section headings) is LEFT ALONE — otherwise
+      // this crushed the title down to 16pt. Only smaller/varied body text is
+      // brought up/down to a uniform 16pt. Runs with no explicit size inherit
+      // 16pt via the styles.xml patch below.
       let uniformSizeCount = 0;
       xml = xml.replace(
-        /<w:sz(Cs)?\s+w:val="[^"]+"\s*\/>/g,
-        (_m: string, cs: string | undefined) => {
+        /<w:sz(Cs)?\s+w:val="([^"]+)"\s*\/>/g,
+        (_m: string, cs: string | undefined, val: string) => {
+          const n = parseInt(val, 10);
+          if (Number.isFinite(n) && n > 32) return _m; // keep titles/headings
           uniformSizeCount += 1;
           return `<w:sz${cs || ""} w:val="32"/>`;
         }
@@ -6919,8 +6922,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         let stylesXml = stylesFile.asText();
         let stylesSizeCount = 0;
         stylesXml = stylesXml.replace(
-          /<w:sz(Cs)?\s+w:val="[^"]+"\s*\/>/g,
-          (_m: string, cs: string | undefined) => {
+          /<w:sz(Cs)?\s+w:val="([^"]+)"\s*\/>/g,
+          (_m: string, cs: string | undefined, val: string) => {
+            const n = parseInt(val, 10);
+            if (Number.isFinite(n) && n > 32) return _m; // keep title/heading styles large
             stylesSizeCount += 1;
             return `<w:sz${cs || ""} w:val="32"/>`;
           }
