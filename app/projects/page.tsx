@@ -1,6 +1,7 @@
 "use client";
 
 import { toast } from "../../components/Toast";
+import { confirmDialog } from "../../components/ConfirmDialog";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx";
@@ -1100,8 +1101,9 @@ export default function ProjectsPage() {
   const handleBulkProjectChange = async (newId: string) => {
     if (newId === bulkProjectId) return;
     if (entryMode === "grid" && gridHasContent()) {
-      const ok = window.confirm(
-        "Load this project's reports into the grid? Any unsaved changes in the grid will be replaced."
+      const ok = await confirmDialog(
+        "Load this project's reports into the grid? Any unsaved changes in the grid will be replaced.",
+        { title: "Replace grid?", confirmText: "Load" }
       );
       if (!ok) return;
     }
@@ -1447,8 +1449,9 @@ export default function ProjectsPage() {
 
   const deleteProject = async (project: ProjectRow) => {
     const projectName = safeName(project);
-    const confirmed = window.confirm(
-      `Move project \"${projectName}\" to the Recycle Bin? You can restore it within ${retentionDays} days, after which it is permanently deleted along with its reports, photos, path points, and bulk import history.`
+    const confirmed = await confirmDialog(
+      `Move project "${projectName}" to the Recycle Bin? You can restore it within ${retentionDays} days, after which it is permanently deleted along with its reports, photos, path points, and bulk import history.`,
+      { title: "Move to Recycle Bin?", confirmText: "Move to bin", danger: true }
     );
 
     if (!confirmed) return;
@@ -1552,8 +1555,9 @@ export default function ProjectsPage() {
 
   const deleteForever = async (project: ProjectRow) => {
     const projectName = safeName(project);
-    const confirmed = window.confirm(
-      `Permanently delete \"${projectName}\"? This cannot be undone. All related reports, photos, path points, and bulk import history will be deleted.`
+    const confirmed = await confirmDialog(
+      `Permanently delete "${projectName}"? This cannot be undone. All related reports, photos, path points, and bulk import history will be deleted.`,
+      { title: "Delete forever?", confirmText: "Delete forever", danger: true }
     );
     if (!confirmed) return;
 
@@ -3543,8 +3547,9 @@ function BulkExcelGrid({
     setRows((prev) => [...prev, ...Array.from({ length: n }, () => emptyGridRow())]);
   const removeRow = (idx: number) =>
     setRows((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== idx) : [emptyGridRow()]));
-  const clearAll = () => {
-    if (confirm("Clear all grid rows?")) setRows(Array.from({ length: 5 }, () => emptyGridRow()));
+  const clearAll = async () => {
+    if (await confirmDialog("Clear all grid rows?", { title: "Clear grid?", confirmText: "Clear", danger: true }))
+      setRows(Array.from({ length: 5 }, () => emptyGridRow()));
   };
   const autoNumber = () =>
     setRows((prev) => prev.map((r, i) => ({ ...r, point_key: String(i + 1) })));

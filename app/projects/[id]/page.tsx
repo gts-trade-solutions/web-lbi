@@ -1,6 +1,7 @@
 "use client";
 
 import { toast } from "../../../components/Toast";
+import { confirmDialog } from "../../../components/ConfirmDialog";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -3319,7 +3320,8 @@ function EditReportModal({
   }, [report.id]);
 
   const removePhoto = async (photoId: string) => {
-    if (!window.confirm("Remove this photo from the report?")) return;
+    if (!(await confirmDialog("Remove this photo from the report?", { confirmText: "Remove", danger: true })))
+      return;
     try {
       setRemovingId(photoId);
       const res = await fetch(

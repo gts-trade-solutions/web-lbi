@@ -1,6 +1,7 @@
 import "./globals.css";
 import AuthGate from "../components/AuthGate";
 import ToastHost from "../components/Toast";
+import ConfirmHost from "../components/ConfirmDialog";
 
 export const metadata = {
   title: "Tracker Web",
@@ -13,6 +14,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <AuthGate>{children}</AuthGate>
         <ToastHost />
+        <ConfirmHost />
       </body>
     </html>
   );
