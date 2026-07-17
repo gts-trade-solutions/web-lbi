@@ -756,6 +756,11 @@ function renderRouteLocationsStepperPng(
  * Always honours EXIF orientation via .rotate(). Never enlarges
  * (withoutEnlargement) so a 400px source stays 400px.
  */
+// Observation-photo target, adapted PER EXPORT by scale in generateReenaDocx.
+// Big reports use smaller photos so a several-thousand-photo file stays
+// openable in Word and the server's peak memory stays bounded.
+let OBS_PHOTO_TARGET = { width: 1120, height: 720, quality: 72 };
+
 async function optimizeDocxImage(
   input: Buffer,
   type: "observation" | "routeMap" | "gaDrawing" | "category",
@@ -779,21 +784,20 @@ async function optimizeDocxImage(
         .png()
         .toBuffer();
     } else {
+      // Dimensions/quality adapt to the export's scale (OBS_PHOTO_TARGET): the
+      // default 1120×720 q72 stays crisp at print size, while very large
+      // reports drop to a smaller size so a several-thousand-photo file stays
+      // openable and memory stays bounded.
       optimized = await sharp(input)
         .rotate()
         .resize({
-          // 1120×720 is still ~150 DPI at the printed photo size (7.5"), so it
-          // stays crisp, but it's ~35% fewer pixels than 1400×900 — that plus
-          // q72 roughly HALVES each photo's bytes. On a 1000+ photo report that
-          // cuts the Word file size and the peak memory dramatically, letting
-          // very large reports export in one file.
-          width: 1120,
-          height: 720,
+          width: OBS_PHOTO_TARGET.width,
+          height: OBS_PHOTO_TARGET.height,
           fit: "inside",
           withoutEnlargement: true,
         })
         .jpeg({
-          quality: 72,
+          quality: OBS_PHOTO_TARGET.quality,
           mozjpeg: true,
         })
         .toBuffer();
@@ -3439,7 +3443,23 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // to silently drop every photo after ~report 226 on big reports (500+ pts).
   // ~700ms/report budget, min 4 min, capped at 20 min. For very large reports
   // the server's reverse-proxy read timeout must also be raised to match.
-  const PHOTO_PHASE_DEADLINE_MS = Math.min(1_200_000, Math.max(240_000, reports.length * 700));
+  // Adapt photo dimensions/quality to scale so very large reports produce a
+  // file Word can still open and the server doesn't run out of memory holding
+  // thousands of images. ~2 photos/report worst case.
+  const approxPhotos = reports.length * 2;
+  OBS_PHOTO_TARGET =
+    approxPhotos > 6000
+      ? { width: 820, height: 540, quality: 60 } // huge (~5000+ pts): ~45KB/photo
+      : approxPhotos > 2500
+        ? { width: 1000, height: 640, quality: 66 }
+        : { width: 1120, height: 720, quality: 72 };
+  console.log("[DOCX PHOTO TARGET]", { approxPhotos, target: OBS_PHOTO_TARGET });
+
+  // Safety cap on the photo-fetch phase, scaled by report count (700ms/report),
+  // min 4 min, max 45 min so very large reports aren't cut off. NOTE: the
+  // server's reverse-proxy read timeout (nginx proxy_read_timeout) must be
+  // raised to match, or the request is cut off before the file is ready.
+  const PHOTO_PHASE_DEADLINE_MS = Math.min(2_700_000, Math.max(240_000, reports.length * 700));
   const phaseStartedAt = Date.now();
   let phaseDeadlineHit = false;
 
