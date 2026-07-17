@@ -927,6 +927,12 @@ export default function ProjectsPage() {
   const [editingProjectId, setEditingProjectId] = useState<string>("");
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
+
+  // Combine projects: pick 2+ projects (in click order) → new merged project.
+  const [combineOpen, setCombineOpen] = useState(false);
+  const [combineSelected, setCombineSelected] = useState<string[]>([]);
+  const [combineName, setCombineName] = useState("");
+  const [combining, setCombining] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingProjectId, setDeletingProjectId] = useState<string>("");
 
@@ -1188,6 +1194,52 @@ export default function ProjectsPage() {
     const token =
       typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
     return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
+  // ---- Combine projects ----
+  const openCombine = () => {
+    setCombineSelected([]);
+    setCombineName("");
+    setCombineOpen(true);
+  };
+  // Toggle a project in/out of the combine selection, preserving click order.
+  const toggleCombine = (id: string) => {
+    setCombineSelected((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+  const runCombine = async () => {
+    if (combineSelected.length < 2) {
+      return alert("Pick at least 2 projects to combine (tick them in the order you want).");
+    }
+    const name =
+      combineName.trim() ||
+      combineSelected
+        .map((id) => safeName(projects.find((p) => p.id === id) || ({} as ProjectRow)))
+        .join(" + ");
+    setCombining(true);
+    try {
+      const res = await fetch("/api/projects/combine", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ sourceProjectIds: combineSelected, name }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.detail || data?.error || "Combine failed");
+      alert(
+        `Combined ${data.sourcesCombined} projects into "${data.projectName}".\n` +
+          `Reports: ${data.reportsCopied}, Photos: ${data.photosCopied}\n\n` +
+          `The original projects are untouched. Opening the combined project.`
+      );
+      setCombineOpen(false);
+      await load();
+      if (data.projectId) router.push(`/projects/${data.projectId}`);
+    } catch (e: any) {
+      alert(e?.message || "Failed to combine projects");
+    } finally {
+      setCombining(false);
+    }
   };
 
   const hydrateLastModifiedNames = async (rows: ProjectRow[]) => {
@@ -2509,6 +2561,14 @@ export default function ProjectsPage() {
             Bulk Import (Single Master File)
           </button>
 
+          <button
+            style={styles.btnGhost}
+            onClick={openCombine}
+            title="Join two or more projects into one new combined project"
+          >
+            🔗 Combine Projects
+          </button>
+
           <button style={styles.btnGhost} onClick={openBin}>
             🗑 Recycle Bin
           </button>
@@ -2845,6 +2905,120 @@ export default function ProjectsPage() {
                 disabled={savingEdit}
               >
                 {savingEdit ? "Saving..." : "Save Changes"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {combineOpen && (
+        <div
+          style={styles.modalOverlay}
+          onClick={() => {
+            if (!combining) setCombineOpen(false);
+          }}
+        >
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 4 }}>
+              🔗 Combine Projects
+            </div>
+            <div style={{ fontSize: 13, color: "#667085", marginBottom: 12, lineHeight: 1.5 }}>
+              Tick 2 or more projects <b>in the order you want them joined</b>. A new project is
+              created with all their reports &amp; photos renumbered as one sequence. The original
+              projects are <b>not changed</b>.
+            </div>
+
+            <div style={styles.formLabel}>Projects to combine</div>
+            <div
+              style={{
+                maxHeight: 260,
+                overflowY: "auto",
+                border: "1px solid #E4E7EC",
+                borderRadius: 10,
+                padding: 6,
+                marginBottom: 12,
+              }}
+            >
+              {projects.map((p) => {
+                const order = combineSelected.indexOf(p.id);
+                const checked = order >= 0;
+                return (
+                  <label
+                    key={p.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      padding: "8px 10px",
+                      borderRadius: 8,
+                      cursor: "pointer",
+                      background: checked ? "#EFF6FF" : "transparent",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleCombine(p.id)}
+                      disabled={combining}
+                    />
+                    {checked && (
+                      <span
+                        style={{
+                          background: "#111",
+                          color: "#fff",
+                          borderRadius: 999,
+                          minWidth: 20,
+                          height: 20,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: 12,
+                          fontWeight: 800,
+                        }}
+                      >
+                        {order + 1}
+                      </span>
+                    )}
+                    <span style={{ fontWeight: 600, color: "#111" }}>{safeName(p)}</span>
+                  </label>
+                );
+              })}
+              {!projects.length && (
+                <div style={{ padding: 10, color: "#98A2B3" }}>No projects to combine.</div>
+              )}
+            </div>
+
+            <div style={styles.formLabel}>New combined project name</div>
+            <input
+              style={styles.input as any}
+              value={combineName}
+              onChange={(e) => setCombineName(e.target.value)}
+              placeholder={
+                combineSelected.length
+                  ? combineSelected
+                      .map((id) => safeName(projects.find((p) => p.id === id) || ({} as ProjectRow)))
+                      .join(" + ")
+                  : "e.g. Full Route (Stage 1 + 2 + 3)"
+              }
+              disabled={combining}
+            />
+
+            <div style={styles.modalActions}>
+              <button
+                style={styles.btnGhost}
+                onClick={() => setCombineOpen(false)}
+                disabled={combining}
+              >
+                Cancel
+              </button>
+              <button
+                style={{ ...styles.btnPrimary, opacity: combining || combineSelected.length < 2 ? 0.6 : 1 }}
+                onClick={runCombine}
+                disabled={combining || combineSelected.length < 2}
+              >
+                {combining
+                  ? "Combining…"
+                  : `Combine ${combineSelected.length || ""} project${combineSelected.length === 1 ? "" : "s"}`}
               </button>
             </div>
           </div>
