@@ -1,5 +1,6 @@
 import "./globals.css";
 import AuthGate from "../components/AuthGate";
+import ToastHost from "../components/Toast";
 
 export const metadata = {
   title: "Tracker Web",
@@ -11,6 +12,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body>
         <AuthGate>{children}</AuthGate>
+        <ToastHost />
       </body>
     </html>
   );

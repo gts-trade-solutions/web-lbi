@@ -1,5 +1,6 @@
 "use client";
 
+import { toast } from "../../components/Toast";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -267,7 +268,7 @@ export default function ProjectReportsPage() {
       await fetchReports(q, sortDir, vmFilter);
       setSelected({});
     } catch (e: any) {
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setLoading(false);
     }
@@ -282,7 +283,7 @@ export default function ProjectReportsPage() {
       await updateReportVM(reportId, next);
     } catch (e: any) {
       await fetchReports(q, sortDir, vmFilter);
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setVmSaving((p) => ({ ...p, [reportId]: false }));
     }
@@ -304,7 +305,7 @@ export default function ProjectReportsPage() {
         await fetchReports(q, "asc", vmFilter);
         setSelected({});
       } catch (e: any) {
-        alert(e?.message || String(e));
+        toast(e?.message || String(e));
       } finally {
         setLoading(false);
       }
@@ -316,7 +317,7 @@ export default function ProjectReportsPage() {
     if (!projectId) return;
 
     const t = setTimeout(() => {
-      fetchReports(q, sortDir, vmFilter).catch((e: any) => alert(e?.message || String(e)));
+      fetchReports(q, sortDir, vmFilter).catch((e: any) => toast(e?.message || String(e)));
       setSelected({});
     }, 250);
 
@@ -436,7 +437,7 @@ export default function ProjectReportsPage() {
       // ✅ GA is set -> allow existing export flow
       openExportModal();
     } catch (e: any) {
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     }
   };
 
@@ -486,7 +487,7 @@ export default function ProjectReportsPage() {
     if (!projectId) return;
 
     if (exportMode === "selectedOne" && stats.selectedCount === 0) {
-      alert("Please select at least 1 report.");
+      toast("Please select at least 1 report.");
       return;
     }
 

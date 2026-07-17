@@ -1,5 +1,6 @@
 "use client";
 
+import { toast } from "../../components/Toast";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx";
@@ -1049,7 +1050,7 @@ export default function ProjectsPage() {
 
   const loadProjectReportsIntoGrid = async (projectIdArg?: string) => {
     const pid = projectIdArg || bulkProjectId;
-    if (!pid) return alert("Select a project first.");
+    if (!pid) return toast("Select a project first.");
     setGridLoading(true);
     try {
       const res = await fetch(
@@ -1063,7 +1064,7 @@ export default function ProjectsPage() {
         // Empty project: give a fresh grid ready for new reports.
         setGridRows(Array.from({ length: 10 }, () => emptyGridRow()));
         setEntryMode("grid");
-        alert("This project has no reports yet — the grid is ready for you to add new ones.");
+        toast("This project has no reports yet — the grid is ready for you to add new ones.");
         return;
       }
 
@@ -1087,7 +1088,7 @@ export default function ProjectsPage() {
       setGridRows(rows);
       setEntryMode("grid");
     } catch (e: any) {
-      alert(e?.message || "Failed to load reports");
+      toast(e?.message || "Failed to load reports");
     } finally {
       setGridLoading(false);
     }
@@ -1117,7 +1118,7 @@ export default function ProjectsPage() {
     const name = window.prompt("New project name:");
     if (name == null) return;
     const trimmed = name.trim();
-    if (!trimmed) return alert("Project name is required.");
+    if (!trimmed) return toast("Project name is required.");
     setGridLoading(true);
     try {
       const res = await fetch("/api/projects", {
@@ -1134,9 +1135,9 @@ export default function ProjectsPage() {
       setGridRows(Array.from({ length: 10 }, () => emptyGridRow()));
       setEntryMode("grid");
       setSummary(null);
-      alert(`Project "${trimmed}" created. Add its reports in the grid, then Run Import.`);
+      toast(`Project "${trimmed}" created. Add its reports in the grid, then Run Import.`);
     } catch (e: any) {
-      alert(e?.message || "Failed to create project");
+      toast(e?.message || "Failed to create project");
     } finally {
       setGridLoading(false);
     }
@@ -1164,7 +1165,7 @@ export default function ProjectsPage() {
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(data?.detail || data?.error || "Import failed");
       await load();
-      alert(
+      toast(
         `Imported "${data.projectName}"\n\n` +
           `Points: ${data.reportsCreated} (${data.withCoords} with GPS)\n` +
           `Photos: ${data.photosUploaded}` +
@@ -1173,7 +1174,7 @@ export default function ProjectsPage() {
       );
       if (data.projectId) router.push(`/projects/${data.projectId}`);
     } catch (e: any) {
-      alert(e?.message || "Failed to import the report");
+      toast(e?.message || "Failed to import the report");
     } finally {
       setImportingDocx(false);
     }
@@ -1231,7 +1232,7 @@ export default function ProjectsPage() {
   };
   const runCombine = async () => {
     if (combineSelected.length < 2) {
-      return alert("Pick at least 2 projects to combine (tick them in the order you want).");
+      return toast("Pick at least 2 projects to combine (tick them in the order you want).");
     }
     const name =
       combineName.trim() ||
@@ -1248,7 +1249,7 @@ export default function ProjectsPage() {
       });
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(data?.detail || data?.error || "Combine failed");
-      alert(
+      toast(
         `Combined ${data.sourcesCombined} projects into "${data.projectName}".\n` +
           `Reports: ${data.reportsCopied}, Photos: ${data.photosCopied}\n\n` +
           `The original projects are untouched. Opening the combined project.`
@@ -1257,7 +1258,7 @@ export default function ProjectsPage() {
       await load();
       if (data.projectId) router.push(`/projects/${data.projectId}`);
     } catch (e: any) {
-      alert(e?.message || "Failed to combine projects");
+      toast(e?.message || "Failed to combine projects");
     } finally {
       setCombining(false);
     }
@@ -1363,7 +1364,7 @@ export default function ProjectsPage() {
 
   const createProject = async () => {
     const name = newName.trim();
-    if (!name) return alert("Project name is required");
+    if (!name) return toast("Project name is required");
 
     try {
       setCreating(true);
@@ -1392,7 +1393,7 @@ export default function ProjectsPage() {
         redirectToLogin();
         return;
       }
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setCreating(false);
     }
@@ -1408,7 +1409,7 @@ export default function ProjectsPage() {
   const updateProject = async () => {
     const name = editName.trim();
     if (!editingProjectId) return;
-    if (!name) return alert("Project name is required");
+    if (!name) return toast("Project name is required");
 
     try {
       setSavingEdit(true);
@@ -1438,7 +1439,7 @@ export default function ProjectsPage() {
         redirectToLogin();
         return;
       }
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setSavingEdit(false);
     }
@@ -1467,14 +1468,14 @@ export default function ProjectsPage() {
       }
 
       await load();
-      alert("Project moved to Recycle Bin.");
+      toast("Project moved to Recycle Bin.");
     } catch (e: any) {
       const msg = String(e?.message || e || "").toLowerCase();
       if (msg.includes("auth") || msg.includes("session") || msg.includes("jwt")) {
         redirectToLogin();
         return;
       }
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setDeletingProjectId("");
     }
@@ -1543,7 +1544,7 @@ export default function ProjectsPage() {
         redirectToLogin();
         return;
       }
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setRestoringId("");
     }
@@ -1576,7 +1577,7 @@ export default function ProjectsPage() {
         redirectToLogin();
         return;
       }
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setPurgingId("");
     }
@@ -1717,7 +1718,7 @@ export default function ProjectsPage() {
 
   const downloadPreviewExcel = () => {
     if (!previewRows.length) {
-      alert("No preview data available.");
+      toast("No preview data available.");
       return;
     }
 
@@ -1771,7 +1772,7 @@ export default function ProjectsPage() {
       setMasterPreview("");
       setPreviewRows([]);
       setPreviewReady(false);
-      alert(err?.message || String(err));
+      toast(err?.message || String(err));
     }
   };
 
@@ -1782,10 +1783,10 @@ export default function ProjectsPage() {
   };
 
   const runImportSingleMaster = async () => {
-    if (!bulkProjectId) return alert("Select a project.");
-    if (entryMode === "file" && !masterFile) return alert("Select master file.");
+    if (!bulkProjectId) return toast("Select a project.");
+    if (entryMode === "file" && !masterFile) return toast("Select master file.");
     if (entryMode === "grid" && !parseGridRows(gridRows).length) {
-      return alert(
+      return toast(
         "Fill at least one grid row — a point number plus a coordinate, category, description, action or file name. (GPS is optional, so no-GPS points can be added/edited.)"
       );
     }
@@ -2531,7 +2532,7 @@ export default function ProjectsPage() {
         invalidCategories,
       });
 
-      alert(
+      toast(
         errors.length
           ? "Bulk import completed with some warnings/errors. Check summary."
           : "Bulk import completed."
@@ -2549,7 +2550,7 @@ export default function ProjectsPage() {
         redirectToLogin();
         return;
       }
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setImporting(false);
     }

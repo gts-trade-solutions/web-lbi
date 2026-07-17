@@ -1,5 +1,6 @@
 "use client";
 
+import { toast } from "../../../components/Toast";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../../lib/supabase";
 import type { Report, ReportPhoto, ReportPathPoint } from "@/types/db";
@@ -124,7 +125,7 @@ export default function ReportDetailPage({ params }: { params: { id: string } })
 
       setReport({ ...(report as any), vehicle_movement: value } as any);
     } catch (e: any) {
-      alert("Failed to save vehicle movement: " + (e?.message || String(e)));
+      toast("Failed to save vehicle movement: " + (e?.message || String(e)));
     } finally {
       setSavingVM(false);
     }
@@ -157,7 +158,7 @@ export default function ReportDetailPage({ params }: { params: { id: string } })
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e: any) {
-      alert("Word export error: " + (e?.message || String(e)));
+      toast("Word export error: " + (e?.message || String(e)));
     } finally {
       setExporting(false);
     }
@@ -278,7 +279,7 @@ export default function ReportDetailPage({ params }: { params: { id: string } })
 
       {/* Bottom actions */}
       {/* <div style={styles.bottomRow}>
-        <button style={styles.btnGhost} onClick={() => alert("GPX/KML/KMZ next step")}>
+        <button style={styles.btnGhost} onClick={() => toast("GPX/KML/KMZ next step")}>
           Export GPX/KML/KMZ
         </button>
         <button style={styles.btnGhost} onClick={() => history.back()}>

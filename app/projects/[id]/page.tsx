@@ -1,5 +1,6 @@
 "use client";
 
+import { toast } from "../../../components/Toast";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -748,7 +749,7 @@ export default function ProjectReportsPage() {
       await updateReportVM(reportId, next);
     } catch (e: any) {
       await fetchReports(q, sortDir, vmFilter);
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setVmSaving((p) => ({ ...p, [reportId]: false }));
     }
@@ -872,7 +873,7 @@ export default function ProjectReportsPage() {
       });
     } catch (e: any) {
       apply(next ? 0 : 1);
-      alert(e?.message || "Failed to save photo selection");
+      toast(e?.message || "Failed to save photo selection");
     } finally {
       setPhotoToggling((prev) => {
         const copy = { ...prev };
@@ -1036,7 +1037,7 @@ export default function ProjectReportsPage() {
         `${sanitizeFileBaseName(projectName)}-KM-Coordinates.xlsx`;
       downloadBlob(blob, fileName);
     } catch (e: any) {
-      alert("Excel export error: " + (e?.message || String(e)));
+      toast("Excel export error: " + (e?.message || String(e)));
     } finally {
       setXlsxLoading(false);
     }
@@ -1119,7 +1120,7 @@ export default function ProjectReportsPage() {
     if (!projectId) return;
 
     if (exportMode === "selectedOne" && stats.selectedCount === 0) {
-      alert("Please select at least 1 report.");
+      toast("Please select at least 1 report.");
       return;
     }
 
@@ -1367,7 +1368,7 @@ export default function ProjectReportsPage() {
   // ✅ open photo upload modal for exactly 1 selected report
   const openPhotoUpload = () => {
     if (stats.selectedCount !== 1) {
-      alert("Please select exactly 1 report to upload photos.");
+      toast("Please select exactly 1 report to upload photos.");
       return;
     }
     const rid = selectedIdsInOrder[0];
@@ -1673,7 +1674,7 @@ export default function ProjectReportsPage() {
                 await insertReportAfter(insertAfterId, p);
                 setInsertOpen(false);
               } catch (e: any) {
-                alert(e?.message || String(e));
+                toast(e?.message || String(e));
               }
             }}
           />
@@ -1839,7 +1840,7 @@ export default function ProjectReportsPage() {
                 await saveEditReport(p);
                 setEditOpen(false);
               } catch (e: any) {
-                alert(e?.message || String(e));
+                toast(e?.message || String(e));
               }
             }}
           />
@@ -1867,9 +1868,9 @@ export default function ProjectReportsPage() {
               try {
                 await saveManualPoints(manualPointsReportId, text);
                 closeManualPoints();
-                alert("Points saved.");
+                toast("Points saved.");
               } catch (e: any) {
-                alert(e?.message || String(e));
+                toast(e?.message || String(e));
               }
             }}
           />
@@ -3329,7 +3330,7 @@ function EditReportModal({
       if (!res.ok) throw new Error(data?.error || "Failed to remove photo");
       setPhotos((prev) => prev.filter((p) => p.id !== photoId));
     } catch (e: any) {
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setRemovingId("");
     }
@@ -3343,7 +3344,7 @@ function EditReportModal({
       await uploadReportPhotos(projectId, report.id, files);
       await loadPhotos();
     } catch (e: any) {
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setUploadingPhotos(false);
       if (photoInputRef.current) photoInputRef.current.value = "";
@@ -3693,7 +3694,7 @@ function PhotoUploadModal({
       setExisting((prev) =>
         prev.map((x) => (x.id === p.id ? { ...x, include_in_export: next ? 0 : 1 } : x))
       );
-      alert(e?.message || "Failed to save photo selection");
+      toast(e?.message || "Failed to save photo selection");
     } finally {
       setTogglingId(null);
     }
@@ -3714,7 +3715,7 @@ function PhotoUploadModal({
   const upload = async () => {
     if (!projectId) return;
     if (!files.length) {
-      alert("Please choose at least 1 photo.");
+      toast("Please choose at least 1 photo.");
       return;
     }
 
@@ -3723,7 +3724,7 @@ function PhotoUploadModal({
       await uploadReportPhotos(projectId, reportId, files);
       await onUploaded();
     } catch (e: any) {
-      alert(e?.message || String(e));
+      toast(e?.message || String(e));
     } finally {
       setSaving(false);
     }
