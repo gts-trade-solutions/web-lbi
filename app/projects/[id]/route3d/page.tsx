@@ -26,8 +26,13 @@ const INDIAN_STATES = new Set([
 
 // Short place name from a resolved-location string ("Alandur, Chennai, TN" -> "Alandur").
 function placeName(value: unknown): string {
-  const t = String(value ?? "").trim();
+  let t = String(value ?? "").trim();
   if (!t) return "";
+  // Old imported survey reports label the place cell as "Location - <name>"
+  // (e.g. "Location – Ekalaghogra"); strip that leading label so the card
+  // shows the place only. Requires a dash/colon so real names like
+  // "Location Road" are left untouched.
+  t = t.replace(/^location\s*[-–—:]+\s*/i, "").trim();
   const parts = t.split(",").map((x) => x.trim()).filter(Boolean);
   if (parts.length <= 2 && parts.every((p) => /^-?\d+(\.\d+)?$/.test(p))) return "";
   return parts[0] || "";
