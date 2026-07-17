@@ -682,6 +682,27 @@ function descriptionTemplatesFor(category: string): string[] {
   return Object.values(DESCRIPTION_TEMPLATES).flat();
 }
 
+// Every known template string (trimmed) — used to tell "still a default
+// template" apart from a description the operator actually typed.
+const ALL_DESCRIPTION_TEMPLATES = new Set(
+  Object.values(DESCRIPTION_TEMPLATES)
+    .flat()
+    .map((s) => s.trim())
+);
+
+// When a row's category is set/changed, auto-fill the description with that
+// category's standard template — but ONLY if the operator hasn't typed their
+// own description yet (cell is empty, or still holds a known template). This
+// never overwrites a real, edited description.
+function descriptionForCategory(currentDescription: string, category: string): string {
+  const cur = String(currentDescription || "").trim();
+  const stillDefault = cur === "" || ALL_DESCRIPTION_TEMPLATES.has(cur);
+  if (!stillDefault) return currentDescription;
+  const key = normalizeCategoryName(String(category || "")).toLowerCase().trim();
+  const exact = DESCRIPTION_TEMPLATES[key];
+  return exact && exact.length ? exact[0] : currentDescription;
+}
+
 // localStorage key for the web-grid draft (auto-saved while typing).
 const GRID_DRAFT_KEY = "bulk_grid_draft_v1";
 
@@ -3447,7 +3468,21 @@ function BulkExcelGrid({
   const validCount = parseGridRows(rows).length;
 
   const setCell = (rowIdx: number, key: keyof BulkGridRow, value: string) => {
-    setRows((prev) => prev.map((r, i) => (i === rowIdx ? { ...r, [key]: value } : r)));
+    setRows((prev) =>
+      prev.map((r, i) => {
+        if (i !== rowIdx) return r;
+        // Setting the category auto-fills the standard description for it
+        // (unless the operator has already typed their own description).
+        if (key === "category") {
+          return {
+            ...r,
+            category: value,
+            description: descriptionForCategory(r.description, value),
+          };
+        }
+        return { ...r, [key]: value };
+      })
+    );
   };
 
   // Paste straight from Excel: a multi-cell clipboard (tabs/newlines) fills
