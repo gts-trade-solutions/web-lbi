@@ -153,6 +153,34 @@ export default function RouteMapPage() {
   const [shareLink, setShareLink] = useState<string>("");
   const [shareCopied, setShareCopied] = useState(false);
 
+  // Fetch road-following geometry for a batch of stops via our server proxy
+  // (OpenRouteService). Sends the auth header when logged in, or the share
+  // session + token in a client's share view. Returns null on any failure so
+  // the caller can fall back to a straight segment.
+  const fetchRoadPath = async (
+    coords: Array<{ lat: number; lng: number }>
+  ): Promise<Array<{ lat: number; lng: number }> | null> => {
+    try {
+      const res = await fetch("/api/route-directions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(isShare ? { "X-Share-Session": shareSession } : authHeaders()),
+        },
+        ...(isShare ? {} : { credentials: "include" as RequestCredentials }),
+        body: JSON.stringify({
+          coordinates: coords.map((c) => [c.lat, c.lng]),
+          token: isShare ? shareToken : undefined,
+        }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      return Array.isArray(data?.path) && data.path.length >= 2 ? data.path : null;
+    } catch {
+      return null;
+    }
+  };
+
   const [points, setPoints] = useState<ReportPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -768,20 +796,16 @@ export default function RouteMapPage() {
           routeLinesRef,
           (p) => {
             routePathRef.current = p;
-          }
+          },
+          fetchRoadPath
         );
 
         if (cancelled) return;
-        // Tell the user WHY the route is straight, when it is — the common
-        // cause is the Directions API not being enabled on the Maps key.
+        // Explain a straight route when it happens. Roads come from Google when
+        // its billing is on, otherwise from the free OpenRouteService proxy.
         if (!routeInfo.road) {
-          const denied = /REQUEST_DENIED|LIBRARY|NOT_FOUND/i.test(routeInfo.status);
           setRouteHint(
-            denied
-              ? "Showing a straight route — road directions are unavailable. Enable the “Directions API” (and billing) for your Google Maps key, and allow it in the key’s API restrictions."
-              : routeInfo.status === "ZERO_RESULTS"
-                ? "Showing a straight route — Google couldn’t find a drivable road between some points."
-                : "Showing a straight route — couldn’t reach Google Directions just now. Try reloading."
+            "Showing a straight route — road directions aren’t available yet. Add your free OpenRouteService key (ORS_API_KEY) on the server to follow roads, or enable Google billing."
           );
         } else if (routeInfo.straight) {
           setRouteHint("Most of the route follows roads; a few sections with no drivable road are shown straight.");
@@ -1353,7 +1377,37 @@ type RouteBuild = {
   road: boolean; // did ANY section follow real roads?
   straight: boolean; // did ANY section fall back to a straight line?
   status: string; // last non-OK Directions status (for a user hint)
+  via: "google" | "ors" | "straight"; // where the road geometry came from
 };
+
+// ORS free plan caps a directions request at 50 stops.
+const ORS_MAX = 50;
+
+// Build a road path from the free OpenRouteService proxy, in batches of up to
+// ORS_MAX stops (overlapping by one so segments join). Any batch that fails
+// falls back to a straight segment through its own points.
+async function orsRoute(
+  points: ReportPoint[],
+  fetchRoad: (coords: Array<{ lat: number; lng: number }>) => Promise<Array<{ lat: number; lng: number }> | null>
+): Promise<{ path: Array<{ lat: number; lng: number }>; road: boolean; straight: boolean }> {
+  const path: Array<{ lat: number; lng: number }> = [];
+  let road = false;
+  let straight = false;
+  for (let start = 0; start < points.length - 1; start += ORS_MAX - 1) {
+    const batch = points.slice(start, start + ORS_MAX);
+    if (batch.length < 2) break;
+    // eslint-disable-next-line no-await-in-loop
+    const seg = await fetchRoad(batch.map((p) => ({ lat: p.lat, lng: p.lng })));
+    if (seg && seg.length >= 2) {
+      for (const c of seg) path.push(c);
+      road = true;
+    } else {
+      for (const p of batch) path.push({ lat: p.lat, lng: p.lng });
+      straight = true;
+    }
+  }
+  return { path, road, straight };
+}
 
 // Ask Directions for ONE batch, retrying transient failures and shrinking the
 // batch if it has too many waypoints. Returns the road path or null.
@@ -1421,17 +1475,21 @@ async function drawRoute(
   map: any,
   points: ReportPoint[],
   store?: { current: any[] },
-  onPath?: (path: any[]) => void
+  onPath?: (path: any[]) => void,
+  fetchRoad?: (
+    coords: Array<{ lat: number; lng: number }>
+  ) => Promise<Array<{ lat: number; lng: number }> | null>
 ): Promise<RouteBuild> {
-  const build: RouteBuild = { road: false, straight: false, status: "" };
+  const build: RouteBuild = { road: false, straight: false, status: "", via: "straight" };
   if (points.length < 2) return build;
 
-  const fullPath: any[] = [];
+  let fullPath: any[] = [];
   const pushStraight = (batch: ReportPoint[]) => {
     for (const p of batch) fullPath.push({ lat: p.lat, lng: p.lng });
     build.straight = true;
   };
 
+  // 1) Prefer Google Directions (only works when the key has billing on).
   try {
     await g.maps.importLibrary("routes");
     const service = new g.maps.DirectionsService();
@@ -1448,6 +1506,7 @@ async function drawRoute(
       if (road && road.length >= 2) {
         for (const ll of road) fullPath.push(ll);
         build.road = true;
+        build.via = "google";
       } else {
         pushStraight(batch); // this section only
       }
@@ -1458,12 +1517,28 @@ async function drawRoute(
     fullPath.length = 0;
   }
 
-  // Nothing usable at all -> straight through every point.
+  // 2) Google gave no roads (billing off / denied) -> free OpenRouteService.
+  if (!build.road && fetchRoad) {
+    try {
+      const ors = await orsRoute(points, fetchRoad);
+      if (ors.road) {
+        fullPath = ors.path;
+        build.road = true;
+        build.straight = ors.straight;
+        build.via = "ors";
+      }
+    } catch (e) {
+      console.warn("[routemap] ORS routing failed:", e);
+    }
+  }
+
+  // 3) Nothing usable at all -> straight through every point.
   if (fullPath.length < 2) {
     fullPath.length = 0;
     for (const p of points) fullPath.push({ lat: p.lat, lng: p.lng });
     build.road = false;
     build.straight = true;
+    build.via = "straight";
   }
 
   // Ensure SymbolPath (for the arrows) is loaded; ignore if unavailable.
