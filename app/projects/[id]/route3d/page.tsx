@@ -215,16 +215,28 @@ export default function RouteMapPage() {
     activeTourRef.current = mode;
     playingRef.current = true;
     setPlaying(true);
+    // Announce where the tour starts and ends so the direction is clear.
+    const nameOf = (idx: number) =>
+      points[idx]?.location || points[idx]?.category || `Point ${idx + 1}`;
+    if (mode === "report") {
+      setBanner(`▶ Start: ${nameOf(indices[0])}   →   End: ${nameOf(indices[indices.length - 1])}`);
+    }
     let k = from < 0 ? 0 : from;
     const step = () => {
       if (!playingRef.current) return;
       fn(indices[k]);
       k += 1;
       if (k >= indices.length) {
+        // Reached the end — STOP (no looping; auto-replay was confusing). Let
+        // the last point dwell, then mark the tour complete.
         animTimerRef.current = setTimeout(() => {
           if (!playingRef.current) return;
-          k = 0;
-          step();
+          playingRef.current = false;
+          setPlaying(false);
+          activeTourRef.current = null;
+          setBanner(
+            `🏁 Tour complete — reached the end at ${nameOf(indices[indices.length - 1])}. Press ▶ to replay.`
+          );
         }, SECONDS_PER_POINT * 1000);
         return;
       }
@@ -409,7 +421,10 @@ export default function RouteMapPage() {
     }
     const idxs = allIndices();
     if (!idxs.length) return;
-    const start = current < 0 ? 0 : current;
+    // Resume from the current point, but if the tour already finished (we're at
+    // or past the last point), replay from the start instead of the end.
+    let start = current < 0 ? 0 : current;
+    if (start >= idxs.length - 1) start = 0;
     const firstPt = points[idxs[start]] ?? points[idxs[0]];
     if (!firstPt) {
       runTour(idxs, "report", start);
@@ -653,12 +668,32 @@ export default function RouteMapPage() {
 
         // Numbered markers.
         markersRef.current = points.map((p, i) => {
-          const marker = new g.maps.Marker({
+          const isStart = i === 0;
+          const isEnd = i === points.length - 1;
+          const opts: any = {
             position: { lat: p.lat, lng: p.lng },
             map,
             label: { text: String(p.n), color: "#fff", fontWeight: "800", fontSize: "12px" },
-            title: p.category,
-          });
+            title: isStart
+              ? `START — ${p.category}`
+              : isEnd
+                ? `END — ${p.category}`
+                : p.category,
+          };
+          // Mark the route's start (green) and end (red) with a distinct
+          // coloured circle so it's obvious where the tour begins and finishes.
+          if (isStart || isEnd) {
+            opts.icon = {
+              path: g.maps.SymbolPath.CIRCLE,
+              scale: 13,
+              fillColor: isStart ? "#16a34a" : "#dc2626",
+              fillOpacity: 1,
+              strokeColor: "#ffffff",
+              strokeWeight: 3,
+            };
+            opts.zIndex = 1000;
+          }
+          const marker = new g.maps.Marker(opts);
           marker.addListener("click", () => {
             stopAnim();
             focus(i);
