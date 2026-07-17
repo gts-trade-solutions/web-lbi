@@ -345,6 +345,7 @@ async function fetchProjectExportDocx(params: {
   reportIds?: string[];
   includePhotos?: boolean;
   fileName?: string;
+  sort?: "asc" | "desc";
 }): Promise<ExportDocxResult> {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
@@ -371,6 +372,7 @@ async function fetchProjectExportDocx(params: {
       if (params.fileName?.trim()) {
         sp.set("fileName", params.fileName.trim());
       }
+      if (params.sort) sp.set("sort", params.sort);
       const suffix = sp.toString() ? `?${sp.toString()}` : "";
       res = await fetch(`${exportUrl}${suffix}`, {
         method: "GET",
@@ -392,6 +394,7 @@ async function fetchProjectExportDocx(params: {
           reportIds: params.reportIds,
           includePhotos: params.includePhotos,
           fileName: params.fileName?.trim() || undefined,
+          sort: params.sort,
         }),
       });
     }
@@ -1188,6 +1191,7 @@ export default function ProjectReportsPage() {
           projectId,
           includePhotos,
           fileName,
+          sort: sortDir,
         });
         setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
         setDlDone(true);
@@ -1207,6 +1211,7 @@ export default function ProjectReportsPage() {
           reportIds: ids,
           includePhotos,
           fileName,
+          sort: sortDir,
         });
 
         setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
@@ -1223,6 +1228,7 @@ export default function ProjectReportsPage() {
           reportIds: ids,
           includePhotos,
           fileName,
+          sort: sortDir,
         });
 
         setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
@@ -1251,6 +1257,7 @@ export default function ProjectReportsPage() {
             reportIds: subset,
             includePhotos,
             fileName,
+            sort: sortDir,
           });
 
           files.push({ fileName: serverFileName || fileName, blob, downloadUrl });

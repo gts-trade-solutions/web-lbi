@@ -275,6 +275,7 @@ export async function GET(request: Request, context: Ctx) {
     reportIds: normalizeReportIds(url.searchParams.get("reportIds") || ""),
     includePhotos: String(url.searchParams.get("includePhotos") || "1") !== "0",
     requestedFileName: String(url.searchParams.get("fileName") || "").trim(),
+    sort: url.searchParams.get("sort") === "desc" ? "desc" : "asc",
   });
 }
 
@@ -288,8 +289,9 @@ async function renderAndRespond(args: {
   reportIds: string[];
   includePhotos: boolean;
   requestedFileName: string;
+  sort?: "asc" | "desc";
 }) {
-  const { projectId, reportIds, includePhotos, requestedFileName } = args;
+  const { projectId, reportIds, includePhotos, requestedFileName, sort } = args;
   let stage: string = "started";
   try {
     console.log("[export stage] started", {
@@ -311,6 +313,7 @@ async function renderAndRespond(args: {
       projectId,
       reportIds: reportIds.length ? reportIds : undefined,
       includePhotos,
+      sort,
     });
 
     stage = "respond";
@@ -434,6 +437,7 @@ export async function POST(request: Request, context: Ctx) {
     : [];
   const includePhotos = body.includePhotos !== false;
   const requestedFileName = String(body.fileName || "").trim();
+  const sort = body.sort === "desc" ? "desc" : "asc";
 
-  return renderAndRespond({ projectId, reportIds, includePhotos, requestedFileName });
+  return renderAndRespond({ projectId, reportIds, includePhotos, requestedFileName, sort });
 }

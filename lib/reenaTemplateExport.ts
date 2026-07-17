@@ -831,6 +831,9 @@ export type ExportOptions = {
   reportIds?: string[];
   includePhotos?: boolean;
   debug?: boolean;
+  // Report order in the document. "desc" reverses the route (and the
+  // cumulative KMs recompute for that direction). Defaults to "asc".
+  sort?: "asc" | "desc";
 };
 
 export type ExportResult = {
@@ -2846,12 +2849,15 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // ----- Step 3: Reports.
   let reports: Row[] = [];
   try {
+    // Honour the requested direction so the DOCX matches the on-screen sort.
+    const dir = options.sort === "desc" ? "DESC" : "ASC";
+    const orderBy = `ORDER BY sort_order ${dir}, created_at ${dir}`;
     const reportSql =
       reportIdsFilter.length > 0
         ? `SELECT * FROM reports WHERE project_id = ? AND id IN (${reportIdsFilter
             .map(() => "?")
-            .join(",")}) ORDER BY sort_order ASC, created_at ASC`
-        : "SELECT * FROM reports WHERE project_id = ? ORDER BY sort_order ASC, created_at ASC";
+            .join(",")}) ${orderBy}`
+        : `SELECT * FROM reports WHERE project_id = ? ${orderBy}`;
     const reportArgs = reportIdsFilter.length ? [projectId, ...reportIdsFilter] : [projectId];
     reports = await safeQuery(reportSql, reportArgs);
   } catch (err) {
