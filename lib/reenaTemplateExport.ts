@@ -1,7 +1,7 @@
 import path from "path";
 import crypto from "crypto";
 import { deflateSync } from "zlib";
-import { promises as fs } from "fs";
+import { promises as fs, existsSync } from "fs";
 import PizZip from "pizzip";
 import Docxtemplater from "docxtemplater";
 import pool from "./db";
@@ -1818,8 +1818,12 @@ function findSimilarIcon(rawCategory: unknown): string | null {
 
 function getCategoryIconFile(category: unknown): string {
   const key = normalizeCategoryKey(category);
-  // 1. Canonical category with a real mapping → use it.
-  if (key !== "fallback" && CATEGORY_ICON_MAP[key]) {
+  // 1. Canonical category with a real mapping → use it, but ONLY if the file
+  //    actually exists. Some icons (e.g. flyover.png / service_road.png) are
+  //    mapped but may not be deployed; without this check the loader returned
+  //    a dead path and showed the fallback triangle. If missing, fall through
+  //    to a similar existing icon (step 2) / an auto-generated one (step 3).
+  if (key !== "fallback" && CATEGORY_ICON_MAP[key] && existsSync(path.join(process.cwd(), CATEGORY_ICON_MAP[key]))) {
     const rel = CATEGORY_ICON_MAP[key];
     console.log("[category mapping check]", {
       rawCategory: category,
@@ -1828,6 +1832,9 @@ function getCategoryIconFile(category: unknown): string {
       source: "canonical",
     });
     return rel.replace(/^public[\\/]images[\\/]report-icons[\\/]/, "");
+  }
+  if (key !== "fallback" && CATEGORY_ICON_MAP[key]) {
+    console.warn("[category icon] mapped file missing, using similar/auto icon:", CATEGORY_ICON_MAP[key]);
   }
   // 2. Try keyword-based similarity matching against existing icons.
   //    "Road Damage" → narrow_road.png, "Flyover" → bridge.png, etc.
