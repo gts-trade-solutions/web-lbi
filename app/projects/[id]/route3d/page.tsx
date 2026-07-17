@@ -745,7 +745,9 @@ export default function RouteMapPage() {
             // Small downward shift so the name box isn't clipped at the top.
             map.panBy(0, -60);
           }
-          const name = p.location || p.category || "Location";
+          // Show the real place name; if a point has none, fall back to its
+          // category, then a neutral "Stop N" — never the bare word "Location".
+          const name = p.location || p.category || `Stop ${p.n}`;
           // Render the popup as a flowchart-style box: coloured rounded card
           // with a numbered white circle + the place name in white. Colour +
           // number come from the SAME per-city scheme as the flowchart, so each
@@ -1669,6 +1671,8 @@ function LocationsFlow({
   onComplete: () => void;
 }) {
   const doneRef = useRef(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
   // Distinct main locations (collapse consecutive same place names).
   const locs = useMemo(() => {
     const out: Array<{ label: string; state: string }> = [];
@@ -1718,6 +1722,21 @@ function LocationsFlow({
     return () => clearTimeout(t);
   }, [revealed, cells.length]);
 
+  // Crawl: auto-scroll the flowchart so the card being revealed stays in view
+  // (keeps the "moving" chart following itself down the page for long routes).
+  useEffect(() => {
+    const cont = scrollRef.current;
+    const svg = svgRef.current;
+    if (!cont || !svg) return;
+    const idx = Math.min(revealed - 1, cells.length - 1);
+    const currentRow = Math.floor(idx / perRow);
+    const scale = (svg.clientWidth || W) / W; // rendered px per viewBox unit
+    const rowCenter = (rowTop(currentRow) + BOX_H / 2) * scale;
+    const target = rowCenter - cont.clientHeight / 2;
+    cont.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealed]);
+
   // When the whole flowchart has been revealed, hand off to the map tour.
   useEffect(() => {
     if (revealed >= cells.length && !doneRef.current) {
@@ -1746,8 +1765,8 @@ function LocationsFlow({
           ⟲ Replay
         </button>
       </div>
-      <div style={styles.flowScroll}>
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: W, display: "block", margin: "0 auto" }}>
+      <div style={styles.flowScroll} ref={scrollRef}>
+        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: W, display: "block", margin: "0 auto" }}>
           <defs>
             <marker id="fa" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto" markerUnits="userSpaceOnUse">
               <path d="M0,0 L6,3 L0,6 Z" fill={LINE} />
