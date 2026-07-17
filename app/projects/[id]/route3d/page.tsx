@@ -157,6 +157,7 @@ export default function RouteMapPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
+  const [routeHint, setRouteHint] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [current, setCurrent] = useState<number>(-1);
   const [playing, setPlaying] = useState(false);
@@ -760,7 +761,7 @@ export default function RouteMapPage() {
         // possible. Store g/path/lines so the line can be redrawn slowly
         // during the Locations tour.
         gRef.current = g;
-        await drawRoute(
+        const routeInfo = await drawRoute(
           g,
           map,
           points,
@@ -771,6 +772,22 @@ export default function RouteMapPage() {
         );
 
         if (cancelled) return;
+        // Tell the user WHY the route is straight, when it is — the common
+        // cause is the Directions API not being enabled on the Maps key.
+        if (!routeInfo.road) {
+          const denied = /REQUEST_DENIED|LIBRARY|NOT_FOUND/i.test(routeInfo.status);
+          setRouteHint(
+            denied
+              ? "Showing a straight route — road directions are unavailable. Enable the “Directions API” (and billing) for your Google Maps key, and allow it in the key’s API restrictions."
+              : routeInfo.status === "ZERO_RESULTS"
+                ? "Showing a straight route — Google couldn’t find a drivable road between some points."
+                : "Showing a straight route — couldn’t reach Google Directions just now. Try reloading."
+          );
+        } else if (routeInfo.straight) {
+          setRouteHint("Most of the route follows roads; a few sections with no drivable road are shown straight.");
+        } else {
+          setRouteHint(null);
+        }
         setReady(true);
       } catch (e: any) {
         console.error("[routemap] init failed:", e);
@@ -912,6 +929,19 @@ export default function RouteMapPage() {
 
           {ready && banner ? (
             <div style={styles.banner}>{banner}</div>
+          ) : null}
+
+          {ready && routeHint ? (
+            <div style={styles.routeHint}>
+              <span style={{ flex: 1, lineHeight: 1.35 }}>🛣️ {routeHint}</span>
+              <button
+                style={styles.routeHintClose}
+                onClick={() => setRouteHint(null)}
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            </div>
           ) : null}
 
           {ready && (
@@ -1319,63 +1349,121 @@ function animateLineDraw(
   requestAnimationFrame(tick);
 }
 
-// Draw a road-following route (Directions) through the points in batches of
-// up to 25, then animate it drawing start->end. Falls back to a straight
-// polyline through the points on failure.
+type RouteBuild = {
+  road: boolean; // did ANY section follow real roads?
+  straight: boolean; // did ANY section fall back to a straight line?
+  status: string; // last non-OK Directions status (for a user hint)
+};
+
+// Ask Directions for ONE batch, retrying transient failures and shrinking the
+// batch if it has too many waypoints. Returns the road path or null.
+async function routeBatch(
+  g: any,
+  service: any,
+  batch: ReportPoint[],
+  onStatus: (s: string) => void,
+  depth = 0
+): Promise<any[] | null> {
+  if (batch.length < 2) return null;
+  const origin = { lat: batch[0].lat, lng: batch[0].lng };
+  const destination = { lat: batch[batch.length - 1].lat, lng: batch[batch.length - 1].lng };
+  const waypoints = batch.slice(1, -1).map((p) => ({
+    location: { lat: p.lat, lng: p.lng },
+    stopover: true,
+  }));
+
+  const attempt = (): Promise<{ ok: boolean; res?: any; status?: string }> =>
+    new Promise((resolve) => {
+      let tries = 0;
+      const go = () => {
+        service.route(
+          { origin, destination, waypoints, travelMode: g.maps.TravelMode.DRIVING },
+          (res: any, status: string) => {
+            if (status === "OK" && res) return resolve({ ok: true, res });
+            // Transient — back off and retry a few times.
+            if ((status === "OVER_QUERY_LIMIT" || status === "UNKNOWN_ERROR") && tries < 3) {
+              tries += 1;
+              setTimeout(go, 500 * tries);
+              return;
+            }
+            resolve({ ok: false, status });
+          }
+        );
+      };
+      go();
+    });
+
+  const r = await attempt();
+  if (r.ok) {
+    const overview = r.res?.routes?.[0]?.overview_path || [];
+    return overview.length >= 2 ? overview : null;
+  }
+  onStatus(r.status || "UNKNOWN");
+
+  // Too many stops for this account/plan — split the batch and try each half.
+  if (r.status === "MAX_WAYPOINTS_EXCEEDED" && batch.length > 2 && depth < 4) {
+    const mid = Math.ceil(batch.length / 2);
+    const left = await routeBatch(g, service, batch.slice(0, mid + 1), onStatus, depth + 1);
+    const right = await routeBatch(g, service, batch.slice(mid), onStatus, depth + 1);
+    if (left || right) {
+      return [...(left || batch.slice(0, mid + 1).map((p) => ({ lat: p.lat, lng: p.lng }))), ...(right || [])];
+    }
+  }
+  return null;
+}
+
+// Draw a road-following route (Directions) through the points in batches, then
+// animate it drawing start->end. Each batch falls back to a STRAIGHT segment on
+// its own if roads can't be fetched, so one bad section never wipes out
+// road-following for the whole route.
 async function drawRoute(
   g: any,
   map: any,
   points: ReportPoint[],
   store?: { current: any[] },
   onPath?: (path: any[]) => void
-) {
-  if (points.length < 2) return;
+): Promise<RouteBuild> {
+  const build: RouteBuild = { road: false, straight: false, status: "" };
+  if (points.length < 2) return build;
 
-  // Try to build the full road-following path from Directions.
   const fullPath: any[] = [];
+  const pushStraight = (batch: ReportPoint[]) => {
+    for (const p of batch) fullPath.push({ lat: p.lat, lng: p.lng });
+    build.straight = true;
+  };
+
   try {
     await g.maps.importLibrary("routes");
     const service = new g.maps.DirectionsService();
-    const BATCH = 25; // Directions allows ~25 stops incl. origin+destination
+    const BATCH = 25; // stops per request (origin + up to 23 waypoints + destination)
+    const onStatus = (s: string) => {
+      build.status = s;
+    };
 
     for (let start = 0; start < points.length - 1; start += BATCH - 1) {
       const batch = points.slice(start, start + BATCH);
       if (batch.length < 2) break;
-      const origin = batch[0];
-      const destination = batch[batch.length - 1];
-      const waypoints = batch.slice(1, -1).map((p) => ({
-        location: { lat: p.lat, lng: p.lng },
-        stopover: true,
-      }));
-
       // eslint-disable-next-line no-await-in-loop
-      const result = await new Promise<any>((resolve, reject) => {
-        service.route(
-          {
-            origin: { lat: origin.lat, lng: origin.lng },
-            destination: { lat: destination.lat, lng: destination.lng },
-            waypoints,
-            travelMode: g.maps.TravelMode.DRIVING,
-          },
-          (res: any, status: string) => {
-            if (status === "OK" && res) resolve(res);
-            else reject(new Error("Directions status: " + status));
-          }
-        );
-      });
-
-      const overview = result?.routes?.[0]?.overview_path || [];
-      for (const ll of overview) fullPath.push(ll);
+      const road = await routeBatch(g, service, batch, onStatus);
+      if (road && road.length >= 2) {
+        for (const ll of road) fullPath.push(ll);
+        build.road = true;
+      } else {
+        pushStraight(batch); // this section only
+      }
     }
   } catch (e) {
-    console.warn("[routemap] directions failed, using straight polyline:", e);
+    console.warn("[routemap] directions unavailable:", e);
+    if (!build.status) build.status = "LIBRARY";
     fullPath.length = 0;
   }
 
-  // Fallback: straight segments through the raw points.
+  // Nothing usable at all -> straight through every point.
   if (fullPath.length < 2) {
     fullPath.length = 0;
     for (const p of points) fullPath.push({ lat: p.lat, lng: p.lng });
+    build.road = false;
+    build.straight = true;
   }
 
   // Ensure SymbolPath (for the arrows) is loaded; ignore if unavailable.
@@ -1392,6 +1480,8 @@ async function drawRoute(
   } catch (e) {
     console.warn("[routemap] line animation failed:", e);
   }
+
+  return build;
 }
 
 function escapeHtml(s: string): string {
@@ -1659,6 +1749,34 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     cursor: "pointer",
     whiteSpace: "nowrap",
+  },
+  routeHint: {
+    position: "absolute",
+    left: 12,
+    bottom: 12,
+    maxWidth: 420,
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 8,
+    background: "rgba(15,23,42,0.92)",
+    color: "#fde68a",
+    border: "1px solid #a16207",
+    borderRadius: 10,
+    padding: "9px 12px",
+    fontSize: 12.5,
+    fontWeight: 600,
+    zIndex: 40,
+    boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+  },
+  routeHintClose: {
+    background: "transparent",
+    border: "none",
+    color: "#fde68a",
+    cursor: "pointer",
+    fontWeight: 900,
+    fontSize: 13,
+    lineHeight: 1,
+    padding: 2,
   },
   modalOverlay: {
     position: "fixed",
