@@ -651,7 +651,7 @@ export default function RouteMapPage() {
     // onerror hides the image if the URL is broken — otherwise a blank
     // 150px white box is left at the bottom of the popup.
     const img = photoUrl
-      ? `<img src="${photoUrl}" onclick="window.__route3dLightbox && window.__route3dLightbox('${photoUrl}','${p.id}')" onerror="this.style.display='none'" title="Click to enlarge" style="width:100%;max-width:260px;height:150px;object-fit:cover;border-radius:8px;margin-top:6px;cursor:zoom-in;background:#f1f5f9"/>`
+      ? `<img src="${photoUrl}" onclick="window.__route3dLightbox && window.__route3dLightbox('${photoUrl}','${p.id}')" onerror="this.style.display='none'" title="Click to enlarge" style="width:100%;max-width:260px;height:150px;object-fit:cover;border-radius:8px;margin-top:6px;cursor:pointer;background:#f1f5f9"/>`
       : "";
     return `
       <div style="font-family:system-ui,Segoe UI,Arial;max-width:280px">

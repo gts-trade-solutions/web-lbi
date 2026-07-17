@@ -2504,7 +2504,7 @@ export default function ProjectReportsPage() {
                                             width: "100%",
                                             height: "100%",
                                             objectFit: "cover",
-                                            cursor: "zoom-in",
+                                            cursor: "pointer",
                                             display: "block",
                                             background: "#F2F4F7",
                                           }}
