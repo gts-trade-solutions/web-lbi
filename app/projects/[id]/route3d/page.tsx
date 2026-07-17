@@ -649,13 +649,10 @@ export default function RouteMapPage() {
           }
           const name = p.location || p.category || "Location";
           // Render the popup as a flowchart-style box: coloured rounded card
-          // with a numbered white circle + the place name in white.
-          const stops = locationIndices();
-          const pos = stops.indexOf(i);
-          const num = pos >= 0 ? pos + 1 : i + 1;
-          const hue = stops.length > 1 && pos >= 0 ? 210 + (pos / (stops.length - 1)) * 300 : 210;
-          const fill = flowHsl(hue, 62, 58);
-          const border = flowHsl(hue, 62, 38);
+          // with a numbered white circle + the place name in white. Colour +
+          // number come from the SAME per-city scheme as the flowchart, so each
+          // city shows its one matching colour.
+          const { fill, border, num } = cityInfoForPoint(points, i);
           info.setContent(
             `<div style="display:flex;gap:10px;align-items:center;background:${fill};border:2px solid ${border};padding:10px 16px;border-radius:14px;font-family:system-ui,Segoe UI,Arial;white-space:nowrap;line-height:1.1">
                <span style="background:#fff;color:${border};width:26px;height:26px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:13px">${num}</span>
@@ -1218,6 +1215,43 @@ function flowHsl(h: number, s: number, l: number): string {
   else if (h < 300) [r, g, b] = [x, 0, c]; else [r, g, b] = [c, 0, x];
   const t = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
   return `#${t(r)}${t(g)}${t(b)}`;
+}
+
+// Per-city colour + number, matching the flowchart EXACTLY. "Cities" are
+// consecutive-unique locations; the hue is spread 210..510 across the cities
+// and rendered with flowHsl(58,60) fill / flowHsl(58,40) border. So a point's
+// "Play on map" box gets the SAME one colour its city has in the flowchart.
+function cityInfoForPoint(
+  pts: Array<{ location?: string | null }>,
+  i: number
+): { fill: string; border: string; num: number } {
+  let total = 0;
+  let last = "";
+  for (const q of pts) {
+    if (!q?.location) continue;
+    const k = q.location.toLowerCase();
+    if (k !== last) {
+      total++;
+      last = k;
+    }
+  }
+  let cityIdx = -1;
+  last = "";
+  for (let j = 0; j <= i && j < pts.length; j++) {
+    const q = pts[j];
+    if (!q?.location) continue;
+    const k = q.location.toLowerCase();
+    if (k !== last) {
+      cityIdx++;
+      last = k;
+    }
+  }
+  const hue = 210 + (total > 1 && cityIdx >= 0 ? (cityIdx / (total - 1)) * 300 : 0);
+  return {
+    fill: flowHsl(hue, 58, 60),
+    border: flowHsl(hue, 58, 40),
+    num: (cityIdx >= 0 ? cityIdx : i) + 1,
+  };
 }
 
 type FlowCell =
