@@ -366,7 +366,9 @@ export default function RouteMapPage() {
     fitAllRef.current?.();
     locAnimRef.current = {
       path, seg, total, reachDist, fired: reachDist.map(() => false),
-      stops, casing, line, progress: 0, duration: Math.max(12000, stops.length * 2600),
+      // Slower crawl so each location can be read comfortably as the line
+      // reaches it (was 12s / 2.6s-per-stop, which felt too fast).
+      stops, casing, line, progress: 0, duration: Math.max(22000, stops.length * 5000),
       lastTs: 0, raf: 0,
     };
     setLocReady(true);
