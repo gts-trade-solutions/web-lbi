@@ -53,7 +53,9 @@ export async function fetchOrsPath(
     res = await fetch(ORS_DIRECTIONS_URL, {
       method: "POST",
       headers: { Authorization: apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ coordinates }),
+      // "recommended" favours the main road / highway (like Google's default);
+      // it never picks the smaller-road "shortest" path.
+      body: JSON.stringify({ coordinates, preference: "recommended" }),
     });
   } catch (e: any) {
     return { ok: false, status: 502, detail: e?.message || "request failed" };

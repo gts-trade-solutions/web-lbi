@@ -504,6 +504,17 @@ export default function RouteMapPage() {
     });
   };
 
+  // Manual stepping: pause any auto-play and jump straight to one report.
+  const jumpTo = (i: number) => {
+    if (!points.length) return;
+    const idx = Math.max(0, Math.min(points.length - 1, i));
+    stopAnim();
+    focusRef.current?.(idx);
+  };
+  const stepBack = () => jumpTo((current < 0 ? 0 : current) - 1);
+  const stepForward = () => jumpTo((current < 0 ? -1 : current) + 1);
+  const rewindStart = () => jumpTo(0);
+
   // ---- 1. Load report points ----
   useEffect(() => {
     // Share mode: wait for the session; bounce back to the password gate if
@@ -972,6 +983,34 @@ export default function RouteMapPage() {
             <div style={styles.controls}>
               <button style={styles.ctrlBtn} onClick={togglePlay}>
                 {playing && activeTourRef.current === "report" ? "⏸ Pause" : "▶ Play reports"}
+              </button>
+
+              {/* Manual playback: rewind to start, step back, step forward. */}
+              <button
+                style={styles.ctrlIconBtn}
+                onClick={rewindStart}
+                title="Rewind to the first report"
+                aria-label="Rewind to first report"
+              >
+                ⏮
+              </button>
+              <button
+                style={styles.ctrlIconBtn}
+                onClick={stepBack}
+                disabled={current <= 0}
+                title="Previous report"
+                aria-label="Previous report"
+              >
+                ◀
+              </button>
+              <button
+                style={styles.ctrlIconBtn}
+                onClick={stepForward}
+                disabled={current >= 0 && current >= points.length - 1}
+                title="Next report"
+                aria-label="Next report"
+              >
+                ▶
               </button>
 
               {playing && activeTourRef.current === "location" ? (
@@ -2027,6 +2066,18 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#fff",
     fontWeight: 800,
     cursor: "pointer",
+  },
+  ctrlIconBtn: {
+    padding: "8px 11px",
+    borderRadius: 10,
+    border: "none",
+    background: "#334155",
+    color: "#fff",
+    fontWeight: 800,
+    fontSize: 14,
+    lineHeight: 1,
+    cursor: "pointer",
+    minWidth: 38,
   },
   ctrlInfo: { color: "#cbd5e1", fontWeight: 700, fontSize: 13, paddingLeft: 4 },
   locMenu: {
