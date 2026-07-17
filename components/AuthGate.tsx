@@ -11,8 +11,16 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let cancelled = false;
 
-    const publicPaths = ["/login", "/auth", "/api"];
-    const isPublic = publicPaths.some((p) => pathname?.startsWith(p));
+    // Public: the login/auth flows, all API routes, the password-gated share
+    // landing (/share/...), and the map opened via a share link (?share=...) —
+    // external clients reach these without an app login. The query check reads
+    // window (client-only, inside the effect) to avoid a useSearchParams()
+    // Suspense de-opt on statically rendered pages.
+    const publicPaths = ["/login", "/auth", "/api", "/share"];
+    const isShareView =
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("share") != null;
+    const isPublic = isShareView || publicPaths.some((p) => pathname?.startsWith(p));
 
     async function checkAuth() {
       try {

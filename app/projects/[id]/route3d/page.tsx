@@ -123,6 +123,36 @@ export default function RouteMapPage() {
     return raw.split(",").map((s) => s.trim()).filter(Boolean);
   }, [search, projectId]);
 
+  // ---- Share mode ----
+  // When the map is opened via a password-protected share link it carries
+  // ?share=<token>. In that mode there is NO logged-in user: data comes from
+  // the public /api/share/<token>/* endpoints, authorised by a short session
+  // token the client got by entering the password on /share/<token>.
+  const shareToken = useMemo(() => String(search?.get("share") || "").trim(), [search]);
+  const isShare = !!shareToken;
+  // Read the unlocked session synchronously on mount (lazy init). Reading it
+  // in an effect instead would make the first render see no session and bounce
+  // back to the password gate even when we DO have one — an endless loop.
+  const [shareSession] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    const t = new URLSearchParams(window.location.search).get("share") || "";
+    if (!t) return "";
+    try {
+      return sessionStorage.getItem(`share_sess_${t}`) || "";
+    } catch {
+      return "";
+    }
+  });
+
+  // "Share this report" dialog (authored side only, never in share view).
+  const [shareOpen, setShareOpen] = useState(false);
+  const [sharePassword, setSharePassword] = useState("");
+  const [shareTitle, setShareTitle] = useState("");
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareErr, setShareErr] = useState<string | null>(null);
+  const [shareLink, setShareLink] = useState<string>("");
+  const [shareCopied, setShareCopied] = useState(false);
+
   const [points, setPoints] = useState<ReportPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -447,20 +477,39 @@ export default function RouteMapPage() {
 
   // ---- 1. Load report points ----
   useEffect(() => {
-    if (!projectId) return;
+    // Share mode: wait for the session; bounce back to the password gate if
+    // it's missing/expired. Normal mode: wait for the project id.
+    if (isShare) {
+      if (!shareSession) {
+        router.replace(`/share/${encodeURIComponent(shareToken)}`);
+        return;
+      }
+    } else if (!projectId) {
+      return;
+    }
     (async () => {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(
-          `/api/projects/${encodeURIComponent(projectId)}/reports?sort=asc`,
-          { method: "GET", credentials: "include", headers: authHeaders() }
-        );
+        const res = isShare
+          ? await fetch(`/api/share/${encodeURIComponent(shareToken)}/reports`, {
+              method: "GET",
+              headers: { "X-Share-Session": shareSession },
+            })
+          : await fetch(
+              `/api/projects/${encodeURIComponent(projectId)}/reports?sort=asc`,
+              { method: "GET", credentials: "include", headers: authHeaders() }
+            );
         const data = await res.json().catch(() => ({} as any));
+        if (res.status === 401 && isShare) {
+          router.replace(`/share/${encodeURIComponent(shareToken)}`);
+          return;
+        }
         if (!res.ok) throw new Error(data?.error || "Failed to load reports");
 
         let rows: any[] = Array.isArray(data?.reports) ? data.reports : [];
-        if (selectedIds.length) {
+        // In share mode the server already returns exactly the shared set.
+        if (!isShare && selectedIds.length) {
           const set = new Set(selectedIds);
           rows = rows.filter((r) => set.has(String(r.id)));
         }
@@ -501,7 +550,8 @@ export default function RouteMapPage() {
         setLoading(false);
       }
     })();
-  }, [projectId, selectedIds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, selectedIds, isShare, shareToken, shareSession]);
 
   // Preload first photos for many reports with limited concurrency.
   const preloadPhotos = async (ids: string[]) => {
@@ -520,10 +570,18 @@ export default function RouteMapPage() {
   const fetchFirstPhoto = async (reportId: string): Promise<string | null> => {
     if (reportId in photoCacheRef.current) return photoCacheRef.current[reportId];
     try {
-      const res = await fetch(
-        `/api/reports/${encodeURIComponent(reportId)}/photos`,
-        { method: "GET", credentials: "include", headers: authHeaders() }
-      );
+      const res = isShare
+        ? await fetch(
+            `/api/share/${encodeURIComponent(shareToken)}/reports/${encodeURIComponent(
+              reportId
+            )}/photos`,
+            { method: "GET", headers: { "X-Share-Session": shareSession } }
+          )
+        : await fetch(`/api/reports/${encodeURIComponent(reportId)}/photos`, {
+            method: "GET",
+            credentials: "include",
+            headers: authHeaders(),
+          });
       const data = await res.json().catch(() => ({} as any));
       const url = String(data?.photos?.[0]?.url || "") || null;
       photoCacheRef.current[reportId] = url;
@@ -738,11 +796,70 @@ export default function RouteMapPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Create a password-protected share link for exactly the points now on the
+  // map, so a client can watch the animated report without an app login.
+  const createShare = async () => {
+    if (shareBusy) return;
+    if (!projectId) {
+      setShareErr("No project to share.");
+      return;
+    }
+    if (sharePassword.trim().length < 4) {
+      setShareErr("Password must be at least 4 characters.");
+      return;
+    }
+    setShareBusy(true);
+    setShareErr(null);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        credentials: "include",
+        body: JSON.stringify({
+          password: sharePassword,
+          title: shareTitle,
+          // Lock the link to exactly the points currently shown.
+          selectedIds: points.map((p) => p.id),
+        }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok || !data?.ok) throw new Error(data?.error || "Failed to create link");
+      const link =
+        typeof window !== "undefined" ? `${window.location.origin}${data.path}` : String(data.path);
+      setShareLink(link);
+      setShareCopied(false);
+    } catch (e: any) {
+      setShareErr(e?.message || "Failed to create link");
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const copyShareLink = async () => {
+    if (!shareLink) return;
+    try {
+      await navigator.clipboard.writeText(shareLink);
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 2000);
+    } catch {
+      /* clipboard may be blocked; the field is selectable as a fallback */
+    }
+  };
+
+  const resetShareDialog = () => {
+    setShareOpen(false);
+    setSharePassword("");
+    setShareTitle("");
+    setShareErr(null);
+    setShareLink("");
+    setShareCopied(false);
+  };
+
   // ---- Render ----
   if (!GMAPS_KEY) {
     return (
       <div style={styles.page}>
-        <TopBar onBack={() => router.back()} title="Route Map (satellite)" />
+        <TopBar onBack={isShare ? undefined : () => router.back()} title="Route Map (satellite)" />
         <div style={styles.card}>
           <div style={styles.h2}>Google Maps API key required</div>
           <p style={styles.p}>
@@ -766,7 +883,21 @@ export default function RouteMapPage() {
         .gm-style-iw-d { overflow: hidden !important; }
         .gm-style-iw-tail, .gm-style-iw-t::after { }
       `}</style>
-      <TopBar onBack={() => router.back()} title="Route Map (satellite)" />
+      <TopBar
+        onBack={isShare ? undefined : () => router.back()}
+        title="Route Map (satellite)"
+        right={
+          isShare ? null : (
+            <button
+              style={styles.shareBtn}
+              onClick={() => setShareOpen(true)}
+              title="Create a password-protected link to send to a client"
+            >
+              🔗 Share
+            </button>
+          )
+        }
+      />
 
       <div style={styles.layout}>
         <div style={styles.mapWrap}>
@@ -950,6 +1081,72 @@ export default function RouteMapPage() {
           </div>
         );
       })()}
+
+      {shareOpen && !isShare && (
+        <div style={styles.modalOverlay} onClick={resetShareDialog}>
+          <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalTitle}>🔗 Share animated report</div>
+            {!shareLink ? (
+              <>
+                <div style={styles.modalSub}>
+                  Creates a password-protected link. The client opens it, types the password, and
+                  watches this report ({points.length} points) — no app login needed.
+                </div>
+                <label style={styles.modalLabel}>Label (optional)</label>
+                <input
+                  style={styles.modalInput}
+                  value={shareTitle}
+                  onChange={(e) => setShareTitle(e.target.value)}
+                  placeholder="e.g. Delhi–Bhubaneswar route"
+                />
+                <label style={styles.modalLabel}>Password for the client</label>
+                <input
+                  style={styles.modalInput}
+                  type="text"
+                  value={sharePassword}
+                  onChange={(e) => setSharePassword(e.target.value)}
+                  placeholder="Set a password (min 4 characters)"
+                />
+                {shareErr ? <div style={styles.modalErr}>{shareErr}</div> : null}
+                <div style={styles.modalActions}>
+                  <button style={styles.modalCancel} onClick={resetShareDialog}>
+                    Cancel
+                  </button>
+                  <button style={styles.modalCreate} onClick={createShare} disabled={shareBusy}>
+                    {shareBusy ? "Creating…" : "Create link"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={styles.modalSub}>
+                  Send this link to your client, and give them the password separately (phone / SMS).
+                  It stays private until the password is entered.
+                </div>
+                <div style={styles.linkRow}>
+                  <input
+                    style={styles.linkInput}
+                    readOnly
+                    value={shareLink}
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <button style={styles.copyBtn} onClick={copyShareLink}>
+                    {shareCopied ? "✓ Copied" : "Copy"}
+                  </button>
+                </div>
+                <div style={styles.pwReminder}>
+                  Password: <b>{sharePassword}</b>
+                </div>
+                <div style={styles.modalActions}>
+                  <button style={styles.modalCreate} onClick={resetShareDialog}>
+                    Done
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1424,20 +1621,144 @@ function LocationsFlow({
   );
 }
 
-function TopBar({ onBack, title }: { onBack: () => void; title: string }) {
+function TopBar({
+  onBack,
+  title,
+  right,
+}: {
+  onBack?: () => void;
+  title: string;
+  right?: React.ReactNode;
+}) {
   return (
     <div style={styles.topbar}>
-      <button style={styles.backBtn} onClick={onBack}>
-        ← Back
-      </button>
+      {onBack ? (
+        <button style={styles.backBtn} onClick={onBack}>
+          ← Back
+        </button>
+      ) : (
+        <div style={{ width: 80 }} />
+      )}
       <div style={styles.title}>{title}</div>
-      <div style={{ width: 80 }} />
+      <div style={{ minWidth: 80, display: "flex", justifyContent: "flex-end" }}>
+        {right || null}
+      </div>
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
   page: { height: "100vh", display: "flex", flexDirection: "column", background: "#0b1220" },
+  shareBtn: {
+    padding: "8px 12px",
+    borderRadius: 10,
+    border: "1px solid #1d4ed8",
+    background: "#2563eb",
+    color: "#fff",
+    fontWeight: 800,
+    fontSize: 13,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(2,6,23,0.72)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 5000,
+    padding: 16,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 440,
+    background: "#0f172a",
+    border: "1px solid #1e293b",
+    borderRadius: 16,
+    padding: "22px 22px 18px",
+    color: "#e2e8f0",
+    boxShadow: "0 24px 70px rgba(0,0,0,0.5)",
+  },
+  modalTitle: { fontSize: 18, fontWeight: 900, color: "#fff", marginBottom: 8 },
+  modalSub: { fontSize: 13, lineHeight: 1.5, color: "#94a3b8", marginBottom: 16 },
+  modalLabel: {
+    display: "block",
+    fontSize: 12,
+    fontWeight: 800,
+    color: "#cbd5e1",
+    margin: "10px 0 6px",
+    letterSpacing: 0.3,
+  },
+  modalInput: {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "11px 13px",
+    borderRadius: 10,
+    border: "1px solid #334155",
+    background: "#0b1220",
+    color: "#fff",
+    fontSize: 14,
+    outline: "none",
+  },
+  modalErr: {
+    background: "#3f1d1d",
+    border: "1px solid #7f1d1d",
+    color: "#fecaca",
+    borderRadius: 9,
+    padding: "8px 11px",
+    fontSize: 12.5,
+    marginTop: 12,
+  },
+  modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 },
+  modalCancel: {
+    padding: "10px 16px",
+    borderRadius: 10,
+    border: "1px solid #334155",
+    background: "#1e293b",
+    color: "#e2e8f0",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  modalCreate: {
+    padding: "10px 18px",
+    borderRadius: 10,
+    border: "none",
+    background: "#2563eb",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  linkRow: { display: "flex", gap: 8, marginBottom: 12 },
+  linkInput: {
+    flex: 1,
+    minWidth: 0,
+    padding: "11px 13px",
+    borderRadius: 10,
+    border: "1px solid #334155",
+    background: "#0b1220",
+    color: "#93c5fd",
+    fontSize: 13,
+    outline: "none",
+  },
+  copyBtn: {
+    padding: "10px 16px",
+    borderRadius: 10,
+    border: "none",
+    background: "#0e7490",
+    color: "#fff",
+    fontWeight: 800,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  pwReminder: {
+    fontSize: 12.5,
+    color: "#cbd5e1",
+    background: "#0b1220",
+    border: "1px dashed #334155",
+    borderRadius: 9,
+    padding: "9px 12px",
+  },
   topbar: {
     display: "flex",
     alignItems: "center",
