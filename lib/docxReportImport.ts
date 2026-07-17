@@ -202,10 +202,206 @@ function sliceByTag(text: string, tagRe: RegExp): string[] {
   return starts.map((s, k) => text.slice(s, k + 1 < starts.length ? starts[k + 1] : text.length));
 }
 
+// Format B — "GPS-block" survey reports (e.g. Sagar–Kanpur): ONE table per
+// point. The point's GPS number, coordinates, location and KM are packed into
+// the table's FIRST row (a full-width metadata cell — "GPS No. 1, Co-ordinates:
+// N23 54.220 E78 45.323 … Location – Richoda … Km: 0.00"), followed by a
+// category row and a "Particulars / Length / Width / Height / Recommendation"
+// clearance sub-table, then the road / cross-section images. The row-per-point
+// parser would mis-read row 0 as a COLUMN header, so this format is detected
+// and handled separately.
+function looksLikeGpsBlockFormat(xml: string): boolean {
+  const plain = xml.replace(/<[^>]+>/g, " ");
+  const m = plain.match(/GPS\s*No\.?\s*\d+\s*,?\s*Co-?ordinates?\s*:/gi);
+  return !!m && m.length >= 3;
+}
+
+function parseGpsBlockReport(buffer: Buffer): DocxReport {
+  const zip = new PizZip(buffer);
+  const xml = zip.file("word/document.xml")?.asText() || "";
+  const relsXml = zip.file("word/_rels/document.xml.rels")?.asText() || "";
+  const relMap = buildRelMap(relsXml);
+
+  const imagesIn = (s: string): string[] => {
+    const ids: string[] = [];
+    for (const m of Array.from(s.matchAll(/r:embed="([^"]+)"/g))) ids.push(m[1]);
+    for (const m of Array.from(s.matchAll(/r:id="([^"]+)"/g))) ids.push(m[1]);
+    return ids
+      .map((id) => relMap[id])
+      .filter((t) => t && /media\//.test(t))
+      .map((t) => "word/" + t.replace(/^\/*/, ""));
+  };
+
+  // Top-level tables (nesting-aware) — one per point.
+  const tables: string[] = [];
+  let idx = 0;
+  while (true) {
+    const start = xml.indexOf("<w:tbl>", idx);
+    if (start < 0) break;
+    let depth = 0;
+    let end = -1;
+    const re = /<w:tbl>|<\/w:tbl>/g;
+    re.lastIndex = start;
+    let mm: RegExpExecArray | null;
+    while ((mm = re.exec(xml))) {
+      if (mm[0] === "<w:tbl>") depth++;
+      else {
+        depth--;
+        if (!depth) {
+          end = mm.index + mm[0].length;
+          break;
+        }
+      }
+    }
+    if (end < 0) break;
+    tables.push(xml.slice(start, end));
+    idx = end;
+  }
+
+  const rowsOf = (t: string): string[] => {
+    const starts: number[] = [];
+    const re = /<w:tr[ >]/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(t))) starts.push(m.index);
+    return starts.map((s, k) => t.slice(s, k + 1 < starts.length ? starts[k + 1] : t.length));
+  };
+  const cellsOf = (r: string): string[] => {
+    const starts: number[] = [];
+    const re = /<w:tc>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(r))) starts.push(m.index);
+    return starts.map((s, k) => r.slice(s, k + 1 < starts.length ? starts[k + 1] : r.length));
+  };
+
+  // Count image use across point-tables so a repeated legend/logo is dropped.
+  const freq: Record<string, number> = {};
+  const tableMedia = tables.map((t) => {
+    const media = Array.from(new Set(imagesIn(t)));
+    media.forEach((m) => (freq[m] = (freq[m] || 0) + 1));
+    return media;
+  });
+  const brandingCut = Math.max(3, Math.floor(tables.length * 0.5));
+  const isBranding = (m: string) => (freq[m] || 0) > brandingCut;
+
+  const titleCase = (s: string) =>
+    s.toLowerCase().replace(/\b([a-z])/g, (_m, c) => c.toUpperCase()).replace(/\s{2,}/g, " ").trim();
+
+  const points: DocxPoint[] = [];
+
+  tables.forEach((t, ti) => {
+    const rows = rowsOf(t);
+    if (!rows.length) return;
+    // Row 0 holds the point metadata (banner cell + a big details cell).
+    const meta = cellsOf(rows[0]).map((c) => cellText(c)).join("  ");
+    const gpsM = meta.match(/GPS\s*No\.?\s*(\d+)/i);
+    if (!gpsM) return; // title / legend table, not a point
+
+    // Coordinates: "Co-ordinates: N23 54.220 E78 45.323" (up to the next field).
+    let coordRaw = "";
+    const cm = meta.match(/Co-?ordinates?\s*:?\s*([^,]+)/i);
+    if (cm) coordRaw = cm[1].split(/\bRef\b|\bDate\b|\bLocation\b/i)[0].trim();
+    const pair = splitCoordPair(coordRaw);
+    const latitude = pair ? parseCoord(pair[0]) : null;
+    const longitude = pair ? parseCoord(pair[1]) : null;
+
+    // Location: "Location – Richoda, Madhya Pradesh" (stop before NH No / Km …).
+    let location = "";
+    const lm = meta.match(/Location\s*[–—\-:]\s*(.+?)\s*(?:NH\s*No|Km\s*:|Risk\s*Score|Ref\s*:|Date\s*:|$)/i);
+    if (lm) location = lm[1].replace(/\s+([,;])/g, "$1").replace(/\s{2,}/g, " ").trim();
+
+    // KM: "Km: 0.00" (colon required so "Class: 12" / "No. 27" can't match).
+    let km = "";
+    const kmM = meta.match(/Km\s*:\s*([\d.]+)/i);
+    if (kmM) km = kmM[1];
+
+    // Recommendations — the "Recommendation" column of the clearance sub-table.
+    const recs: string[] = [];
+    let recIdx = -1;
+    let subCells = 0;
+    for (let ri = 1; ri < rows.length; ri++) {
+      const cells = cellsOf(rows[ri]);
+      const texts = cells.map((c) => cellText(c));
+      if (recIdx < 0) {
+        const ci = texts.findIndex((tx) => /recommendation/i.test(tx));
+        if (ci >= 0 && /particulars|clearance/i.test(texts.join(" "))) {
+          recIdx = ci;
+          subCells = cells.length;
+        }
+        continue;
+      }
+      // Only the clearance rows (same cell count as the sub-header) — never the
+      // image rows below, whose labels would otherwise look like text.
+      if (cells.length === subCells) {
+        const rec = texts[recIdx] || "";
+        if (rec && !/^[\d.\s]+$/.test(rec)) recs.push(rec);
+      }
+    }
+    const observation = recs[0] || "";
+    const remarks = recs.slice(1).join(" ").trim();
+
+    // Difficulty from the recommendation wording (reliable), not the table
+    // colour — these reports highlight photo labels yellow, which would wrongly
+    // paint "Normal Pass" points yellow. Green wins first so "Diversion End,
+    // Normal Pass" stays green.
+    const rt = `${observation} ${remarks}`.toLowerCase();
+    const difficulty = /normal\s*pass|go\s*ahead|no\s*obstacle/.test(rt)
+      ? "green"
+      : /(don'?t|do not)\s*go|not\s*possible|cannot|\bstop\b|blocked|no\s*movement/.test(rt)
+        ? "red"
+        : /remove|caution|careful|restrict|diversion|shift|\blift\b|opposite\s*(lane|road|side)/.test(rt)
+          ? "yellow"
+          : "green";
+
+    // Category — the label row under the metadata (row 1); ignore it if it's
+    // actually the sub-table header, and fall back to inferring from the text.
+    let category = "";
+    if (rows.length > 1) {
+      const r1 = cellsOf(rows[1]).map((c) => cellText(c)).join(" ").trim();
+      if (r1 && r1.length <= 40 && !/particulars|length|width|height|recommendation/i.test(r1)) {
+        category = titleCase(r1);
+      }
+    }
+    if (!category) category = inferCategory(`${observation}`);
+
+    const photoNames = (tableMedia[ti] || []).filter((m) => !isBranding(m));
+
+    points.push({
+      point_key: String(points.length + 1),
+      coordRaw,
+      latitude,
+      longitude,
+      km,
+      location,
+      category,
+      observation,
+      remarks,
+      difficulty,
+      photoNames,
+    } as DocxPoint);
+  });
+
+  const getPhoto = (zipPath: string): Buffer | null => {
+    const f = zip.file(zipPath);
+    if (!f) return null;
+    try {
+      return Buffer.from(f.asUint8Array());
+    } catch {
+      return null;
+    }
+  };
+
+  return { points, getPhoto };
+}
+
 export function parseDocxReport(buffer: Buffer): DocxReport {
   const zip = new PizZip(buffer);
   const xml = zip.file("word/document.xml")?.asText() || "";
   const relsXml = zip.file("word/_rels/document.xml.rels")?.asText() || "";
+
+  // "GPS-block" reports (one table per point, metadata in row 0) would be
+  // mis-read by the row-per-point logic below — hand them to the dedicated
+  // parser first.
+  if (looksLikeGpsBlockFormat(xml)) return parseGpsBlockReport(buffer);
 
   // relationship id -> media target (relative to word/)
   const relMap = buildRelMap(relsXml);
