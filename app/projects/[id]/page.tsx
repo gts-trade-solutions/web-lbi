@@ -1149,28 +1149,29 @@ export default function ProjectReportsPage() {
           await ensureRouteIdForMissingReports(selectedIdsInOrder);
         }
 
-        if (exportMode === "all") {
-          const { blob, fileName: fn } = await generateProjectGPX(dbClient, projectId, {
-            name: exportName || projectName,
-            fileName,
-          });
-          setPreparedFiles([{ fileName: fn, blob }]);
-          setDlDone(true);
-          return;
+        if (exportMode !== "all" && exportMode !== "selectedOne") {
+          throw new Error("GPX supports only: Selected reports or All reports.");
         }
 
-        if (exportMode === "selectedOne") {
-          const ids = selectedIdsInOrder;
-          const { blob, fileName: fn } = await generateProjectGPXByReportIds(dbClient, projectId, ids, {
-            name: exportName || projectName,
-            fileName,
-          });
-          setPreparedFiles([{ fileName: fn, blob }]);
-          setDlDone(true);
-          return;
+        // Server builds the GPX directly from the recorded track
+        // (report_path_points) + an observation waypoint per report — reliable
+        // and includes the full GPS track for the route survey.
+        const sp = new URLSearchParams();
+        sp.set("name", exportName || projectName);
+        if (exportMode === "selectedOne") sp.set("reportIds", selectedIdsInOrder.join(","));
+        const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+        const res = await fetch(
+          `/api/projects/${encodeURIComponent(projectId)}/gpx?${sp.toString()}`,
+          { headers: token ? { Authorization: `Bearer ${token}` } : {}, credentials: "include" }
+        );
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          throw new Error(d?.error || "GPX export failed");
         }
-
-        throw new Error("GPX supports only: Selected reports or All reports.");
+        const blob = await res.blob();
+        setPreparedFiles([{ fileName, blob }]);
+        setDlDone(true);
+        return;
       }
 
       const count =
