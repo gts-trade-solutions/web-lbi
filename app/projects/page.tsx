@@ -2599,6 +2599,14 @@ export default function ProjectsPage() {
             🗑 Recycle Bin
           </button>
 
+          <button
+            style={styles.btnGhost}
+            onClick={() => router.push("/projects/finalized")}
+            title="Projects that have a finalized Word report uploaded"
+          >
+            📎 Finished projects
+          </button>
+
           <button style={styles.btnGhost} onClick={() => router.push("/activity")}>
             📜 Activity Log
           </button>
