@@ -3868,10 +3868,19 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       });
     }
 
-    // KM is the cumulative haversine distance along the ordered route. The
-    // database `kms`/`km` columns are NOT used because the user spec says KM
-    // must be derived from coordinates so the first row is always 0.0000.
-    const kmText = formatKmValue(r.calculated_km);
+    // KM: prefer the value that came WITH the report (its own kms/km — e.g. the
+    // "Km: 6.10" printed in an uploaded survey), so re-exporting never shifts
+    // the chainage. Only when the report has no km of its own do we fall back to
+    // the cumulative haversine distance along the ordered route.
+    const rawKm =
+      r.kms != null && String(r.kms).trim() !== ""
+        ? Number(r.kms)
+        : r.km != null && String(r.km).trim() !== ""
+          ? Number(r.km)
+          : NaN;
+    const kmText = Number.isFinite(rawKm)
+      ? formatKmValue(rawKm)
+      : formatKmValue(r.calculated_km);
 
     // LOCATION uses (1) any stored value, then (2) reverse-geocoded name
     // (cached into reports.resolved_location), then (3) coordinate fallback.
