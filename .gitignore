@@ -44,3 +44,6 @@ env.bak.txt
 
 # Locally-saved imported photos (S3 fallback)
 /public/uploads/
+
+# Finalized reports stored on disk when S3 is unavailable (local dev / fallback)
+.uploads/

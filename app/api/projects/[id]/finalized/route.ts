@@ -4,10 +4,16 @@
 // whatever the user uploads (their finalized Word report) — re-downloadable
 // anytime without regenerating.
 import { randomUUID } from "crypto";
+import fs from "fs";
+import path from "path";
 import pool from "../../../../../lib/db";
 import { requireAuth } from "../../../../../lib/auth";
 import { uploadBufferToS3, deleteS3Object } from "../../../../../lib/s3";
 import { logActivity } from "../../../../../lib/activityLog";
+
+// Files stored on disk when S3 is unavailable (e.g. local dev with placeholder
+// AWS keys). Kept OUTSIDE public/ and served only through the download route.
+export const LOCAL_ROOT = path.join(process.cwd(), ".uploads", "finalized");
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -71,15 +77,28 @@ export async function POST(request: Request, context: Ctx) {
     }
 
     const bytes = Buffer.from(await file.arrayBuffer());
-    const key = `finalized/${projectId}/${randomUUID()}-${originalName}`;
+    const uuid = randomUUID();
+    const key = `finalized/${projectId}/${uuid}-${originalName}`;
+    // Try S3 first; if it's not available (local dev / bad creds / outage), fall
+    // back to disk. storageKey is either the S3 key or "local:<absolute path>".
+    let storageKey = key;
     try {
       await uploadBufferToS3({ key, body: bytes, contentType: file.type || DOCX_MIME });
     } catch (e: any) {
-      console.error("[api/projects/:id/finalized] S3 upload failed:", e);
-      return Response.json(
-        { error: "Could not store the file. Check S3 is configured on the server.", detail: e?.message },
-        { status: 502 }
-      );
+      try {
+        const dir = path.join(LOCAL_ROOT, projectId);
+        fs.mkdirSync(dir, { recursive: true });
+        const localPath = path.join(dir, `${uuid}-${originalName}`);
+        fs.writeFileSync(localPath, bytes);
+        storageKey = "local:" + localPath;
+        console.warn("[api/projects/:id/finalized] S3 unavailable — stored on disk:", localPath);
+      } catch (localErr) {
+        console.error("[api/projects/:id/finalized] S3 AND local storage failed:", e, localErr);
+        return Response.json(
+          { error: "Could not store the file (S3 and disk both failed).", detail: e?.message },
+          { status: 502 }
+        );
+      }
     }
 
     await ensureTable();
@@ -88,7 +107,7 @@ export async function POST(request: Request, context: Ctx) {
       `INSERT INTO project_files
          (id, project_id, kind, file_name, s3_key, content_type, size_bytes, uploaded_by)
        VALUES (?, ?, 'finalized_report', ?, ?, ?, ?, ?)`,
-      [id, projectId, originalName, key, file.type || DOCX_MIME, bytes.length, user?.id || null]
+      [id, projectId, originalName, storageKey, file.type || DOCX_MIME, bytes.length, user?.id || null]
     );
 
     await logActivity(request, {
@@ -155,10 +174,15 @@ export async function DELETE(request: Request, context: Ctx) {
     const row = Array.isArray(rows) && rows.length ? (rows[0] as any) : null;
     if (!row) return Response.json({ error: "File not found" }, { status: 404 });
 
+    const storageKey = String(row.s3_key || "");
     try {
-      await deleteS3Object(String(row.s3_key));
+      if (storageKey.startsWith("local:")) {
+        fs.unlinkSync(storageKey.slice("local:".length));
+      } else {
+        await deleteS3Object(storageKey);
+      }
     } catch (e) {
-      console.warn("[api/projects/:id/finalized] S3 delete failed (removing row anyway):", e);
+      console.warn("[api/projects/:id/finalized] storage delete failed (removing row anyway):", e);
     }
     await pool.query("DELETE FROM project_files WHERE id = ? AND project_id = ?", [fileId, projectId]);
     return Response.json({ ok: true });

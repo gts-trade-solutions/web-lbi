@@ -58,14 +58,26 @@ export default function FinishedProjectsPage() {
         `/api/projects/${encodeURIComponent(projectId)}/finalized/download?fileId=${encodeURIComponent(f.id)}`,
         { headers: authHeaders(), credentials: "include" }
       );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data?.url) throw new Error(data?.error || "Could not prepare download");
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d?.error || "Could not prepare download");
+      }
+      const ct = res.headers.get("content-type") || "";
       const a = document.createElement("a");
-      a.href = data.url;
-      a.rel = "noopener";
+      if (ct.includes("application/json")) {
+        const data = await res.json();
+        if (!data?.url) throw new Error("No download URL");
+        a.href = data.url;
+        a.rel = "noopener";
+      } else {
+        const blob = await res.blob();
+        a.href = URL.createObjectURL(blob);
+        a.download = f.fileName;
+      }
       document.body.appendChild(a);
       a.click();
       a.remove();
+      if (a.href.startsWith("blob:")) setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     } catch (err: any) {
       toast(err?.message || "Download failed", "error");
     }
