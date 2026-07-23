@@ -900,6 +900,12 @@ export default function ProjectReportsPage() {
     }
   };
 
+  // Finalized report manager (upload/download the stored .docx from S3).
+  const openFinalized = () => {
+    if (!projectId) return;
+    window.open(`/projects/${encodeURIComponent(projectId)}/finalized`, "_blank");
+  };
+
   const toggleOne = (id: string) => setSelected((prev) => ({ ...prev, [id]: !prev[id] }));
 
   // Checkbox click handler that supports Shift+click range selection.
@@ -2355,6 +2361,14 @@ export default function ProjectReportsPage() {
               }
             >
               🗺️ Route map
+            </button>
+
+            <button
+              style={styles.btnGhost}
+              onClick={openFinalized}
+              title="Upload / download the finalized Word report (stored in S3)"
+            >
+              📎 Finalized
             </button>
 
             <button
