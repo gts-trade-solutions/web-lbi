@@ -216,6 +216,13 @@ export default function RouteMapPage() {
   const [drawWidth, setDrawWidth] = useState(6);
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [savingAnno, setSavingAnno] = useState(false);
+  // Inline text editor: an input positioned over the canvas at the click point
+  // so the user types directly on the image (no pop-up dialog).
+  const [textDraft, setTextDraft] = useState<
+    | { dispX: number; dispY: number; cx: number; cy: number; font: number; naturalFont: number; value: string }
+    | null
+  >(null);
+  const imgWrapRef = useRef<HTMLDivElement | null>(null);
   const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawingRef = useRef<Stroke | null>(null);
   const baseImgRef = useRef<HTMLImageElement | null>(null);
@@ -717,6 +724,7 @@ export default function RouteMapPage() {
     setStrokes([]);
     drawingRef.current = null;
     setDrawMode(false);
+    setTextDraft(null);
   }, [lightbox, lbIndex]);
 
   // Directional turn arrows (left / right / U-turn) drawn to fit the dragged
@@ -917,16 +925,23 @@ export default function RouteMapPage() {
     e.preventDefault();
     const p = canvasPoint(e);
     if (drawTool === "text") {
-      // Click to place text; prompt for the string. Size scales with the
-      // chosen width so it reads on a high-resolution photo.
-      const txt = window.prompt("Text to add:");
-      if (txt && txt.trim()) {
-        const fontSize = Math.max(28, drawWidth * 7);
-        setStrokes((prev) => [
-          ...prev,
-          { tool: "text", color: drawColor, width: drawWidth, points: [p], text: txt.trim(), fontSize },
-        ]);
-      }
+      // Open an inline editor at the click point — type directly on the image.
+      const canvas = drawCanvasRef.current;
+      const wrap = imgWrapRef.current;
+      if (!canvas || !wrap) return;
+      const wrapRect = wrap.getBoundingClientRect();
+      const canvasRect = canvas.getBoundingClientRect();
+      const naturalFont = Math.max(28, drawWidth * 7);
+      const scale = canvas.width ? canvasRect.width / canvas.width : 1;
+      setTextDraft({
+        dispX: e.clientX - wrapRect.left,
+        dispY: e.clientY - wrapRect.top,
+        cx: p.x,
+        cy: p.y,
+        naturalFont,
+        font: naturalFont * scale,
+        value: "",
+      });
       return; // no drag stroke for text
     }
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
@@ -947,12 +962,44 @@ export default function RouteMapPage() {
     setStrokes((prev) => [...prev, s]);
   };
 
+  // Commit the inline text editor into a text stroke (on Enter / blur).
+  const commitText = () => {
+    const d = textDraft;
+    if (d && d.value.trim()) {
+      setStrokes((prev) => [
+        ...prev,
+        {
+          tool: "text",
+          color: drawColor,
+          width: drawWidth,
+          points: [{ x: d.cx, y: d.cy }],
+          text: d.value.trim(),
+          fontSize: d.naturalFont,
+        },
+      ]);
+    }
+    setTextDraft(null);
+  };
+
   const saveAnnotated = async () => {
     const canvas = drawCanvasRef.current;
     if (!canvas || !lightbox || savingAnno) return;
     setSavingAnno(true);
     try {
-      redrawCanvas(); // bake in the latest strokes
+      // Bake in text still being typed (editor open when Save was pressed).
+      if (textDraft && textDraft.value.trim()) {
+        const ctx = canvas.getContext("2d");
+        if (ctx)
+          drawOneStroke(ctx, {
+            tool: "text",
+            color: drawColor,
+            width: drawWidth,
+            points: [{ x: textDraft.cx, y: textDraft.cy }],
+            text: textDraft.value.trim(),
+            fontSize: textDraft.naturalFont,
+          });
+        setTextDraft(null);
+      }
       const blob: Blob | null = await new Promise((resolve) =>
         canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92)
       );
@@ -1498,7 +1545,7 @@ export default function RouteMapPage() {
         return (
           <div style={styles.lightbox} onClick={() => setLightbox(null)}>
             <div style={styles.lightboxCard} onClick={(e) => e.stopPropagation()}>
-              <div style={styles.lightboxImgWrap}>
+              <div style={styles.lightboxImgWrap} ref={imgWrapRef}>
                 {drawMode ? (
                   <canvas
                     ref={drawCanvasRef}
@@ -1511,6 +1558,42 @@ export default function RouteMapPage() {
                 ) : (
                   <img src={curUrl} alt="" style={styles.lightboxImg} />
                 )}
+                {drawMode && textDraft ? (
+                  <input
+                    autoFocus
+                    value={textDraft.value}
+                    placeholder="Type…"
+                    onChange={(e) =>
+                      setTextDraft((d) => (d ? { ...d, value: e.target.value } : d))
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        commitText();
+                      } else if (e.key === "Escape") {
+                        setTextDraft(null);
+                      }
+                    }}
+                    onBlur={commitText}
+                    style={{
+                      position: "absolute",
+                      left: textDraft.dispX,
+                      top: textDraft.dispY,
+                      font: `bold ${Math.max(12, textDraft.font)}px system-ui, Segoe UI, Arial, sans-serif`,
+                      color: drawColor,
+                      background: "rgba(0,0,0,0.35)",
+                      border: "1px dashed rgba(255,255,255,0.85)",
+                      outline: "none",
+                      padding: "0 2px",
+                      margin: 0,
+                      lineHeight: 1.1,
+                      minWidth: 60,
+                      maxWidth: "90%",
+                      caretColor: drawColor,
+                      zIndex: 5,
+                    }}
+                  />
+                ) : null}
                 {total > 1 && !drawMode ? (
                   <>
                     <button
@@ -1656,6 +1739,7 @@ export default function RouteMapPage() {
                             style={styles.drawBtnGhost}
                             onClick={() => {
                               setStrokes([]);
+                              setTextDraft(null);
                               setDrawMode(false);
                             }}
                           >
