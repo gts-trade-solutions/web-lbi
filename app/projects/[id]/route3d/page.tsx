@@ -1314,6 +1314,14 @@ export default function RouteMapPage() {
     setShareCopied(false);
   };
 
+  // Back button: router.back() silently does nothing when the page was opened
+  // directly / in a new tab (no history). Navigate to the project page instead,
+  // falling back to /projects if we somehow have no id.
+  const handleBack = () => {
+    if (projectId) router.push(`/projects/${encodeURIComponent(projectId)}`);
+    else router.push("/projects");
+  };
+
   // ---- Render ----
   if (!GMAPS_KEY) {
     return (
@@ -1343,7 +1351,7 @@ export default function RouteMapPage() {
         .gm-style-iw-tail, .gm-style-iw-t::after { }
       `}</style>
       <TopBar
-        onBack={isShare ? undefined : () => router.back()}
+        onBack={isShare ? undefined : handleBack}
         title="Route Map (satellite)"
         right={
           isShare ? null : (
