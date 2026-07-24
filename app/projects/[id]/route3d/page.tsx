@@ -203,7 +203,7 @@ export default function RouteMapPage() {
 
   // ---- Draw-on-image annotation state (authored view only) ----
   type Stroke = {
-    tool: "arrow" | "pen" | "rect" | "ellipse";
+    tool: "arrow" | "pen" | "rect" | "ellipse" | "left" | "right" | "uturn";
     color: string;
     width: number;
     points: { x: number; y: number }[]; // pen: path; others: [start, end]
@@ -717,6 +717,62 @@ export default function RouteMapPage() {
     setDrawMode(false);
   }, [lightbox, lbIndex]);
 
+  // Directional turn arrows (left / right / U-turn) drawn to fit the dragged
+  // box, like a road-survey turn marker.
+  const drawTurnArrow = (
+    ctx: CanvasRenderingContext2D,
+    type: "left" | "right" | "uturn",
+    a: { x: number; y: number },
+    b: { x: number; y: number },
+    color: string,
+    width: number
+  ) => {
+    const L = Math.min(a.x, b.x);
+    const R = Math.max(a.x, b.x);
+    const T = Math.min(a.y, b.y);
+    const B = Math.max(a.y, b.y);
+    const W = R - L;
+    const H = B - T;
+    if (W < 4 || H < 4) return;
+    const cx = (L + R) / 2;
+    const head = Math.max(14, width * 3.5);
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    const headAt = (x: number, y: number, angle: number) => {
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - head * Math.cos(angle - Math.PI / 7), y - head * Math.sin(angle - Math.PI / 7));
+      ctx.lineTo(x - head * Math.cos(angle + Math.PI / 7), y - head * Math.sin(angle + Math.PI / 7));
+      ctx.closePath();
+      ctx.fill();
+    };
+    if (type === "uturn") {
+      const legOffset = Math.min(W * 0.28, H * 0.4);
+      const lx = cx - legOffset;
+      const rx = cx + legOffset;
+      const topY = T + legOffset;
+      ctx.beginPath();
+      ctx.moveTo(lx, B);
+      ctx.lineTo(lx, topY);
+      ctx.arc(cx, topY, legOffset, Math.PI, 2 * Math.PI, false); // up and over the top
+      ctx.lineTo(rx, B - head);
+      ctx.stroke();
+      headAt(rx, B, Math.PI / 2); // arrowhead points down
+      return;
+    }
+    // 90° left / right turn: vertical shaft, then curve out to the side.
+    const side = type === "left" ? L : R;
+    ctx.beginPath();
+    ctx.moveTo(cx, B);
+    ctx.lineTo(cx, T + H * 0.5);
+    ctx.quadraticCurveTo(cx, T, side, T);
+    ctx.stroke();
+    headAt(side, T, type === "left" ? Math.PI : 0);
+  };
+
   const drawOneStroke = (ctx: CanvasRenderingContext2D, s: Stroke) => {
     ctx.strokeStyle = s.color;
     ctx.fillStyle = s.color;
@@ -742,6 +798,10 @@ export default function RouteMapPage() {
       ctx.beginPath();
       ctx.ellipse((a.x + b.x) / 2, (a.y + b.y) / 2, Math.abs(b.x - a.x) / 2, Math.abs(b.y - a.y) / 2, 0, 0, Math.PI * 2);
       ctx.stroke();
+      return;
+    }
+    if (s.tool === "left" || s.tool === "right" || s.tool === "uturn") {
+      drawTurnArrow(ctx, s.tool, a, b, s.color, s.width);
       return;
     }
     // arrow: shaft + filled head
@@ -776,11 +836,15 @@ export default function RouteMapPage() {
   // a clear error rather than silently failing.
   useEffect(() => {
     if (!drawMode || !lightbox) return;
-    const url = lbPhotos[lbIndex] || lightbox.url;
-    if (!url) return;
+    const rawUrl = lbPhotos[lbIndex] || lightbox.url;
+    if (!rawUrl) return;
+    // Cross-origin photos (S3) taint the canvas and block toBlob on Save. Route
+    // them through the same-origin proxy so the photo loads AND stays exportable.
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const isExternal = /^https?:\/\//i.test(rawUrl) && !rawUrl.startsWith(origin);
+    const url = isExternal ? `/api/image-proxy?url=${encodeURIComponent(rawUrl)}` : rawUrl;
     let cancelled = false;
     const img = new Image();
-    img.crossOrigin = "anonymous";
     img.onload = () => {
       if (cancelled) return;
       baseImgRef.current = img;
@@ -1476,11 +1540,14 @@ export default function RouteMapPage() {
                       <>
                         <div style={styles.drawTools}>
                           {([
-                            ["arrow", "➔"],
-                            ["pen", "✎"],
-                            ["rect", "▭"],
-                            ["ellipse", "◯"],
-                          ] as const).map(([t, icon]) => (
+                            ["arrow", "➔", "Arrow"],
+                            ["pen", "✎", "Freehand"],
+                            ["rect", "▭", "Rectangle"],
+                            ["ellipse", "◯", "Ellipse"],
+                            ["left", "↰", "Left turn"],
+                            ["right", "↱", "Right turn"],
+                            ["uturn", "↩", "U-turn"],
+                          ] as const).map(([t, icon, label]) => (
                             <button
                               key={t}
                               onClick={() => setDrawTool(t)}
@@ -1488,7 +1555,7 @@ export default function RouteMapPage() {
                                 ...styles.toolBtn,
                                 ...(drawTool === t ? styles.toolBtnActive : {}),
                               }}
-                              title={t}
+                              title={label}
                             >
                               {icon}
                             </button>
