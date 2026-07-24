@@ -1555,6 +1555,8 @@ export default function RouteMapPage() {
                     onPointerUp={onDrawUp}
                     onPointerLeave={onDrawUp}
                   />
+                ) : isVideoUrl(curUrl) ? (
+                  <video src={curUrl} controls playsInline style={styles.lightboxImg} />
                 ) : (
                   <img src={curUrl} alt="" style={styles.lightboxImg} />
                 )}
@@ -1649,7 +1651,7 @@ export default function RouteMapPage() {
                   ) : null}
                 </div>
 
-                {!isShare ? (
+                {!isShare && !isVideoUrl(curUrl) ? (
                   <div style={styles.drawPanel}>
                     {!drawMode ? (
                       <button style={styles.drawBtn} onClick={() => setDrawMode(true)}>
@@ -2196,6 +2198,11 @@ function escapeHtml(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// A report media URL that points to a video (vs a photo).
+function isVideoUrl(u?: string | null): boolean {
+  return /\.(mp4|mov|m4v|webm|avi|mkv|3gp|ogv|qt)(\?|#|$)/i.test(String(u || ""));
 }
 
 // ---- Animated route-mapping flowchart (the "Locations" view) ----

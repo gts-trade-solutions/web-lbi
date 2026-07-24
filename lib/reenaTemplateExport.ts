@@ -1328,7 +1328,7 @@ type ObservationData = {
   // shading or the {#isRedDifficulty}/{#isYellowDifficulty}/{#isGreenDifficulty}
   // conditional blocks that triplicate the observation table in the template.
   difficultyValue: string;
-  difficultyKey: "red" | "yellow" | "green";
+  difficultyKey: "red" | "yellow" | "green" | "neutral";
   headerFillColor: string;
   headerTextColor: string;
   bodyFillColor: string;
@@ -2989,6 +2989,11 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       photos = photos.filter(
         (p) => p.include_in_export == null || Number(p.include_in_export) !== 0
       );
+      // Videos live in report_photos too but can't embed in a DOCX — drop them.
+      photos = photos.filter((p) => {
+        const ref = String(p.url || p.file_name || "");
+        return !/\.(mp4|mov|m4v|webm|avi|mkv|3gp|ogv|qt)(\?|#|$)/i.test(ref);
+      });
       if (excludedPhotoRows.length) {
         console.log("[export photos] excluded by user selection:", excludedPhotoRows.length);
       }

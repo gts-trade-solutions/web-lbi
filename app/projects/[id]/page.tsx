@@ -192,8 +192,25 @@ async function uploadToBucket(bucket: string, path: string, file: File) {
   return { path: String(data?.key || data?.path || path), publicUrl: String(data?.url || "") };
 }
 
+// A report_photos row can hold a photo OR a video; we tell them apart by the
+// file extension on the URL/name (no schema change needed).
+function isVideoUrl(u?: string | null): boolean {
+  return /\.(mp4|mov|m4v|webm|avi|mkv|3gp|ogv|qt)(\?|#|$)/i.test(String(u || ""));
+}
+
 async function uploadReportPhotos(projectId: string, reportId: string, files: File[]) {
   if (!files.length) return;
+
+  // Videos are large — cap at 50 MB so the upload path stays reliable.
+  const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
+  for (const f of files) {
+    const isVid = /^video\//i.test(f.type) || isVideoUrl(f.name);
+    if (isVid && f.size > MAX_VIDEO_BYTES) {
+      throw new Error(
+        `Video "${f.name}" is ${(f.size / 1048576).toFixed(0)} MB — over the 50 MB limit. Please upload a shorter clip.`
+      );
+    }
+  }
 
   // helper to read width/height
   async function getImageSize(file: File): Promise<{ width: number; height: number } | null> {
@@ -1775,18 +1792,33 @@ export default function ProjectReportsPage() {
                   </div>
 
                   {cur.url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={cur.url}
-                      alt={cur.file_name || "Report photo"}
-                      style={{
-                        width: "100%",
-                        maxHeight: "70vh",
-                        objectFit: "contain",
-                        borderRadius: 12,
-                        background: "#0B1220",
-                      }}
-                    />
+                    isVideoUrl(cur.url) ? (
+                      <video
+                        src={cur.url}
+                        controls
+                        playsInline
+                        style={{
+                          width: "100%",
+                          maxHeight: "70vh",
+                          objectFit: "contain",
+                          borderRadius: 12,
+                          background: "#0B1220",
+                        }}
+                      />
+                    ) : (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={cur.url}
+                        alt={cur.file_name || "Report photo"}
+                        style={{
+                          width: "100%",
+                          maxHeight: "70vh",
+                          objectFit: "contain",
+                          borderRadius: 12,
+                          background: "#0B1220",
+                        }}
+                      />
+                    )
                   ) : (
                     <div style={{ height: 240, borderRadius: 12, background: "#0B1220" }} />
                   )}
@@ -2514,25 +2546,71 @@ export default function ProjectReportsPage() {
                                       title={`${p.file_name || "Photo"} — ${included ? "in Word file" : "NOT in Word file"}. Click the image to view full size.`}
                                     >
                                       {p.url ? (
-                                        // eslint-disable-next-line @next/next/no-img-element
-                                        <img
-                                          src={p.url}
-                                          alt={p.file_name || "Report photo"}
-                                          onClick={() =>
-                                            setPhotoPreview({
-                                              reportId: r.id,
-                                              index: (r.photos || []).findIndex((x) => x.id === p.id),
-                                            })
-                                          }
-                                          style={{
-                                            width: "100%",
-                                            height: "100%",
-                                            objectFit: "cover",
-                                            cursor: "pointer",
-                                            display: "block",
-                                            background: "#F2F4F7",
-                                          }}
-                                        />
+                                        isVideoUrl(p.url) ? (
+                                          <div
+                                            onClick={() =>
+                                              setPhotoPreview({
+                                                reportId: r.id,
+                                                index: (r.photos || []).findIndex((x) => x.id === p.id),
+                                              })
+                                            }
+                                            style={{
+                                              position: "relative",
+                                              width: "100%",
+                                              height: "100%",
+                                              cursor: "pointer",
+                                            }}
+                                            title="Video — click to play"
+                                          >
+                                            <video
+                                              src={p.url}
+                                              muted
+                                              preload="metadata"
+                                              style={{
+                                                width: "100%",
+                                                height: "100%",
+                                                objectFit: "cover",
+                                                display: "block",
+                                                background: "#0B1220",
+                                              }}
+                                            />
+                                            <span
+                                              style={{
+                                                position: "absolute",
+                                                inset: 0,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                                fontSize: 20,
+                                                color: "#fff",
+                                                textShadow: "0 1px 4px rgba(0,0,0,0.8)",
+                                                pointerEvents: "none",
+                                              }}
+                                            >
+                                              ▶
+                                            </span>
+                                          </div>
+                                        ) : (
+                                          // eslint-disable-next-line @next/next/no-img-element
+                                          <img
+                                            src={p.url}
+                                            alt={p.file_name || "Report photo"}
+                                            onClick={() =>
+                                              setPhotoPreview({
+                                                reportId: r.id,
+                                                index: (r.photos || []).findIndex((x) => x.id === p.id),
+                                              })
+                                            }
+                                            style={{
+                                              width: "100%",
+                                              height: "100%",
+                                              objectFit: "cover",
+                                              cursor: "pointer",
+                                              display: "block",
+                                              background: "#F2F4F7",
+                                            }}
+                                          />
+                                        )
                                       ) : (
                                         <div style={{ width: "100%", height: "100%", background: "#F2F4F7" }} />
                                       )}
@@ -2987,7 +3065,7 @@ function InsertReportModal({
           <input
             ref={fileRef}
             type="file"
-            accept="image/*,.pdf,application/pdf"
+            accept="image/*,video/*,.pdf,application/pdf"
             multiple
             style={{ display: "none" }}
             onChange={(e) => {
@@ -3536,7 +3614,7 @@ function EditReportModal({
           <input
             ref={photoInputRef}
             type="file"
-            accept="image/*,.pdf,application/pdf"
+            accept="image/*,video/*,.pdf,application/pdf"
             multiple
             style={{ display: "none" }}
             onChange={(e) => addPhotos(e.target.files)}
@@ -4581,7 +4659,7 @@ function RouteSetupModal({
           <input
             ref={gaInputRef}
             type="file"
-            accept="image/*,.pdf,application/pdf"
+            accept="image/*,video/*,.pdf,application/pdf"
             multiple
             style={{ display: "none" }}
             onChange={(e) => {
