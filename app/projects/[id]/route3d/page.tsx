@@ -1560,12 +1560,33 @@ export default function RouteMapPage() {
                               {icon}
                             </button>
                           ))}
+                          {([
+                            ["#FFD400", "Yellow"],
+                            ["#FF7A00", "Orange"],
+                            ["#1E3A8A", "Navy blue"],
+                            ["#E11D2E", "Red"],
+                          ] as const).map(([c, label]) => (
+                            <button
+                              key={c}
+                              onClick={() => setDrawColor(c)}
+                              title={label}
+                              aria-label={label}
+                              style={{
+                                ...styles.swatch,
+                                background: c,
+                                outline:
+                                  drawColor.toLowerCase() === c.toLowerCase()
+                                    ? "2px solid #0f172a"
+                                    : "2px solid transparent",
+                              }}
+                            />
+                          ))}
                           <input
                             type="color"
                             value={drawColor}
                             onChange={(e) => setDrawColor(e.target.value)}
                             style={styles.colorInput}
-                            title="Colour"
+                            title="Custom colour"
                           />
                           <select
                             value={drawWidth}
@@ -2680,6 +2701,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   toolBtnActive: { background: "#0f172a", color: "#fff", borderColor: "#0f172a" },
   colorInput: { width: 38, height: 38, border: "1px solid #d7dbe0", borderRadius: 8, cursor: "pointer", padding: 2, background: "#fff" },
+  swatch: {
+    width: 30,
+    height: 30,
+    borderRadius: "50%",
+    border: "1px solid rgba(0,0,0,0.15)",
+    cursor: "pointer",
+    outlineOffset: 2,
+    flexShrink: 0,
+  },
   widthSelect: { height: 38, borderRadius: 8, border: "1px solid #d7dbe0", padding: "0 8px", fontSize: 14, cursor: "pointer" },
   drawActions: { display: "flex", gap: 6, flexWrap: "wrap" },
   drawBtnGhost: {
