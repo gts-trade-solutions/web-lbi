@@ -203,10 +203,12 @@ export default function RouteMapPage() {
 
   // ---- Draw-on-image annotation state (authored view only) ----
   type Stroke = {
-    tool: "arrow" | "pen" | "rect" | "ellipse" | "left" | "right" | "uturn";
+    tool: "arrow" | "pen" | "rect" | "ellipse" | "left" | "right" | "uturn" | "x" | "text";
     color: string;
     width: number;
-    points: { x: number; y: number }[]; // pen: path; others: [start, end]
+    points: { x: number; y: number }[]; // pen: path; others: [start, end]; text: [pos]
+    text?: string;
+    fontSize?: number;
   };
   const [drawMode, setDrawMode] = useState(false);
   const [drawTool, setDrawTool] = useState<Stroke["tool"]>("arrow");
@@ -781,6 +783,17 @@ export default function RouteMapPage() {
     ctx.lineJoin = "round";
     const pts = s.points;
     if (!pts.length) return;
+    if (s.tool === "text") {
+      ctx.textBaseline = "top";
+      ctx.font = `bold ${s.fontSize || 32}px system-ui, Segoe UI, Arial, sans-serif`;
+      // Subtle dark outline so light text stays readable on a bright photo.
+      ctx.lineWidth = Math.max(2, (s.fontSize || 32) * 0.06);
+      ctx.strokeStyle = "rgba(0,0,0,0.55)";
+      ctx.strokeText(s.text || "", pts[0].x, pts[0].y);
+      ctx.fillStyle = s.color;
+      ctx.fillText(s.text || "", pts[0].x, pts[0].y);
+      return;
+    }
     if (s.tool === "pen") {
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
@@ -802,6 +815,16 @@ export default function RouteMapPage() {
     }
     if (s.tool === "left" || s.tool === "right" || s.tool === "uturn") {
       drawTurnArrow(ctx, s.tool, a, b, s.color, s.width);
+      return;
+    }
+    if (s.tool === "x") {
+      // Cross drawn across the dragged box.
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.moveTo(b.x, a.y);
+      ctx.lineTo(a.x, b.y);
+      ctx.stroke();
       return;
     }
     // arrow: shaft + filled head
@@ -892,8 +915,21 @@ export default function RouteMapPage() {
   const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!drawMode) return;
     e.preventDefault();
-    (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
     const p = canvasPoint(e);
+    if (drawTool === "text") {
+      // Click to place text; prompt for the string. Size scales with the
+      // chosen width so it reads on a high-resolution photo.
+      const txt = window.prompt("Text to add:");
+      if (txt && txt.trim()) {
+        const fontSize = Math.max(28, drawWidth * 7);
+        setStrokes((prev) => [
+          ...prev,
+          { tool: "text", color: drawColor, width: drawWidth, points: [p], text: txt.trim(), fontSize },
+        ]);
+      }
+      return; // no drag stroke for text
+    }
+    (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
     drawingRef.current = { tool: drawTool, color: drawColor, width: drawWidth, points: [p, p] };
     redrawCanvas(drawingRef.current);
   };
@@ -1547,6 +1583,8 @@ export default function RouteMapPage() {
                             ["left", "↰", "Left turn"],
                             ["right", "↱", "Right turn"],
                             ["uturn", "↩", "U-turn"],
+                            ["x", "✕", "X mark"],
+                            ["text", "T", "Text"],
                           ] as const).map(([t, icon, label]) => (
                             <button
                               key={t}
