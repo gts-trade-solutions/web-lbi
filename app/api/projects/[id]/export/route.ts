@@ -174,10 +174,11 @@ export async function GET(request: Request, context: Ctx) {
       console.error("[export] template path:", TEMPLATE_PATH, "exists:", templateExists);
 
       // Lightweight per-report sample for KM/location debugging.
+      // SELECT * (not an explicit column list) so installs that use loc_lat/
+      // loc_lon and lack latitude/longitude/location/address columns don't
+      // crash this debug sample with "Unknown column".
       const reportSamples = await safeQuery(
-        `SELECT id, latitude, longitude, loc_lat, loc_lon, location, address, resolved_location,
-                category, description, remarks_action, kms, sort_order, created_at
-         FROM reports WHERE project_id = ? ORDER BY sort_order ASC, created_at ASC LIMIT 5`,
+        `SELECT * FROM reports WHERE project_id = ? ORDER BY sort_order ASC, created_at ASC LIMIT 5`,
         [projectId]
       );
       // Inline mini-haversine so we can show the cumulative km without

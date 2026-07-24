@@ -63,10 +63,10 @@ export async function GET(request: Request, context: Ctx) {
     if (cols.has("created_at")) orderParts.push("created_at ASC");
     if (cols.has("id")) orderParts.push("id ASC");
     const orderBy = orderParts.length ? `ORDER BY ${orderParts.join(", ")}` : "";
-    const delFilter = cols.has("deleted_at") ? "AND deleted_at IS NULL" : "";
-
+    // No deleted_at filter — mirror the Word export (which works), so installs
+    // where active reports don't store deleted_at = NULL still return rows.
     const [reportRows] = await pool.query(
-      `SELECT * FROM reports WHERE project_id = ? ${delFilter} ${orderBy}`,
+      `SELECT * FROM reports WHERE project_id = ? ${orderBy}`,
       [projectId]
     );
     let reports = Array.isArray(reportRows) ? (reportRows as any[]) : [];
