@@ -3663,13 +3663,44 @@ function EditReportModal({
                   }}
                 >
                   {p.url ? (
-                    <a href={p.url} target="_blank" rel="noreferrer">
-                      <img
-                        src={p.url}
-                        alt={p.file_name || ""}
-                        style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }}
-                      />
-                    </a>
+                    isVideoUrl(p.url) ? (
+                      <a
+                        href={p.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ position: "relative", display: "block" }}
+                      >
+                        <video
+                          src={p.url}
+                          muted
+                          preload="metadata"
+                          style={{ width: "100%", height: 90, objectFit: "cover", display: "block", background: "#0B1220" }}
+                        />
+                        <span
+                          style={{
+                            position: "absolute",
+                            inset: 0,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontSize: 22,
+                            color: "#fff",
+                            textShadow: "0 1px 4px rgba(0,0,0,0.8)",
+                            pointerEvents: "none",
+                          }}
+                        >
+                          ▶
+                        </span>
+                      </a>
+                    ) : (
+                      <a href={p.url} target="_blank" rel="noreferrer">
+                        <img
+                          src={p.url}
+                          alt={p.file_name || ""}
+                          style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }}
+                        />
+                      </a>
+                    )
                   ) : (
                     <div
                       style={{
@@ -3863,7 +3894,7 @@ function PhotoUploadModal({
               gap: 10,
             }}
           >
-            {existing.map((p) => {
+            {existing.filter((p) => !isVideoUrl(p.url)).map((p) => {
               const included = isIncluded(p);
               return (
                 <label
