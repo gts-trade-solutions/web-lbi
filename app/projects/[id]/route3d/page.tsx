@@ -196,6 +196,28 @@ export default function RouteMapPage() {
   const [playing, setPlaying] = useState(false);
   const [banner, setBanner] = useState<string>("");
   const [lightbox, setLightbox] = useState<{ url: string; reportId: string } | null>(null);
+  // Carousel state for the lightbox: all photos for the open report + which
+  // one is showing. Manual prev/next only — never auto-advances.
+  const [lbPhotos, setLbPhotos] = useState<string[]>([]);
+  const [lbIndex, setLbIndex] = useState(0);
+
+  // ---- Draw-on-image annotation state (authored view only) ----
+  type Stroke = {
+    tool: "arrow" | "pen" | "rect" | "ellipse";
+    color: string;
+    width: number;
+    points: { x: number; y: number }[]; // pen: path; others: [start, end]
+  };
+  const [drawMode, setDrawMode] = useState(false);
+  const [drawTool, setDrawTool] = useState<Stroke["tool"]>("arrow");
+  const [drawColor, setDrawColor] = useState("#FFD400");
+  const [drawWidth, setDrawWidth] = useState(6);
+  const [strokes, setStrokes] = useState<Stroke[]>([]);
+  const [savingAnno, setSavingAnno] = useState(false);
+  const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const drawingRef = useRef<Stroke | null>(null);
+  const baseImgRef = useRef<HTMLImageElement | null>(null);
+  const naturalSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const [view, setView] = useState<"map" | "locations">("map");
   // Locations map tour is prepared (not auto-played) after the flowchart.
   const [locReady, setLocReady] = useState(false);
@@ -636,6 +658,235 @@ export default function RouteMapPage() {
     } catch {
       photoCacheRef.current[reportId] = null;
       return null;
+    }
+  };
+
+  // Fetch ALL photo URLs for a report (for the lightbox carousel).
+  const fetchAllPhotos = async (reportId: string): Promise<string[]> => {
+    try {
+      const res = isShare
+        ? await fetch(
+            `/api/share/${encodeURIComponent(shareToken)}/reports/${encodeURIComponent(
+              reportId
+            )}/photos`,
+            { method: "GET", headers: { "X-Share-Session": shareSession } }
+          )
+        : await fetch(`/api/reports/${encodeURIComponent(reportId)}/photos`, {
+            method: "GET",
+            credentials: "include",
+            headers: authHeaders(),
+          });
+      const data = await res.json().catch(() => ({} as any));
+      const list: string[] = Array.isArray(data?.photos)
+        ? data.photos.map((x: any) => String(x?.url || "")).filter(Boolean)
+        : [];
+      return list;
+    } catch {
+      return [];
+    }
+  };
+
+  // When the lightbox opens, load every photo for that report so the user can
+  // page through them with prev/next. Starts on the photo that was clicked.
+  useEffect(() => {
+    if (!lightbox) {
+      setLbPhotos([]);
+      setLbIndex(0);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const urls = await fetchAllPhotos(lightbox.reportId);
+      if (cancelled) return;
+      const list = urls.length ? urls : lightbox.url ? [lightbox.url] : [];
+      const clickedAt = list.indexOf(lightbox.url);
+      setLbPhotos(list);
+      setLbIndex(clickedAt >= 0 ? clickedAt : 0);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lightbox]);
+
+  // ---- Annotation drawing ----
+  // Reset annotations whenever the shown photo changes or the lightbox closes.
+  useEffect(() => {
+    setStrokes([]);
+    drawingRef.current = null;
+    setDrawMode(false);
+  }, [lightbox, lbIndex]);
+
+  const drawOneStroke = (ctx: CanvasRenderingContext2D, s: Stroke) => {
+    ctx.strokeStyle = s.color;
+    ctx.fillStyle = s.color;
+    ctx.lineWidth = s.width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    const pts = s.points;
+    if (!pts.length) return;
+    if (s.tool === "pen") {
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+      return;
+    }
+    const a = pts[0];
+    const b = pts[pts.length - 1];
+    if (s.tool === "rect") {
+      ctx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+      return;
+    }
+    if (s.tool === "ellipse") {
+      ctx.beginPath();
+      ctx.ellipse((a.x + b.x) / 2, (a.y + b.y) / 2, Math.abs(b.x - a.x) / 2, Math.abs(b.y - a.y) / 2, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      return;
+    }
+    // arrow: shaft + filled head
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+    const angle = Math.atan2(b.y - a.y, b.x - a.x);
+    const head = Math.max(14, s.width * 3.5);
+    ctx.beginPath();
+    ctx.moveTo(b.x, b.y);
+    ctx.lineTo(b.x - head * Math.cos(angle - Math.PI / 7), b.y - head * Math.sin(angle - Math.PI / 7));
+    ctx.lineTo(b.x - head * Math.cos(angle + Math.PI / 7), b.y - head * Math.sin(angle + Math.PI / 7));
+    ctx.closePath();
+    ctx.fill();
+  };
+
+  const redrawCanvas = (extra?: Stroke | null) => {
+    const canvas = drawCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const base = baseImgRef.current;
+    if (base) ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
+    for (const s of strokes) drawOneStroke(ctx, s);
+    if (extra) drawOneStroke(ctx, extra);
+  };
+
+  // Load the current photo into the canvas when draw mode opens. crossOrigin
+  // lets us export the canvas if the host allows CORS; if not, Save surfaces
+  // a clear error rather than silently failing.
+  useEffect(() => {
+    if (!drawMode || !lightbox) return;
+    const url = lbPhotos[lbIndex] || lightbox.url;
+    if (!url) return;
+    let cancelled = false;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      if (cancelled) return;
+      baseImgRef.current = img;
+      const w = img.naturalWidth || 1200;
+      const h = img.naturalHeight || 800;
+      naturalSizeRef.current = { w, h };
+      const canvas = drawCanvasRef.current;
+      if (canvas) {
+        canvas.width = w;
+        canvas.height = h;
+        // Fit within the viewport, preserving aspect, so client→canvas pointer
+        // math has an exact uniform scale with no letterbox offset.
+        const maxW = Math.min(window.innerWidth * 0.62, 1080);
+        const maxH = window.innerHeight * 0.85;
+        const scale = Math.min(maxW / w, maxH / h, 1);
+        canvas.style.width = `${Math.round(w * scale)}px`;
+        canvas.style.height = `${Math.round(h * scale)}px`;
+      }
+      redrawCanvas();
+    };
+    img.onerror = () => {
+      if (!cancelled) baseImgRef.current = null;
+    };
+    img.src = url;
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawMode, lbIndex, lightbox]);
+
+  // Redraw when committed strokes change while drawing.
+  useEffect(() => {
+    if (drawMode) redrawCanvas();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strokes, drawMode]);
+
+  const canvasPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = drawCanvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: ((e.clientX - rect.left) / rect.width) * canvas.width,
+      y: ((e.clientY - rect.top) / rect.height) * canvas.height,
+    };
+  };
+  const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!drawMode) return;
+    e.preventDefault();
+    (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+    const p = canvasPoint(e);
+    drawingRef.current = { tool: drawTool, color: drawColor, width: drawWidth, points: [p, p] };
+    redrawCanvas(drawingRef.current);
+  };
+  const onDrawMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!drawMode || !drawingRef.current) return;
+    const p = canvasPoint(e);
+    if (drawTool === "pen") drawingRef.current.points.push(p);
+    else drawingRef.current.points[1] = p;
+    redrawCanvas(drawingRef.current);
+  };
+  const onDrawUp = () => {
+    if (!drawingRef.current) return;
+    const s = drawingRef.current;
+    drawingRef.current = null;
+    setStrokes((prev) => [...prev, s]);
+  };
+
+  const saveAnnotated = async () => {
+    const canvas = drawCanvasRef.current;
+    if (!canvas || !lightbox || savingAnno) return;
+    setSavingAnno(true);
+    try {
+      redrawCanvas(); // bake in the latest strokes
+      const blob: Blob | null = await new Promise((resolve) =>
+        canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92)
+      );
+      if (!blob)
+        throw new Error(
+          "Couldn't export the annotated image — the photo host is blocking cross-origin canvas export."
+        );
+      const fd = new FormData();
+      fd.append("file", blob, `annotated_${Date.now()}.jpg`);
+      fd.append("folder", "uploads");
+      fd.append("reportId", lightbox.reportId);
+      fd.append("width", String(canvas.width));
+      fd.append("height", String(canvas.height));
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        credentials: "include",
+        headers: authHeaders(),
+        body: fd,
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.error || "Upload failed");
+      const newUrl = String(data?.url || data?.photo?.url || "");
+      const urls = await fetchAllPhotos(lightbox.reportId);
+      setStrokes([]);
+      setDrawMode(false);
+      if (urls.length) {
+        setLbPhotos(urls);
+        const at = newUrl ? urls.indexOf(newUrl) : -1;
+        setLbIndex(at >= 0 ? at : urls.length - 1);
+      }
+    } catch (err) {
+      alert((err as { message?: string })?.message || "Failed to save the annotated image.");
+    } finally {
+      setSavingAnno(false);
     }
   };
 
@@ -1142,11 +1393,51 @@ export default function RouteMapPage() {
 
       {lightbox && (() => {
         const lp = points.find((p) => p.id === lightbox.reportId) || null;
+        const total = lbPhotos.length;
+        const curUrl = lbPhotos[lbIndex] || lightbox.url;
         return (
           <div style={styles.lightbox} onClick={() => setLightbox(null)}>
             <div style={styles.lightboxCard} onClick={(e) => e.stopPropagation()}>
               <div style={styles.lightboxImgWrap}>
-                <img src={lightbox.url} alt="" style={styles.lightboxImg} />
+                {drawMode ? (
+                  <canvas
+                    ref={drawCanvasRef}
+                    style={styles.drawCanvas}
+                    onPointerDown={onDrawDown}
+                    onPointerMove={onDrawMove}
+                    onPointerUp={onDrawUp}
+                    onPointerLeave={onDrawUp}
+                  />
+                ) : (
+                  <img src={curUrl} alt="" style={styles.lightboxImg} />
+                )}
+                {total > 1 && !drawMode ? (
+                  <>
+                    <button
+                      style={{ ...styles.lbNav, ...styles.lbNavPrev }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setLbIndex((i) => (i - 1 + total) % total);
+                      }}
+                      aria-label="Previous photo"
+                    >
+                      ‹
+                    </button>
+                    <button
+                      style={{ ...styles.lbNav, ...styles.lbNavNext }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setLbIndex((i) => (i + 1) % total);
+                      }}
+                      aria-label="Next photo"
+                    >
+                      ›
+                    </button>
+                    <div style={styles.lbCounter}>
+                      {lbIndex + 1} / {total}
+                    </div>
+                  </>
+                ) : null}
               </div>
 
               <div style={styles.lightboxInfo}>
@@ -1174,6 +1465,88 @@ export default function RouteMapPage() {
                     </div>
                   ) : null}
                 </div>
+
+                {!isShare ? (
+                  <div style={styles.drawPanel}>
+                    {!drawMode ? (
+                      <button style={styles.drawBtn} onClick={() => setDrawMode(true)}>
+                        ✏️ Draw on photo
+                      </button>
+                    ) : (
+                      <>
+                        <div style={styles.drawTools}>
+                          {([
+                            ["arrow", "➔"],
+                            ["pen", "✎"],
+                            ["rect", "▭"],
+                            ["ellipse", "◯"],
+                          ] as const).map(([t, icon]) => (
+                            <button
+                              key={t}
+                              onClick={() => setDrawTool(t)}
+                              style={{
+                                ...styles.toolBtn,
+                                ...(drawTool === t ? styles.toolBtnActive : {}),
+                              }}
+                              title={t}
+                            >
+                              {icon}
+                            </button>
+                          ))}
+                          <input
+                            type="color"
+                            value={drawColor}
+                            onChange={(e) => setDrawColor(e.target.value)}
+                            style={styles.colorInput}
+                            title="Colour"
+                          />
+                          <select
+                            value={drawWidth}
+                            onChange={(e) => setDrawWidth(Number(e.target.value))}
+                            style={styles.widthSelect}
+                            title="Line width"
+                          >
+                            <option value={3}>Thin</option>
+                            <option value={6}>Medium</option>
+                            <option value={10}>Thick</option>
+                          </select>
+                        </div>
+                        <div style={styles.drawActions}>
+                          <button
+                            style={styles.drawBtnGhost}
+                            onClick={() => setStrokes((s) => s.slice(0, -1))}
+                            disabled={!strokes.length}
+                          >
+                            Undo
+                          </button>
+                          <button
+                            style={styles.drawBtnGhost}
+                            onClick={() => setStrokes([])}
+                            disabled={!strokes.length}
+                          >
+                            Clear
+                          </button>
+                          <button
+                            style={styles.drawBtnGhost}
+                            onClick={() => {
+                              setStrokes([]);
+                              setDrawMode(false);
+                            }}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            style={styles.drawBtnPrimary}
+                            onClick={saveAnnotated}
+                            disabled={savingAnno || !strokes.length}
+                          >
+                            {savingAnno ? "Saving…" : "Save"}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : null}
               </div>
 
               <button style={styles.lightboxClose} onClick={() => setLightbox(null)}>
@@ -2178,6 +2551,104 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
+    position: "relative",
+  },
+  lbNav: {
+    position: "absolute",
+    top: "50%",
+    transform: "translateY(-50%)",
+    width: 44,
+    height: 44,
+    borderRadius: "50%",
+    border: "none",
+    background: "rgba(0,0,0,0.55)",
+    color: "#fff",
+    fontSize: 26,
+    lineHeight: "44px",
+    fontWeight: 700,
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 3,
+  },
+  lbNavPrev: { left: 12 },
+  lbNavNext: { right: 12 },
+  drawCanvas: {
+    maxWidth: "100%",
+    maxHeight: "85vh",
+    background: "#0b1220",
+    cursor: "crosshair",
+    touchAction: "none",
+    display: "block",
+  },
+  drawPanel: {
+    marginTop: "auto",
+    paddingTop: 14,
+    borderTop: "1px solid #eef0f3",
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+  drawBtn: {
+    padding: "10px 14px",
+    borderRadius: 10,
+    border: "1px solid #d7dbe0",
+    background: "#f8fafc",
+    fontWeight: 700,
+    fontSize: 14,
+    cursor: "pointer",
+    color: "#0f172a",
+  },
+  drawTools: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" },
+  toolBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 8,
+    border: "1px solid #d7dbe0",
+    background: "#fff",
+    fontSize: 18,
+    cursor: "pointer",
+    color: "#0f172a",
+  },
+  toolBtnActive: { background: "#0f172a", color: "#fff", borderColor: "#0f172a" },
+  colorInput: { width: 38, height: 38, border: "1px solid #d7dbe0", borderRadius: 8, cursor: "pointer", padding: 2, background: "#fff" },
+  widthSelect: { height: 38, borderRadius: 8, border: "1px solid #d7dbe0", padding: "0 8px", fontSize: 14, cursor: "pointer" },
+  drawActions: { display: "flex", gap: 6, flexWrap: "wrap" },
+  drawBtnGhost: {
+    flex: 1,
+    padding: "9px 10px",
+    borderRadius: 8,
+    border: "1px solid #d7dbe0",
+    background: "#fff",
+    fontWeight: 600,
+    fontSize: 13,
+    cursor: "pointer",
+    color: "#0f172a",
+  },
+  drawBtnPrimary: {
+    flex: 1,
+    padding: "9px 10px",
+    borderRadius: 8,
+    border: "none",
+    background: "#16a34a",
+    color: "#fff",
+    fontWeight: 700,
+    fontSize: 13,
+    cursor: "pointer",
+  },
+  lbCounter: {
+    position: "absolute",
+    bottom: 12,
+    left: "50%",
+    transform: "translateX(-50%)",
+    background: "rgba(0,0,0,0.6)",
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: 600,
+    padding: "4px 12px",
+    borderRadius: 999,
+    zIndex: 3,
   },
   lightboxImg: {
     width: "100%",

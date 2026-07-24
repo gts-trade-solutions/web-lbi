@@ -1197,6 +1197,28 @@ function formatDateDDMMYYYYDash(d = new Date()) {
   return `${dd}-${mm}-${d.getFullYear()}`;
 }
 
+/**
+ * Survey date = when the reports were actually recorded (the EARLIEST
+ * report's created_at), not the export/generation date. Report timestamps
+ * are stored in UTC, so we shift by +5:30 and read UTC fields to get the
+ * correct India calendar date regardless of the server's timezone. Falls
+ * back to today if no report has a usable created_at.
+ */
+function formatSurveyDate(reports: Row[], sep: "." | "-"): string {
+  let earliest: number | null = null;
+  for (const r of reports || []) {
+    const raw = (r as Row)?.created_at;
+    if (!raw) continue;
+    const t = new Date(String(raw)).getTime();
+    if (Number.isFinite(t)) earliest = earliest == null ? t : Math.min(earliest, t);
+  }
+  const baseMs = earliest != null ? earliest : Date.now();
+  const ist = new Date(baseMs + 5.5 * 60 * 60 * 1000);
+  const dd = String(ist.getUTCDate()).padStart(2, "0");
+  const mm = String(ist.getUTCMonth() + 1).padStart(2, "0");
+  return `${dd}${sep}${mm}${sep}${ist.getUTCFullYear()}`;
+}
+
 function formatLatLine(prefix: "N" | "S" | "E" | "W", v: unknown): string {
   const n = Number(v);
   if (!Number.isFinite(n)) return "-";
@@ -1333,10 +1355,10 @@ const RED_KEYWORDS = [
   "blocked", "closed", "danger",
 ];
 const YELLOW_KEYWORDS = ["yellow", "warning", "caution", "cautious", "medium", "go ahead with caution"];
-const GREEN_KEYWORDS = ["green", "normal", "normal pass", "pass", "ok", ""];
+const GREEN_KEYWORDS = ["green", "normal", "normal pass", "pass", "ok"];
 
 function getDifficultyTableColors(value: unknown): {
-  key: "red" | "yellow" | "green";
+  key: "red" | "yellow" | "green" | "neutral";
   headerFillColor: string;
   headerTextColor: string;
   bodyFillColor: string;
@@ -1373,14 +1395,24 @@ function getDifficultyTableColors(value: unknown): {
       bodyTextColor: "0B3D2E",
     };
   }
-  // Anything not in RED or YELLOW keyword set lands here, including
-  // the empty string and every GREEN_KEYWORDS entry. Red is opt-in.
-  void GREEN_KEYWORDS; // referenced for grep + future explicit check
+  // Green is now OPT-IN: only explicit green/normal/pass/ok words shade
+  // green. This stops rows with no difficulty from all rendering green.
+  if (GREEN_KEYWORDS.includes(d)) {
+    return {
+      key: "green",
+      headerFillColor: "56BE9F",    // bright mint green (spec)
+      headerTextColor: "FFFFFF",
+      bodyFillColor: "F0F9F4",      // near-white with faintest mint tint
+      bodyTextColor: "0B3D2E",
+    };
+  }
+  // Empty / unrecognized difficulty → NEUTRAL grey, never green. A report
+  // with no difficulty set must not be misrepresented as "go ahead".
   return {
-    key: "green",
-    headerFillColor: "56BE9F",    // bright mint green (spec)
+    key: "neutral",
+    headerFillColor: "9AA3AF",    // neutral grey header
     headerTextColor: "FFFFFF",
-    bodyFillColor: "F0F9F4",      // near-white with faintest mint tint
+    bodyFillColor: "F4F5F7",      // near-white neutral body
     bodyTextColor: "0B3D2E",
   };
 }
@@ -1419,6 +1451,7 @@ function getCategoryDisplayName(category: unknown): string {
     return "Signboard / Electric Signboard / Camera Pole";
   }
   if (c.includes("toll")) return "Toll Plaza";
+  if (c.includes("damage") || c.includes("pothole")) return "Damaged Road";
   if (c.includes("narrow")) return "Narrow Road";
   if (c.includes("gate")) return "Gate";
   if (c.includes("bend")) return "Bend";
@@ -1481,6 +1514,10 @@ function normalizeCategoryKey(value: unknown): string {
     return "signboard";
   }
   if (c.includes("toll")) return "toll";
+  // Damaged road / potholes / broken surface get their own icon.
+  if (c.includes("damage") || c.includes("pothole") || c.includes("broken")) {
+    return "damaged_road";
+  }
   if (c.includes("narrow")) return "narrow_road";
   if (c.includes("gate")) return "gate";
   if (c.includes("bend") || c.includes("curve") || c.includes("turn")) return "bend";
@@ -1545,6 +1582,7 @@ const CATEGORY_ICON_MAP: Record<string, string> = {
   // New custom icons.
   flyover: "public/images/report-icons/flyover.png",
   service_road: "public/images/report-icons/service_road.png",
+  damaged_road: "public/images/report-icons/damaged_road.png",
 };
 
 // ---- ON-THE-FLY ICON GENERATION FOR NEW / UNKNOWN CATEGORIES ----
@@ -2075,7 +2113,7 @@ function buildRouteLocationsStepperTableXml(
     `<w:pPr><w:spacing w:before="0" w:after="100"/></w:pPr>`,
     `<w:r>`,
     `<w:rPr>`,
-    `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>`,
+    `<w:rFonts w:ascii="Neue Haas Grotesk Text Pro" w:hAnsi="Neue Haas Grotesk Text Pro"/>`,
     `<w:b/><w:bCs/>`,
     `<w:sz w:val="28"/><w:szCs w:val="28"/>`,
     `<w:color w:val="1F2937"/>`,
@@ -2105,7 +2143,7 @@ function buildRouteLocationsStepperTableXml(
       `<w:pPr><w:jc w:val="center"/><w:spacing w:before="60" w:after="60"/></w:pPr>`,
       `<w:r>`,
       `<w:rPr>`,
-      `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>`,
+      `<w:rFonts w:ascii="Neue Haas Grotesk Text Pro" w:hAnsi="Neue Haas Grotesk Text Pro"/>`,
       `<w:b/><w:bCs/>`,
       `<w:sz w:val="40"/><w:szCs w:val="40"/>`,
       `<w:color w:val="${markerColor}"/>`,
@@ -2121,7 +2159,7 @@ function buildRouteLocationsStepperTableXml(
       `<w:pPr><w:spacing w:before="80" w:after="80"/></w:pPr>`,
       `<w:r>`,
       `<w:rPr>`,
-      `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>`,
+      `<w:rFonts w:ascii="Neue Haas Grotesk Text Pro" w:hAnsi="Neue Haas Grotesk Text Pro"/>`,
       `<w:b/><w:bCs/>`,
       `<w:sz w:val="28"/><w:szCs w:val="28"/>`,
       `<w:color w:val="0F172A"/>`,
@@ -2513,7 +2551,10 @@ async function nominatimReverseAtZoom(
     // Structured address parts — required for highway/road points where
     // display_name is often empty. Without this, road-only points fall
     // straight through to the coordinate fallback.
-    `&addressdetails=1`;
+    `&addressdetails=1` +
+    // Force English (Latin) names so results don't come back in the local
+    // script (Hindi/Tamil/etc.) and produce mixed-language locations.
+    `&accept-language=en`;
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 10000);
   try {
@@ -2639,7 +2680,7 @@ async function reverseGeocodeCity(lat: number, lng: number): Promise<string> {
     `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
     `&lat=${encodeURIComponent(String(lat))}` +
     `&lon=${encodeURIComponent(String(lng))}` +
-    `&zoom=12&addressdetails=1`;
+    `&zoom=12&addressdetails=1&accept-language=en`;
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 10000);
   try {
@@ -3335,8 +3376,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   );
   const conclusionSource = gaRow?.conclusion_html || routePageRow?.conclusion_html || "";
   const conclusion = stripHtml(String(conclusionSource)) || "-";
-  const dateDot = formatDateDDMMYYYYDot();
-  const dateDash = formatDateDDMMYYYYDash();
+  const dateDot = formatSurveyDate(reports, ".");
+  const dateDash = formatSurveyDate(reports, "-");
 
   // ----- Step 7: Fetch image buffers. Each fetch must NEVER throw - it
   // returns null on any failure so the export can continue with fallbacks.
@@ -3976,14 +4017,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       });
     }
 
-    const difficultyValue = String(
-      r.difficulty ||
-        r.remarks_action ||
-        r.status ||
-        r.vehicle_movement ||
-        r.movement ||
-        ""
-    );
+    // Color strictly by the report's own difficulty field. (Previously this
+    // fell back through remarks_action/status/vehicle_movement, which made
+    // every row with unrecognized text render green.)
+    const difficultyValue = String(r.difficulty || "");
     const tableColors = getDifficultyTableColors(difficultyValue);
 
     // Spec-mandated: prove the row didn't unintentionally land on red.
@@ -5634,7 +5671,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             '<w:jc w:val="center"/>' +
           '</w:pPr>' +
           '<w:r>' +
-            '<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:i/><w:color w:val="9E9E9E"/></w:rPr>' +
+            '<w:rPr><w:rFonts w:ascii="Neue Haas Grotesk Text Pro" w:hAnsi="Neue Haas Grotesk Text Pro"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:i/><w:color w:val="9E9E9E"/></w:rPr>' +
             '<w:t xml:space="preserve">Photo not available</w:t>' +
           '</w:r>' +
         '</w:p>';
@@ -6599,7 +6636,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             `</w:pPr>` +
             `<w:r>` +
               `<w:rPr>` +
-                `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>` +
+                `<w:rFonts w:ascii="Neue Haas Grotesk Text Pro" w:hAnsi="Neue Haas Grotesk Text Pro"/>` +
                 `<w:b/><w:bCs/>` +
                 `<w:sz w:val="44"/><w:szCs w:val="44"/>` +
                 `<w:color w:val="44546A"/>` +
@@ -6703,7 +6740,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             `</w:pPr>` +
             `<w:r>` +
               `<w:rPr>` +
-                `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>` +
+                `<w:rFonts w:ascii="Neue Haas Grotesk Text Pro" w:hAnsi="Neue Haas Grotesk Text Pro"/>` +
                 `<w:b/><w:bCs/>` +
                 `<w:sz w:val="44"/><w:szCs w:val="44"/>` +
                 `<w:color w:val="44546A"/>` +
@@ -7127,9 +7164,9 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     // (#595959) to true black (#000000) for stronger contrast.
     // 14pt = w:sz 28 (half-points), 15pt bold = w:sz 30.
     const FTR_RUN_8 =
-      `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="000000"/></w:rPr>`;
+      `<w:rPr><w:rFonts w:ascii="Neue Haas Grotesk Text Pro" w:hAnsi="Neue Haas Grotesk Text Pro"/><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="000000"/></w:rPr>`;
     const FTR_RUN_9B =
-      `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="30"/><w:szCs w:val="30"/><w:b/><w:bCs/><w:color w:val="000000"/></w:rPr>`;
+      `<w:rPr><w:rFonts w:ascii="Neue Haas Grotesk Text Pro" w:hAnsi="Neue Haas Grotesk Text Pro"/><w:sz w:val="30"/><w:szCs w:val="30"/><w:b/><w:bCs/><w:color w:val="000000"/></w:rPr>`;
     const FTR_P_PROPS = `<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>`;
 
     const FOOTER_TABLE_XML =
@@ -7400,7 +7437,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const titleHeaderRunXml = titleUpperForHeader
           ? `<w:r>` +
               `<w:rPr>` +
-                `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>` +
+                `<w:rFonts w:ascii="Neue Haas Grotesk Text Pro" w:hAnsi="Neue Haas Grotesk Text Pro"/>` +
                 `<w:b/><w:bCs/>` +
                 `<w:sz w:val="44"/><w:szCs w:val="44"/>` +
                 `<w:color w:val="44546A"/>` +

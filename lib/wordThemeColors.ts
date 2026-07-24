@@ -45,8 +45,8 @@ const THEME_XML =
         '<a:folHlink><a:srgbClr val="954F72"/></a:folHlink>' +
       "</a:clrScheme>" +
       '<a:fontScheme name="Office">' +
-        '<a:majorFont><a:latin typeface="Calibri Light" panose="020F0302020204030204"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>' +
-        '<a:minorFont><a:latin typeface="Calibri" panose="020F0502020204030204"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>' +
+        '<a:majorFont><a:latin typeface="Neue Haas Grotesk Text Pro"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>' +
+        '<a:minorFont><a:latin typeface="Neue Haas Grotesk Text Pro"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>' +
       "</a:fontScheme>" +
       '<a:fmtScheme name="Office">' +
         "<a:fillStyleLst>" +

@@ -1751,7 +1751,7 @@ export default function ProjectReportsPage() {
                           textOverflow: "ellipsis",
                         }}
                       >
-                        {cur.file_name || cur.url || ""}
+                        {list.length > 1 ? `Photo ${idx + 1} of ${list.length}` : "Report photo"}
                       </div>
                     </div>
                     <button
@@ -1781,14 +1781,14 @@ export default function ProjectReportsPage() {
                       alt={cur.file_name || "Report photo"}
                       style={{
                         width: "100%",
-                        maxHeight: "62vh",
+                        maxHeight: "70vh",
                         objectFit: "contain",
                         borderRadius: 12,
-                        background: "#F2F4F7",
+                        background: "#0B1220",
                       }}
                     />
                   ) : (
-                    <div style={{ height: 240, borderRadius: 12, background: "#F2F4F7" }} />
+                    <div style={{ height: 240, borderRadius: 12, background: "#0B1220" }} />
                   )}
 
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
