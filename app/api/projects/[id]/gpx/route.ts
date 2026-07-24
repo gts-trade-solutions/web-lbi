@@ -75,7 +75,25 @@ export async function GET(request: Request, context: Ctx) {
       reports = reports.filter((r) => set.has(String(r.id)));
     }
     if (!reports.length) {
-      return Response.json({ error: "No reports available for GPX export." }, { status: 400 });
+      // Log WHY there are no reports so a production failure is diagnosable
+      // from the pm2 log (raw count ignores every filter).
+      let rawCount = -1;
+      try {
+        const [cnt] = await pool.query(
+          "SELECT COUNT(*) AS n FROM reports WHERE project_id = ?",
+          [projectId]
+        );
+        rawCount = Number((cnt as any)?.[0]?.n ?? -1);
+      } catch (e) {
+        console.error("[gpx] count probe failed:", e);
+      }
+      console.error(
+        `[gpx] NO REPORTS for project ${projectId} — raw count in reports table = ${rawCount}, reportIds filter = ${reportIds.length}`
+      );
+      return Response.json(
+        { error: "No reports available for GPX export.", projectId, rawCount },
+        { status: 400 }
+      );
     }
 
     // Path points for all these reports, grouped by report.
