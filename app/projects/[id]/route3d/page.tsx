@@ -983,6 +983,29 @@ export default function RouteMapPage() {
   const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!drawMode) return;
     e.preventDefault();
+    // Commit any text still being typed BEFORE handling this click. Clicking a
+    // new spot reuses the same <input> (no blur fires), which was silently
+    // discarding the previous text.
+    if (textDraft) {
+      const d = textDraft;
+      if (d.value.trim()) {
+        setStrokes((prev) => [
+          ...prev,
+          {
+            tool: "text",
+            color: drawColor,
+            width: drawWidth,
+            points: [{ x: d.cx, y: d.cy }],
+            text: d.value.trim(),
+            fontSize: d.naturalFont,
+          },
+        ]);
+      }
+      setTextDraft(null);
+      // The click that dismisses the editor shouldn't also start a new shape;
+      // only re-open a text editor if the Text tool is active.
+      if (drawTool !== "text") return;
+    }
     const p = canvasPoint(e);
     if (drawTool === "move") {
       (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
