@@ -953,14 +953,25 @@ export default function RouteMapPage() {
     }
     return null;
   };
-  const resizeSelectedText = (factor: number) => {
+  // Resize the selected annotation: text scales its font; every other shape
+  // scales its geometry (and line width) around its own centre.
+  const resizeSelected = (factor: number) => {
     if (selectedIdx == null) return;
     setStrokes((prev) =>
-      prev.map((s, i) =>
-        i === selectedIdx && s.tool === "text"
-          ? { ...s, fontSize: Math.max(10, Math.round((s.fontSize || 32) * factor)) }
-          : s
-      )
+      prev.map((s, i) => {
+        if (i !== selectedIdx) return s;
+        if (s.tool === "text") {
+          return { ...s, fontSize: Math.max(10, Math.round((s.fontSize || 32) * factor)) };
+        }
+        const b = strokeBBox(s);
+        const cx = (b.minX + b.maxX) / 2;
+        const cy = (b.minY + b.maxY) / 2;
+        return {
+          ...s,
+          width: Math.min(60, Math.max(1, s.width * factor)),
+          points: s.points.map((p) => ({ x: cx + (p.x - cx) * factor, y: cy + (p.y - cy) * factor })),
+        };
+      })
     );
   };
   const deleteSelected = () => {
@@ -1646,7 +1657,8 @@ export default function RouteMapPage() {
                   <input
                     autoFocus
                     value={textDraft.value}
-                    placeholder="Type…"
+                    placeholder="Short label…"
+                    maxLength={40}
                     onChange={(e) =>
                       setTextDraft((d) => (d ? { ...d, value: e.target.value } : d))
                     }
@@ -1808,22 +1820,18 @@ export default function RouteMapPage() {
                         {drawTool === "move" ? (
                           <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b" }}>
                             {selectedIdx == null
-                              ? "Tap an annotation to select, then drag to move."
-                              : "Drag to move. Use A− / A+ to resize text, or Delete."}
+                              ? "Tap any drawing or text to select, then drag to move."
+                              : "Drag to move · − / + to resize · Delete to remove."}
                           </div>
                         ) : null}
                         {drawTool === "move" && selectedIdx != null ? (
                           <div style={styles.drawActions}>
-                            {strokes[selectedIdx]?.tool === "text" ? (
-                              <>
-                                <button style={styles.drawBtnGhost} onClick={() => resizeSelectedText(0.85)}>
-                                  A−
-                                </button>
-                                <button style={styles.drawBtnGhost} onClick={() => resizeSelectedText(1.18)}>
-                                  A+
-                                </button>
-                              </>
-                            ) : null}
+                            <button style={styles.drawBtnGhost} onClick={() => resizeSelected(0.85)}>
+                              − Smaller
+                            </button>
+                            <button style={styles.drawBtnGhost} onClick={() => resizeSelected(1.18)}>
+                              Larger +
+                            </button>
                             <button style={styles.drawBtnGhost} onClick={deleteSelected}>
                               Delete
                             </button>
