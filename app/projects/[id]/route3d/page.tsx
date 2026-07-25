@@ -211,7 +211,7 @@ export default function RouteMapPage() {
     fontSize?: number;
   };
   const [drawMode, setDrawMode] = useState(false);
-  const [drawTool, setDrawTool] = useState<Stroke["tool"]>("arrow");
+  const [drawTool, setDrawTool] = useState<Stroke["tool"] | "move">("arrow");
   const [drawColor, setDrawColor] = useState("#FFD400");
   const [drawWidth, setDrawWidth] = useState(6);
   const [strokes, setStrokes] = useState<Stroke[]>([]);
@@ -227,6 +227,9 @@ export default function RouteMapPage() {
   const drawingRef = useRef<Stroke | null>(null);
   const baseImgRef = useRef<HTMLImageElement | null>(null);
   const naturalSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+  // Select/move editing: which committed stroke is selected, and the drag anchor.
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+  const moveDragRef = useRef<{ x: number; y: number } | null>(null);
   const [view, setView] = useState<"map" | "locations">("map");
   // Locations map tour is prepared (not auto-played) after the flowchart.
   const [locReady, setLocReady] = useState(false);
@@ -725,6 +728,7 @@ export default function RouteMapPage() {
     drawingRef.current = null;
     setDrawMode(false);
     setTextDraft(null);
+    setSelectedIdx(null);
   }, [lightbox, lbIndex]);
 
   // Directional turn arrows (left / right / U-turn) drawn to fit the dragged
@@ -860,6 +864,16 @@ export default function RouteMapPage() {
     if (base) ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
     for (const s of strokes) drawOneStroke(ctx, s);
     if (extra) drawOneStroke(ctx, extra);
+    // Selection outline (move/select mode).
+    if (drawTool === "move" && selectedIdx != null && strokes[selectedIdx]) {
+      const b = strokeBBox(strokes[selectedIdx]);
+      ctx.save();
+      ctx.setLineDash([10, 7]);
+      ctx.strokeStyle = "#22D3EE";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(b.minX - 8, b.minY - 8, b.maxX - b.minX + 16, b.maxY - b.minY + 16);
+      ctx.restore();
+    }
   };
 
   // Load the current photo into the canvas when draw mode opens. crossOrigin
@@ -906,11 +920,11 @@ export default function RouteMapPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawMode, lbIndex, lightbox]);
 
-  // Redraw when committed strokes change while drawing.
+  // Redraw when committed strokes / selection change while drawing.
   useEffect(() => {
     if (drawMode) redrawCanvas();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [strokes, drawMode]);
+  }, [strokes, drawMode, selectedIdx, drawTool]);
 
   const canvasPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = drawCanvasRef.current!;
@@ -920,10 +934,53 @@ export default function RouteMapPage() {
       y: ((e.clientY - rect.top) / rect.height) * canvas.height,
     };
   };
+  // Bounding box of a stroke in canvas coords (for select/move hit-testing).
+  const strokeBBox = (s: Stroke) => {
+    if (s.tool === "text") {
+      const fs = s.fontSize || 32;
+      const w = Math.max(20, (s.text?.length || 1) * fs * 0.6);
+      return { minX: s.points[0].x, minY: s.points[0].y, maxX: s.points[0].x + w, maxY: s.points[0].y + fs * 1.2 };
+    }
+    const xs = s.points.map((p) => p.x);
+    const ys = s.points.map((p) => p.y);
+    return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) };
+  };
+  const hitTest = (p: { x: number; y: number }): number | null => {
+    const pad = 12;
+    for (let i = strokes.length - 1; i >= 0; i--) {
+      const b = strokeBBox(strokes[i]);
+      if (p.x >= b.minX - pad && p.x <= b.maxX + pad && p.y >= b.minY - pad && p.y <= b.maxY + pad) return i;
+    }
+    return null;
+  };
+  const resizeSelectedText = (factor: number) => {
+    if (selectedIdx == null) return;
+    setStrokes((prev) =>
+      prev.map((s, i) =>
+        i === selectedIdx && s.tool === "text"
+          ? { ...s, fontSize: Math.max(10, Math.round((s.fontSize || 32) * factor)) }
+          : s
+      )
+    );
+  };
+  const deleteSelected = () => {
+    if (selectedIdx == null) return;
+    setStrokes((prev) => prev.filter((_, i) => i !== selectedIdx));
+    setSelectedIdx(null);
+  };
+
   const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!drawMode) return;
     e.preventDefault();
     const p = canvasPoint(e);
+    if (drawTool === "move") {
+      (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+      const idx = hitTest(p);
+      setSelectedIdx(idx);
+      moveDragRef.current = idx != null ? { x: p.x, y: p.y } : null;
+      redrawCanvas();
+      return;
+    }
     if (drawTool === "text") {
       // Open an inline editor at the click point — type directly on the image.
       const canvas = drawCanvasRef.current;
@@ -945,17 +1002,34 @@ export default function RouteMapPage() {
       return; // no drag stroke for text
     }
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
-    drawingRef.current = { tool: drawTool, color: drawColor, width: drawWidth, points: [p, p] };
+    drawingRef.current = { tool: drawTool as Stroke["tool"], color: drawColor, width: drawWidth, points: [p, p] };
     redrawCanvas(drawingRef.current);
   };
   const onDrawMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!drawMode || !drawingRef.current) return;
+    if (!drawMode) return;
     const p = canvasPoint(e);
+    // Select/move: drag the selected annotation.
+    if (drawTool === "move") {
+      if (selectedIdx == null || !moveDragRef.current) return;
+      const dx = p.x - moveDragRef.current.x;
+      const dy = p.y - moveDragRef.current.y;
+      moveDragRef.current = { x: p.x, y: p.y };
+      setStrokes((prev) =>
+        prev.map((s, i) =>
+          i === selectedIdx
+            ? { ...s, points: s.points.map((pt) => ({ x: pt.x + dx, y: pt.y + dy })) }
+            : s
+        )
+      );
+      return;
+    }
+    if (!drawingRef.current) return;
     if (drawTool === "pen") drawingRef.current.points.push(p);
     else drawingRef.current.points[1] = p;
     redrawCanvas(drawingRef.current);
   };
   const onDrawUp = () => {
+    moveDragRef.current = null;
     if (!drawingRef.current) return;
     const s = drawingRef.current;
     drawingRef.current = null;
@@ -1669,8 +1743,9 @@ export default function RouteMapPage() {
                       <>
                         <div style={styles.drawTools}>
                           {([
+                            ["move", "✥", "Move / select"],
                             ["arrow", "➔", "Arrow"],
-                            ["pen", "✎", "Freehand"],
+                            ["pen", "✎", "Free line"],
                             ["rect", "▭", "Rectangle"],
                             ["ellipse", "◯", "Ellipse"],
                             ["left", "↰", "Left turn"],
@@ -1730,6 +1805,30 @@ export default function RouteMapPage() {
                             <option value={10}>Thick</option>
                           </select>
                         </div>
+                        {drawTool === "move" ? (
+                          <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b" }}>
+                            {selectedIdx == null
+                              ? "Tap an annotation to select, then drag to move."
+                              : "Drag to move. Use A− / A+ to resize text, or Delete."}
+                          </div>
+                        ) : null}
+                        {drawTool === "move" && selectedIdx != null ? (
+                          <div style={styles.drawActions}>
+                            {strokes[selectedIdx]?.tool === "text" ? (
+                              <>
+                                <button style={styles.drawBtnGhost} onClick={() => resizeSelectedText(0.85)}>
+                                  A−
+                                </button>
+                                <button style={styles.drawBtnGhost} onClick={() => resizeSelectedText(1.18)}>
+                                  A+
+                                </button>
+                              </>
+                            ) : null}
+                            <button style={styles.drawBtnGhost} onClick={deleteSelected}>
+                              Delete
+                            </button>
+                          </div>
+                        ) : null}
                         <div style={styles.drawActions}>
                           <button
                             style={styles.drawBtnGhost}
