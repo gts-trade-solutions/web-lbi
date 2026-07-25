@@ -2892,7 +2892,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#fff",
     borderRadius: 16,
     overflow: "hidden",
-    width: "min(1080px, 94vw)",
+    width: "min(1040px, 92vw)",
     maxHeight: "88vh",
     display: "flex",
     flexDirection: "row",
@@ -3015,11 +3015,15 @@ const styles: Record<string, React.CSSProperties> = {
     zIndex: 3,
   },
   lightboxImg: {
-    width: "100%",
-    height: "100%",
-    maxHeight: "88vh",
+    // Fit within the photo area — never force-fill, so the image can't push the
+    // report panel off screen. Caps at 82vh tall / full width of its column.
+    maxWidth: "100%",
+    maxHeight: "82vh",
+    width: "auto",
+    height: "auto",
     objectFit: "contain",
     display: "block",
+    margin: "0 auto",
   },
   lightboxInfo: {
     width: 360,
