@@ -7660,11 +7660,12 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         const total = categorySummary.reduce((a, c) => a + c.count, 0) || 1;
         const sorted = [...categorySummary].sort((a, b) => b.count - a.count);
+        // Bigger font (14pt) + roomier cell padding for a clearer, airier table.
         const cell = (text: string, bold: boolean, fill: string, color: string, align: string) =>
           `<w:tc><w:tcPr>${fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/>` : ""}` +
-          `<w:tcMar><w:top w:w="40" w:type="dxa"/><w:bottom w:w="40" w:type="dxa"/><w:left w:w="90" w:type="dxa"/><w:right w:w="90" w:type="dxa"/></w:tcMar><w:vAlign w:val="center"/></w:tcPr>` +
-          `<w:p><w:pPr><w:jc w:val="${align}"/><w:spacing w:before="20" w:after="20" w:line="240" w:lineRule="auto"/></w:pPr>` +
-          `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:sz w:val="22"/><w:szCs w:val="22"/>${bold ? "<w:b/><w:bCs/>" : ""}<w:color w:val="${color}"/></w:rPr><w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p></w:tc>`;
+          `<w:tcMar><w:top w:w="140" w:type="dxa"/><w:bottom w:w="140" w:type="dxa"/><w:left w:w="180" w:type="dxa"/><w:right w:w="180" w:type="dxa"/></w:tcMar><w:vAlign w:val="center"/></w:tcPr>` +
+          `<w:p><w:pPr><w:jc w:val="${align}"/><w:spacing w:before="70" w:after="70" w:line="264" w:lineRule="auto"/></w:pPr>` +
+          `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:sz w:val="28"/><w:szCs w:val="28"/>${bold ? "<w:b/><w:bCs/>" : ""}<w:color w:val="${color}"/></w:rPr><w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p></w:tc>`;
         const hRow = `<w:tr>${cell("Category", true, "1F7A5A", "FFFFFF", "left")}${cell("Count", true, "1F7A5A", "FFFFFF", "center")}${cell("%", true, "1F7A5A", "FFFFFF", "center")}</w:tr>`;
         // Distinct colour per category (like the pie slices). Dark enough for
         // white text; cycles if there are more categories than colours.
@@ -7684,7 +7685,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const borders = `<w:tblBorders><w:top w:val="single" w:sz="4" w:color="B7C4BF"/><w:left w:val="single" w:sz="4" w:color="B7C4BF"/><w:bottom w:val="single" w:sz="4" w:color="B7C4BF"/><w:right w:val="single" w:sz="4" w:color="B7C4BF"/><w:insideH w:val="single" w:sz="4" w:color="D7E0DC"/><w:insideV w:val="single" w:sz="4" w:color="D7E0DC"/></w:tblBorders>`;
         const grid = `<w:tblGrid><w:gridCol w:w="6600"/><w:gridCol w:w="1600"/><w:gridCol w:w="1600"/></w:tblGrid>`;
         const table = `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>${borders}<w:tblLayout w:type="fixed"/></w:tblPr>${grid}${hRow}${dRows}${tRow}</w:tbl>`;
-        const heading = `<w:p><w:pPr><w:spacing w:before="200" w:after="140" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:sz w:val="32"/><w:szCs w:val="32"/><w:color w:val="163A2A"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
+        const heading = `<w:p><w:pPr><w:spacing w:before="200" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:sz w:val="40"/><w:szCs w:val="40"/><w:color w:val="163A2A"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
         const pageBreak = `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
         const block = pageBreak + heading + table + `<w:p/>`;
         // Place right AFTER the GA drawing — before the section break that
