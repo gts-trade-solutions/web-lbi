@@ -7649,8 +7649,11 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // ----- Stage Summary table (Category / Count / %). The template has no
   // summary section, so append a table into the body just before the final
   // section properties. Non-fatal.
+  // TEMPORARILY DISABLED to isolate a Word "unreadable content" corruption:
+  // if exports are clean with this off, the injected table was the cause.
+  const STAGE_SUMMARY_ENABLED = false;
   try {
-    if (categorySummary.length) {
+    if (STAGE_SUMMARY_ENABLED && categorySummary.length) {
       const zip = doc.getZip();
       const docFile = zip.file("word/document.xml");
       if (docFile) {
