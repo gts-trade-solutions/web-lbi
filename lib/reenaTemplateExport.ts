@@ -7666,11 +7666,18 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           `<w:p><w:pPr><w:jc w:val="${align}"/><w:spacing w:before="20" w:after="20" w:line="240" w:lineRule="auto"/></w:pPr>` +
           `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:sz w:val="22"/><w:szCs w:val="22"/>${bold ? "<w:b/><w:bCs/>" : ""}<w:color w:val="${color}"/></w:rPr><w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p></w:tc>`;
         const hRow = `<w:tr>${cell("Category", true, "1F7A5A", "FFFFFF", "left")}${cell("Count", true, "1F7A5A", "FFFFFF", "center")}${cell("%", true, "1F7A5A", "FFFFFF", "center")}</w:tr>`;
+        // Distinct colour per category (like the pie slices). Dark enough for
+        // white text; cycles if there are more categories than colours.
+        const PALETTE = [
+          "1B7A5A", "2E7D32", "00796B", "B8860B", "C62828", "6D4C41",
+          "827717", "E65100", "AD1457", "283593", "00695C", "4E342E",
+          "558B2F", "D84315", "5E35B1", "795548",
+        ];
         const dRows = sorted
           .map((c, i) => {
-            const fill = i % 2 ? "F1F5F4" : "FFFFFF";
+            const fill = PALETTE[i % PALETTE.length];
             const pct = Math.round((c.count / total) * 100);
-            return `<w:tr>${cell(c.categoryLabel, false, fill, "111827", "left")}${cell(String(c.count), false, fill, "111827", "center")}${cell(pct + "%", false, fill, "111827", "center")}</w:tr>`;
+            return `<w:tr>${cell(c.categoryLabel, false, fill, "FFFFFF", "left")}${cell(String(c.count), false, fill, "FFFFFF", "center")}${cell(pct + "%", false, fill, "FFFFFF", "center")}</w:tr>`;
           })
           .join("");
         const tRow = `<w:tr>${cell("Total", true, "E2E8E6", "111827", "left")}${cell(String(total), true, "E2E8E6", "111827", "center")}${cell("100%", true, "E2E8E6", "111827", "center")}</w:tr>`;
@@ -7680,13 +7687,29 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const heading = `<w:p><w:pPr><w:spacing w:before="200" w:after="140" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:sz w:val="32"/><w:szCs w:val="32"/><w:color w:val="163A2A"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
         const pageBreak = `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
         const block = pageBreak + heading + table + `<w:p/>`;
-        const bodyClose = xml.lastIndexOf("</w:body>");
-        if (bodyClose !== -1) {
-          const lastSectPr = xml.lastIndexOf("<w:sectPr", bodyClose);
-          const insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
+        // Place right AFTER the GA drawing — before the section break that
+        // follows the "GA DRAWING FOR 50 FEET..." heading. Fall back to the end
+        // of the document if the GA heading isn't found.
+        let insertAt = -1;
+        const gaHi = xml.indexOf("GA DRAWING FOR 50 FEET TRAILER WITHOUT LOAD");
+        if (gaHi !== -1) {
+          const sectAfter = xml.indexOf("<w:sectPr", gaHi);
+          if (sectAfter !== -1) {
+            insertAt = Math.max(
+              xml.lastIndexOf("<w:p>", sectAfter),
+              xml.lastIndexOf("<w:p ", sectAfter)
+            );
+          }
+        }
+        if (insertAt < 0) {
+          const bodyClose = xml.lastIndexOf("</w:body>");
+          const lastSectPr = bodyClose !== -1 ? xml.lastIndexOf("<w:sectPr", bodyClose) : -1;
+          insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
+        }
+        if (insertAt > 0) {
           xml = xml.slice(0, insertAt) + block + xml.slice(insertAt);
           zip.file("word/document.xml", xml);
-          console.log("[stage summary] injected table with", sorted.length, "rows");
+          console.log("[stage summary] injected table with", sorted.length, "rows after GA");
         }
       }
     }
