@@ -7679,30 +7679,19 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const grid = `<w:tblGrid><w:gridCol w:w="6600"/><w:gridCol w:w="1600"/><w:gridCol w:w="1600"/></w:tblGrid>`;
         const table = `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>${borders}<w:tblLayout w:type="fixed"/></w:tblPr>${grid}${hRow}${dRows}${tRow}</w:tbl>`;
         const heading = `<w:p><w:pPr><w:spacing w:before="0" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:sz w:val="40"/><w:szCs w:val="40"/><w:color w:val="163A2A"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
-        // Trailing page break pushes the observation pages onto the next page.
-        const block = heading + table + `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
-        // Insert AFTER the GA section's closing section break, so the table
-        // lands in the next (TOP-aligned) section. The GA section itself is
-        // vertically centered — placing the table there pushed it to the
-        // middle of the page. Fall back to end of document.
-        let insertAt = -1;
-        const gaHi = xml.indexOf("GA DRAWING FOR 50 FEET TRAILER WITHOUT LOAD");
-        if (gaHi !== -1) {
-          const sectAfter = xml.indexOf("<w:sectPr", gaHi);
-          if (sectAfter !== -1) {
-            const pEnd = xml.indexOf("</w:p>", sectAfter);
-            if (pEnd !== -1) insertAt = pEnd + "</w:p>".length;
-          }
-        }
-        if (insertAt < 0) {
-          const bodyClose = xml.lastIndexOf("</w:body>");
-          const lastSectPr = bodyClose !== -1 ? xml.lastIndexOf("<w:sectPr", bodyClose) : -1;
-          insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
-        }
-        if (insertAt > 0) {
+        const pageBreak = `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
+        const block = pageBreak + heading + table + `<w:p/>`;
+        // Insert BEFORE the final body-level section properties — a structurally
+        // safe spot, and that last section is top-aligned (no vertical-centering
+        // gap). (Inserting at the GA section boundary corrupted the file: that
+        // section is vertically centered and its boundary is fragile.)
+        const bodyClose = xml.lastIndexOf("</w:body>");
+        if (bodyClose !== -1) {
+          const lastSectPr = xml.lastIndexOf("<w:sectPr", bodyClose);
+          const insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
           xml = xml.slice(0, insertAt) + block + xml.slice(insertAt);
           zip.file("word/document.xml", xml);
-          console.log("[stage summary] injected table with", sorted.length, "rows after GA (top-aligned section)");
+          console.log("[stage summary] injected table with", sorted.length, "rows");
         }
       }
     }
