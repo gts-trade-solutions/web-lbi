@@ -7702,6 +7702,29 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.error("[stage summary] injection failed - non-fatal:", err);
   }
 
+  // ----- Fix pre-existing template corruption. reena-all-template.docx ships
+  // with 5 orphaned "word/media/<hash>.undefined" files (1x1 transparent PNGs)
+  // and NO content-type for the "undefined" extension. Word rejects any part it
+  // can't type, so EVERY export triggered "Word found unreadable content". The
+  // files are valid PNGs — declare the extension as image/png so Word reads them.
+  try {
+    const zip = doc.getZip();
+    const ctFile = zip.file("[Content_Types].xml");
+    if (ctFile) {
+      let ct = ctFile.asText();
+      if (!/Extension="undefined"/i.test(ct) && ct.includes("</Types>")) {
+        ct = ct.replace(
+          "</Types>",
+          '<Default Extension="undefined" ContentType="image/png"/></Types>'
+        );
+        zip.file("[Content_Types].xml", ct);
+        console.log("[export] declared .undefined media as image/png (template-junk corruption fix)");
+      }
+    }
+  } catch (err) {
+    console.error("[export] undefined-media content-type fix failed (non-fatal):", err);
+  }
+
   // ----- Step 11: Generate output buffer.
   let outBuf: Buffer;
   try {
