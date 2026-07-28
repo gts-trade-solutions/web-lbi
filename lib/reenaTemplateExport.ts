@@ -7681,41 +7681,17 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const heading = `<w:p><w:pPr><w:spacing w:before="0" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="163A2A"/><w:sz w:val="40"/><w:szCs w:val="40"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
         const pageBreak = `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
         const block = pageBreak + heading + table + `<w:p/>`;
-        // Place the table AFTER the GA drawing. Insert BEFORE the GA section's
-        // section-break paragraph (safe — same pattern as inserting before any
-        // sectPr; inserting AFTER it corrupted the file). Also flip THIS section
-        // to top alignment so the table isn't vertically centered (the gap).
-        let insertAt = -1;
-        const gaHi = xml.indexOf("GA DRAWING FOR 50 FEET TRAILER WITHOUT LOAD");
-        if (gaHi !== -1) {
-          let sectAfter = xml.indexOf("<w:sectPr", gaHi);
-          if (sectAfter !== -1) {
-            const sectEnd = xml.indexOf("</w:sectPr>", sectAfter);
-            if (sectEnd !== -1) {
-              const sect = xml.slice(sectAfter, sectEnd);
-              if (sect.includes('<w:vAlign w:val="center"/>')) {
-                xml =
-                  xml.slice(0, sectAfter) +
-                  sect.replace('<w:vAlign w:val="center"/>', '<w:vAlign w:val="top"/>') +
-                  xml.slice(sectEnd);
-                sectAfter = xml.indexOf("<w:sectPr", gaHi); // length unchanged, but re-find defensively
-              }
-            }
-            insertAt = Math.max(
-              xml.lastIndexOf("<w:p>", sectAfter),
-              xml.lastIndexOf("<w:p ", sectAfter)
-            );
-          }
-        }
-        if (insertAt < 0) {
-          const bodyClose = xml.lastIndexOf("</w:body>");
-          const lastSectPr = bodyClose !== -1 ? xml.lastIndexOf("<w:sectPr", bodyClose) : -1;
-          insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
-        }
-        if (insertAt > 0) {
+        // Insert BEFORE the final body-level section properties — the ONLY
+        // structurally-safe spot. (Placing it at the GA section boundary means
+        // rewriting a section break, which repeatedly corrupted the file.) The
+        // final section is top-aligned, so the table starts at the page top.
+        const bodyClose = xml.lastIndexOf("</w:body>");
+        if (bodyClose !== -1) {
+          const lastSectPr = xml.lastIndexOf("<w:sectPr", bodyClose);
+          const insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
           xml = xml.slice(0, insertAt) + block + xml.slice(insertAt);
           zip.file("word/document.xml", xml);
-          console.log("[stage summary] injected table with", sorted.length, "rows after GA (top-aligned)");
+          console.log("[stage summary] injected table with", sorted.length, "rows (end, safe)");
         }
       }
     }
