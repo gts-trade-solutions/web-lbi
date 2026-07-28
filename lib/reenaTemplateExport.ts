@@ -7667,27 +7667,21 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           `<w:p><w:pPr><w:jc w:val="${align}"/><w:spacing w:before="70" w:after="70" w:line="264" w:lineRule="auto"/></w:pPr>` +
           `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:sz w:val="28"/><w:szCs w:val="28"/>${bold ? "<w:b/><w:bCs/>" : ""}<w:color w:val="${color}"/></w:rPr><w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p></w:tc>`;
         const hRow = `<w:tr>${cell("Category", true, "1F7A5A", "FFFFFF", "left")}${cell("Count", true, "1F7A5A", "FFFFFF", "center")}${cell("%", true, "1F7A5A", "FFFFFF", "center")}</w:tr>`;
-        // Distinct colour per category (like the pie slices). Dark enough for
-        // white text; cycles if there are more categories than colours.
-        const PALETTE = [
-          "1B7A5A", "2E7D32", "00796B", "B8860B", "C62828", "6D4C41",
-          "827717", "E65100", "AD1457", "283593", "00695C", "4E342E",
-          "558B2F", "D84315", "5E35B1", "795548",
-        ];
+        // Plain rows — no per-category colour; only the header row is shaded.
         const dRows = sorted
-          .map((c, i) => {
-            const fill = PALETTE[i % PALETTE.length];
+          .map((c) => {
             const pct = Math.round((c.count / total) * 100);
-            return `<w:tr>${cell(c.categoryLabel, false, fill, "FFFFFF", "left")}${cell(String(c.count), false, fill, "FFFFFF", "center")}${cell(pct + "%", false, fill, "FFFFFF", "center")}</w:tr>`;
+            return `<w:tr>${cell(c.categoryLabel, false, "", "111827", "left")}${cell(String(c.count), false, "", "111827", "center")}${cell(pct + "%", false, "", "111827", "center")}</w:tr>`;
           })
           .join("");
-        const tRow = `<w:tr>${cell("Total", true, "E2E8E6", "111827", "left")}${cell(String(total), true, "E2E8E6", "111827", "center")}${cell("100%", true, "E2E8E6", "111827", "center")}</w:tr>`;
+        const tRow = `<w:tr>${cell("Total", true, "", "111827", "left")}${cell(String(total), true, "", "111827", "center")}${cell("100%", true, "", "111827", "center")}</w:tr>`;
         const borders = `<w:tblBorders><w:top w:val="single" w:sz="4" w:color="B7C4BF"/><w:left w:val="single" w:sz="4" w:color="B7C4BF"/><w:bottom w:val="single" w:sz="4" w:color="B7C4BF"/><w:right w:val="single" w:sz="4" w:color="B7C4BF"/><w:insideH w:val="single" w:sz="4" w:color="D7E0DC"/><w:insideV w:val="single" w:sz="4" w:color="D7E0DC"/></w:tblBorders>`;
         const grid = `<w:tblGrid><w:gridCol w:w="6600"/><w:gridCol w:w="1600"/><w:gridCol w:w="1600"/></w:tblGrid>`;
         const table = `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>${borders}<w:tblLayout w:type="fixed"/></w:tblPr>${grid}${hRow}${dRows}${tRow}</w:tbl>`;
-        const heading = `<w:p><w:pPr><w:spacing w:before="200" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:sz w:val="40"/><w:szCs w:val="40"/><w:color w:val="163A2A"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
-        const pageBreak = `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
-        const block = pageBreak + heading + table + `<w:p/>`;
+        // pageBreakBefore starts the summary at the TOP of a fresh page (no
+        // leading empty line); before=0 keeps the heading flush to the top.
+        const heading = `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:sz w:val="40"/><w:szCs w:val="40"/><w:color w:val="163A2A"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
+        const block = heading + table + `<w:p/>`;
         // Place right AFTER the GA drawing — before the section break that
         // follows the "GA DRAWING FOR 50 FEET..." heading. Fall back to the end
         // of the document if the GA heading isn't found.
