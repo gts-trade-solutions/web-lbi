@@ -7646,6 +7646,54 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.error("[CLIENT DOCX POLISH] patch failed - non-fatal:", err);
   }
 
+  // ----- Stage Summary table (Category / Count / %). The template has no
+  // summary section, so append a table into the body just before the final
+  // section properties. Non-fatal.
+  try {
+    if (categorySummary.length) {
+      const zip = doc.getZip();
+      const docFile = zip.file("word/document.xml");
+      if (docFile) {
+        let xml = docFile.asText();
+        const FONT = "Neue Haas Grotesk Text Pro";
+        const esc = (s: string) =>
+          String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        const total = categorySummary.reduce((a, c) => a + c.count, 0) || 1;
+        const sorted = [...categorySummary].sort((a, b) => b.count - a.count);
+        const cell = (text: string, bold: boolean, fill: string, color: string, align: string) =>
+          `<w:tc><w:tcPr>${fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/>` : ""}` +
+          `<w:tcMar><w:top w:w="40" w:type="dxa"/><w:bottom w:w="40" w:type="dxa"/><w:left w:w="90" w:type="dxa"/><w:right w:w="90" w:type="dxa"/></w:tcMar><w:vAlign w:val="center"/></w:tcPr>` +
+          `<w:p><w:pPr><w:jc w:val="${align}"/><w:spacing w:before="20" w:after="20" w:line="240" w:lineRule="auto"/></w:pPr>` +
+          `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:sz w:val="22"/><w:szCs w:val="22"/>${bold ? "<w:b/><w:bCs/>" : ""}<w:color w:val="${color}"/></w:rPr><w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p></w:tc>`;
+        const hRow = `<w:tr>${cell("Category", true, "1F7A5A", "FFFFFF", "left")}${cell("Count", true, "1F7A5A", "FFFFFF", "center")}${cell("%", true, "1F7A5A", "FFFFFF", "center")}</w:tr>`;
+        const dRows = sorted
+          .map((c, i) => {
+            const fill = i % 2 ? "F1F5F4" : "FFFFFF";
+            const pct = Math.round((c.count / total) * 100);
+            return `<w:tr>${cell(c.categoryLabel, false, fill, "111827", "left")}${cell(String(c.count), false, fill, "111827", "center")}${cell(pct + "%", false, fill, "111827", "center")}</w:tr>`;
+          })
+          .join("");
+        const tRow = `<w:tr>${cell("Total", true, "E2E8E6", "111827", "left")}${cell(String(total), true, "E2E8E6", "111827", "center")}${cell("100%", true, "E2E8E6", "111827", "center")}</w:tr>`;
+        const borders = `<w:tblBorders><w:top w:val="single" w:sz="4" w:color="B7C4BF"/><w:left w:val="single" w:sz="4" w:color="B7C4BF"/><w:bottom w:val="single" w:sz="4" w:color="B7C4BF"/><w:right w:val="single" w:sz="4" w:color="B7C4BF"/><w:insideH w:val="single" w:sz="4" w:color="D7E0DC"/><w:insideV w:val="single" w:sz="4" w:color="D7E0DC"/></w:tblBorders>`;
+        const grid = `<w:tblGrid><w:gridCol w:w="6600"/><w:gridCol w:w="1600"/><w:gridCol w:w="1600"/></w:tblGrid>`;
+        const table = `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>${borders}<w:tblLayout w:type="fixed"/></w:tblPr>${grid}${hRow}${dRows}${tRow}</w:tbl>`;
+        const heading = `<w:p><w:pPr><w:spacing w:before="200" w:after="140" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:sz w:val="32"/><w:szCs w:val="32"/><w:color w:val="163A2A"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
+        const pageBreak = `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
+        const block = pageBreak + heading + table + `<w:p/>`;
+        const bodyClose = xml.lastIndexOf("</w:body>");
+        if (bodyClose !== -1) {
+          const lastSectPr = xml.lastIndexOf("<w:sectPr", bodyClose);
+          const insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
+          xml = xml.slice(0, insertAt) + block + xml.slice(insertAt);
+          zip.file("word/document.xml", xml);
+          console.log("[stage summary] injected table with", sorted.length, "rows");
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[stage summary] injection failed - non-fatal:", err);
+  }
+
   // ----- Step 11: Generate output buffer.
   let outBuf: Buffer;
   try {
