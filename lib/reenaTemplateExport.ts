@@ -7678,22 +7678,20 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const borders = `<w:tblBorders><w:top w:val="single" w:sz="4" w:color="B7C4BF"/><w:left w:val="single" w:sz="4" w:color="B7C4BF"/><w:bottom w:val="single" w:sz="4" w:color="B7C4BF"/><w:right w:val="single" w:sz="4" w:color="B7C4BF"/><w:insideH w:val="single" w:sz="4" w:color="D7E0DC"/><w:insideV w:val="single" w:sz="4" w:color="D7E0DC"/></w:tblBorders>`;
         const grid = `<w:tblGrid><w:gridCol w:w="6600"/><w:gridCol w:w="1600"/><w:gridCol w:w="1600"/></w:tblGrid>`;
         const table = `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>${borders}<w:tblLayout w:type="fixed"/></w:tblPr>${grid}${hRow}${dRows}${tRow}</w:tbl>`;
-        // pageBreakBefore starts the summary at the TOP of a fresh page (no
-        // leading empty line); before=0 keeps the heading flush to the top.
-        const heading = `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:sz w:val="40"/><w:szCs w:val="40"/><w:color w:val="163A2A"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
-        const block = heading + table + `<w:p/>`;
-        // Place right AFTER the GA drawing — before the section break that
-        // follows the "GA DRAWING FOR 50 FEET..." heading. Fall back to the end
-        // of the document if the GA heading isn't found.
+        const heading = `<w:p><w:pPr><w:spacing w:before="0" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:sz w:val="40"/><w:szCs w:val="40"/><w:color w:val="163A2A"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
+        // Trailing page break pushes the observation pages onto the next page.
+        const block = heading + table + `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
+        // Insert AFTER the GA section's closing section break, so the table
+        // lands in the next (TOP-aligned) section. The GA section itself is
+        // vertically centered — placing the table there pushed it to the
+        // middle of the page. Fall back to end of document.
         let insertAt = -1;
         const gaHi = xml.indexOf("GA DRAWING FOR 50 FEET TRAILER WITHOUT LOAD");
         if (gaHi !== -1) {
           const sectAfter = xml.indexOf("<w:sectPr", gaHi);
           if (sectAfter !== -1) {
-            insertAt = Math.max(
-              xml.lastIndexOf("<w:p>", sectAfter),
-              xml.lastIndexOf("<w:p ", sectAfter)
-            );
+            const pEnd = xml.indexOf("</w:p>", sectAfter);
+            if (pEnd !== -1) insertAt = pEnd + "</w:p>".length;
           }
         }
         if (insertAt < 0) {
@@ -7704,7 +7702,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         if (insertAt > 0) {
           xml = xml.slice(0, insertAt) + block + xml.slice(insertAt);
           zip.file("word/document.xml", xml);
-          console.log("[stage summary] injected table with", sorted.length, "rows after GA");
+          console.log("[stage summary] injected table with", sorted.length, "rows after GA (top-aligned section)");
         }
       }
     }
