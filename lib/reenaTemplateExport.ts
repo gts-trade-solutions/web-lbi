@@ -7,6 +7,7 @@ import Docxtemplater from "docxtemplater";
 import pool from "./db";
 import { getReadSignedUrl } from "./s3";
 import { injectDifficultyThemeColors } from "./wordThemeColors";
+import { descriptionForCategory } from "./observationTemplates";
 
 // docxtemplater-image-module-free has no TypeScript types shipped.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -4057,7 +4058,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       km: kmText,
       location: locationText || "-",
       category: valueOrDash(r.category),
-      observation: valueOrEmDash(r.description ?? r.observation),
+      // Fall back to the category's standard observation text when the report
+      // has no observation of its own (so existing/blank reports still show the
+      // right template line in the Word report).
+      observation: valueOrEmDash(
+        String(r.description ?? r.observation ?? "").trim() ||
+          descriptionForCategory("", String(r.category || ""))
+      ),
       remarks: formatRemarksAction(r.remarks_action, tableColors.key),
       photo: photoTagValue,
       photoKey: photoTagValue,
