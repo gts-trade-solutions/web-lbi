@@ -12,6 +12,7 @@ type ActivityRow = {
   table_name: string | null;
   entity_id: string | null;
   project_id: string | null;
+  project_name?: string | null;
   row_count: number | null;
   details: string | null;
   ip_address: string | null;
@@ -195,8 +196,8 @@ export default function ActivityLogPage() {
                     </td>
                     <td style={td}>{r.table_name || "—"}</td>
                     <td style={{ ...td, textAlign: "right", fontWeight: 800 }}>{r.row_count ?? "—"}</td>
-                    <td style={{ ...td, fontFamily: "monospace", fontSize: 11 }}>
-                      {r.project_id ? r.project_id.slice(0, 8) + "…" : "—"}
+                    <td style={{ ...td, fontSize: 12, fontWeight: 800, color: "#101828" }}>
+                      {r.project_name || (r.project_id ? r.project_id.slice(0, 8) + "…" : "—")}
                     </td>
                     <td style={{ ...td, maxWidth: 360, fontSize: 12, color: "#475467" }}>{prettyDetails(r.details)}</td>
                     <td style={{ ...td, fontSize: 11, color: "#667085" }}>{r.ip_address || "—"}</td>
