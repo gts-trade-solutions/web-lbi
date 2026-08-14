@@ -7,7 +7,7 @@ import Docxtemplater from "docxtemplater";
 import pool from "./db";
 import { getReadSignedUrl } from "./s3";
 import { injectDifficultyThemeColors } from "./wordThemeColors";
-import { descriptionForCategory } from "./observationTemplates";
+import { composeObservation } from "./observationTemplates";
 
 // docxtemplater-image-module-free has no TypeScript types shipped.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1582,7 +1582,7 @@ const CATEGORY_ICON_MAP: Record<string, string> = {
   electric_sign: "public/images/report-icons/electric_signboard.png",
   // New custom icons.
   flyover: "public/images/report-icons/flyover.png",
-  service_road: "public/images/report-icons/service_road.jpeg",
+  service_road: "public/images/report-icons/service_road.png",
   damaged_road: "public/images/report-icons/damaged_road.png",
 };
 
@@ -4058,12 +4058,11 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       km: kmText,
       location: locationText || "-",
       category: valueOrDash(r.category),
-      // Fall back to the category's standard observation text when the report
-      // has no observation of its own (so existing/blank reports still show the
-      // right template line in the Word report).
+      // Join the category's template sentence with the report's measurement
+      // ("...height is 6m"); template-only when there's no measurement; the
+      // observation unchanged when it's already a full sentence.
       observation: valueOrEmDash(
-        String(r.description ?? r.observation ?? "").trim() ||
-          descriptionForCategory("", String(r.category || ""))
+        composeObservation(String(r.description ?? r.observation ?? ""), String(r.category || ""))
       ),
       remarks: formatRemarksAction(r.remarks_action, tableColors.key),
       photo: photoTagValue,

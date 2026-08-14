@@ -68,3 +68,20 @@ export function descriptionForCategory(currentDescription: string, category: str
   const exact = DESCRIPTION_TEMPLATES[normKey(category)];
   return exact && exact.length ? exact[0] : currentDescription;
 }
+
+// Compose the final observation shown in the report:
+//   - blank observation        -> the category's template sentence (or "")
+//   - a measurement value only  -> sentence + the value ("...height is 6m")
+//   - an already-full sentence  -> the observation unchanged
+export function composeObservation(rawObservation: string, category: string): string {
+  const raw = String(rawObservation || "").trim();
+  const template = DESCRIPTION_TEMPLATES[normKey(category)]?.[0] || "";
+  if (!template) return raw;
+  const core = template.trim().toLowerCase().slice(0, 20);
+  if (raw && core && raw.toLowerCase().startsWith(core)) return raw; // already full sentence
+  if (!raw) return template; // no metre -> sentence only
+  // Strip a leading label the template already implies (Height/Width/…) so we
+  // get "...height is 6m", not "...height is Height 6m".
+  const val = raw.replace(/^\s*(height|width|length|clearance|span)\s*(is\s*)?/i, "").trim();
+  return val ? template + val : template;
+}
