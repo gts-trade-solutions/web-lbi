@@ -1582,7 +1582,7 @@ const CATEGORY_ICON_MAP: Record<string, string> = {
   electric_sign: "public/images/report-icons/electric_signboard.png",
   // New custom icons.
   flyover: "public/images/report-icons/flyover.png",
-  service_road: "public/images/report-icons/service_road.png",
+  service_road: "public/images/report-icons/service_road.jpeg",
   damaged_road: "public/images/report-icons/damaged_road.png",
 };
 
