@@ -12,6 +12,7 @@ import {
   generateProjectGPX,
   generateProjectGPXByReportIds,
 } from "../../../lib/download";
+import { descriptionForCategory } from "../../../lib/observationTemplates";
 
 type VehicleMovement = "green" | "yellow" | "red" | "";
 type VMFilter = "all" | "green" | "yellow" | "red" | "unset";
@@ -2918,6 +2919,11 @@ function InsertReportModal({
                 const v = e.target.value;
                 setCategory(v);
                 if (v !== "__custom__") setCustomCategory("");
+                // Auto-fill the standard observation text for this category
+                // (only if description is empty or still a default template).
+                if (v && v !== "__custom__") {
+                  setDescription((prev) => descriptionForCategory(prev, v));
+                }
               }}
               style={{
                 height: 44,
@@ -3489,6 +3495,11 @@ function EditReportModal({
                 const v = e.target.value;
                 setCategory(v);
                 if (v !== "__custom__") setCustomCategory("");
+                // Auto-fill the standard observation text for this category
+                // (only if description is empty or still a default template).
+                if (v && v !== "__custom__") {
+                  setDescription((prev) => descriptionForCategory(prev, v));
+                }
               }}
               style={{
                 height: 44,
