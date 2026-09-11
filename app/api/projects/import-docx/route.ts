@@ -98,6 +98,16 @@ export async function POST(request: Request) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+
+    // Keep the raw uploaded .docx so server-side render tests / the upcoming
+    // annotation-render step can run against it without needing scp. Overwritten
+    // each import; best-effort so it never affects the import.
+    try {
+      await fsp.writeFile("/tmp/lbi-last-import.docx", buffer);
+    } catch (err) {
+      console.warn("[import-docx] could not stash raw upload to /tmp (non-fatal):", err);
+    }
+
     const { points, frontImages, objective, getPhoto } = parseSurveyReport(buffer, file.name);
     if (!points.length) {
       return Response.json(
