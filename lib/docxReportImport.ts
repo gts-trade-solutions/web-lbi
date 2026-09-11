@@ -25,11 +25,78 @@ export type DocxPoint = {
   photoNames: string[]; // zip paths like "word/media/image3.png"
 };
 
+// Front-matter images (route map, vehicle drawings, turning-circle drawing,
+// route flow chart) that sit BEFORE the first observation point, each under a
+// heading. These are real raster images just like the photos, but the point
+// parser ignores them because they don't belong to any point — so we collect
+// them separately and let the importer place them (route map → route slot;
+// drawings → a leading report) instead of dropping them.
+export type FrontImage = { label: string; zipPath: string };
+
 export type DocxReport = {
   points: DocxPoint[];
+  // Route map / vehicle drawings / flow chart from the report's front matter.
+  frontImages: FrontImage[];
+  // The report's OBJECTIVE paragraph, when present (goes on the route page).
+  objective: string;
   // Read a photo's bytes out of the same .docx.
   getPhoto: (zipPath: string) => Buffer | null;
 };
+
+// Headings that introduce a front-matter image. Order matters: the more
+// specific "without/with load" must be tested before the generic "vehicle
+// drawing" so each image gets its precise label.
+const FRONT_HEADINGS: { re: RegExp; label: string }[] = [
+  { re: /route\s*map/i, label: "Route Map" },
+  { re: /flow\s*chart/i, label: "Route Flow Chart" },
+  { re: /vehicle\s*drawing\s*without\s*load/i, label: "Vehicle Drawing Without Load" },
+  { re: /vehicle\s*drawing\s*with\s*load/i, label: "Vehicle Drawing With Load" },
+  { re: /vehicle\s*drawing/i, label: "Vehicle Drawing" },
+  { re: /turning\s*circle/i, label: "Turning Circle Drawing" },
+  { re: /summary\s*of\s*observation/i, label: "Route Summary" },
+];
+
+// Walk the front-matter XML paragraph by paragraph. A heading paragraph sets
+// the "current label"; every image in that or the following paragraphs takes
+// that label until the next heading. Images before any recognised heading
+// (e.g. the company logo) carry no label and are dropped.
+function extractFrontImages(
+  frontXml: string,
+  relMap: Record<string, string>
+): FrontImage[] {
+  const out: FrontImage[] = [];
+  const seen = new Set<string>();
+  let currentLabel = "";
+  for (const para of frontXml.split(/(?=<w:p[ >])/)) {
+    const txt = cellText(para);
+    if (txt) {
+      for (const h of FRONT_HEADINGS) {
+        if (h.re.test(txt)) {
+          currentLabel = h.label;
+          break;
+        }
+      }
+    }
+    for (const m of Array.from(para.matchAll(/r:embed="([^"]+)"/g))) {
+      const target = relMap[m[1]];
+      if (!target || !/media\//.test(target) || !currentLabel) continue;
+      const zipPath = "word/" + target.replace(/^\/*/, "");
+      if (seen.has(zipPath)) continue;
+      seen.add(zipPath);
+      out.push({ label: currentLabel, zipPath });
+    }
+  }
+  return out;
+}
+
+// Pull the OBJECTIVE paragraph text (stops at the next front-matter heading).
+function extractObjective(frontXml: string): string {
+  const text = cellText(frontXml);
+  const m = text.match(
+    /objective\s*:?\s*(.+?)\s*(?:route\s*map|vehicle\s*drawing|turning\s*circle|observations?\b|summary\s*of)/i
+  );
+  return m ? m[1].trim() : "";
+}
 
 // Build the relationship-id → media-target map from a .docx/.pptx _rels XML.
 // Extracts Id and Target per <Relationship> element ORDER-INDEPENDENTLY — some
@@ -390,7 +457,7 @@ function parseGpsBlockReport(buffer: Buffer): DocxReport {
     }
   };
 
-  return { points, getPhoto };
+  return { points, frontImages: [], objective: "", getPhoto };
 }
 
 export function parseDocxReport(buffer: Buffer): DocxReport {
@@ -459,6 +526,9 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
 
   const points: DocxPoint[] = [];
   let lastPointEnd = 0;
+  // Start of the FIRST observation-point table. Everything before it is the
+  // report's front matter (title, objective, route map, vehicle drawings).
+  let firstDataStart = -1;
 
   const cleanLocation = (s: string) =>
     s.replace(/^\s*(location\s*[-:]\s*)+/i, "").replace(/\s{2,}/g, " ").trim();
@@ -470,6 +540,7 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
     const headerJoined = header.join(" ");
     const isData = /gps|coordinate/i.test(headerJoined) && /km/i.test(headerJoined);
     if (!isData) continue;
+    if (firstDataStart < 0) firstDataStart = t.start;
 
     // Column map from the header.
     const map: Record<string, number> = {};
@@ -582,6 +653,12 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
   // De-duplicate photo names per point.
   for (const p of points) p.photoNames = Array.from(new Set(p.photoNames));
 
+  // Front matter (route map / vehicle drawings / flow chart) = images before
+  // the first observation-point table. Also grab the OBJECTIVE paragraph.
+  const frontXml = firstDataStart >= 0 ? xml.slice(0, firstDataStart) : "";
+  const frontImages = extractFrontImages(frontXml, relMap);
+  const objective = extractObjective(frontXml);
+
   const getPhoto = (zipPath: string): Buffer | null => {
     const f = zip.file(zipPath);
     if (!f) return null;
@@ -592,7 +669,7 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
     }
   };
 
-  return { points, getPhoto };
+  return { points, frontImages, objective, getPhoto };
 }
 
 // Same reports are sometimes delivered as PowerPoint (.pptx): one survey point
@@ -719,7 +796,7 @@ export function parsePptxReport(buffer: Buffer): DocxReport {
     }
   };
 
-  return { points, getPhoto };
+  return { points, frontImages: [], objective: "", getPhoto };
 }
 
 // Pick the right parser from the file name / bytes.

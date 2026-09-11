@@ -98,7 +98,7 @@ export async function POST(request: Request) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const { points, getPhoto } = parseSurveyReport(buffer, file.name);
+    const { points, frontImages, objective, getPhoto } = parseSurveyReport(buffer, file.name);
     if (!points.length) {
       return Response.json(
         { error: "No survey points found in this file. Is it the table-style report?" },
@@ -200,13 +200,109 @@ export async function POST(request: Request) {
       }
     }
 
+    // 3) Front matter: route map + engineering drawings. The route map goes
+    // into the project's route page (rendered in the export's route section);
+    // the vehicle / turning-circle / flow-chart drawings become a single
+    // leading "Route & Vehicle Drawings" report so they appear at the top of
+    // the exported report. Wrapped so a failure here never fails the import.
+    let routeMapSaved = false;
+    let drawingsSaved = 0;
+    try {
+      const uploadFront = async (fi: { label: string; zipPath: string }) => {
+        const bytes = getPhoto(fi.zipPath);
+        if (!bytes || bytes.length < 1000) return null; // skip tiny logos/icons
+        const base = fi.zipPath.split("/").pop() || "image.png";
+        const key = `reports/photos/imported/${projectId}/front/${fi.label.replace(/\s+/g, "_")}_${base}`;
+        const { url } = await storePhoto(key, bytes, contentTypeFor(base));
+        return { url, base };
+      };
+
+      const routeMap = frontImages.find((f) => /route\s*map/i.test(f.label));
+      const drawings = frontImages.filter((f) => f !== routeMap);
+
+      // Route map → project_route_pages (+ objective text when present).
+      if (routeMap) {
+        const up = await uploadFront(routeMap);
+        if (up) {
+          const routeCols = await columnsOf("project_route_pages");
+          await insertRow(
+            "project_route_pages",
+            {
+              id: uuidv4(),
+              project_id: projectId,
+              user_id: authUser.id,
+              objective: objective || null,
+              map_file_url: up.url,
+            },
+            routeCols
+          );
+          routeMapSaved = true;
+        }
+      }
+
+      // Drawings → one leading report (sort_order 1, before the points which
+      // start at 10) whose photos are the vehicle / turning-circle / flow-chart
+      // images.
+      if (drawings.length) {
+        const drawReportId = uuidv4();
+        await insertRow(
+          "reports",
+          {
+            id: drawReportId,
+            user_id: authUser.id,
+            created_by: authUser.id,
+            project_id: projectId,
+            category: "Route & Vehicle Drawings",
+            description: objective || "Vehicle and route drawings from the survey report.",
+            difficulty: "green",
+            status: "active",
+            sort_order: 1,
+            point_key: "0",
+          },
+          reportCols
+        );
+        reportsCreated += 1;
+        let di = 0;
+        for (const d of drawings) {
+          const up = await uploadFront(d);
+          if (!up) continue;
+          di += 1;
+          await insertRow(
+            "report_photos",
+            {
+              id: uuidv4(),
+              report_id: drawReportId,
+              url: up.url,
+              file_name: `${d.label}.${up.base.split(".").pop() || "png"}`,
+              point_key: "0",
+              image_key: `0.${di}`,
+              user_id: authUser.id,
+              include_in_export: 1,
+            },
+            photoCols
+          );
+          drawingsSaved += 1;
+        }
+      }
+    } catch (err) {
+      console.error("[import-docx] front-matter (route map / drawings) failed:", err);
+    }
+
     await logActivity(request, {
       action: "import_docx",
       table: "projects",
       entityId: projectId,
       projectId,
       rowCount: reportsCreated,
-      details: { file: file.name, points: points.length, photosUploaded, photosFailed, photosLocal },
+      details: {
+        file: file.name,
+        points: points.length,
+        photosUploaded,
+        photosFailed,
+        photosLocal,
+        routeMapSaved,
+        drawingsSaved,
+      },
     });
 
     return Response.json({
@@ -218,6 +314,8 @@ export async function POST(request: Request) {
       photosUploaded,
       photosFailed,
       photosLocal,
+      routeMapSaved,
+      drawingsSaved,
       withCoords: points.filter((p) => Number.isFinite(p.latitude) && Number.isFinite(p.longitude)).length,
     });
   } catch (error: any) {
