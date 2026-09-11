@@ -7755,7 +7755,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     if (df) {
       let dx = df.asText();
       let changed = 0;
-      dx = dx.replace(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g, (sect) => {
+      dx = dx.replace(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g, (sect: string) => {
         if (!/<w:vAlign\b[^>]*w:val="center"/i.test(sect)) return sect;
         changed++;
         return sect.replace(/<w:vAlign\b[^>]*\/>/g, '<w:vAlign w:val="top"/>');
