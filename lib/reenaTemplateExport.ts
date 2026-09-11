@@ -855,15 +855,19 @@ const TEMPLATE_PATH = path.join(process.cwd(), "templates", "reena-all-template.
 const ROUTE_MAP_SIZE: [number, number] = [1248, 672];
 const GA_DRAWING_SIZE: [number, number] = [1344, 912];
 // Per spec: observation photo size depends on how many photos the report
-// has. Single photo: 7.5" × 5.3" (720 × 509 px). 2 photos: each one is
-// 7.2" × 5.0" (691 × 480 px) — matches the user's manual Word size that
-// "fits perfectly" on their page setup. Rendered side-by-side inside a
-// 100%-width borderless 2-column table; if the page can't accommodate
-// 14.4" of total image width, Word scales each image down proportionally
-// while preserving aspect ratio. The actual embedded JPEG is compressed
-// via sharp BEFORE being added to imageMap (max 1400×900 inside, q78
-// mozjpeg) so the DOCX file size stays small.
-const OBSERVATION_PHOTO_SIZE: [number, number] = [720, 509];
+// has. Single photo: BIG — 11.5" × 8.1" (1100 × 778 px), so a lone photo
+// fills most of the landscape-A3 content width (15.8") like the reference
+// reports, instead of sitting small at half width. Kept below the route
+// map (13") / GA drawing (14") widths (and isObservationPhotoCx excludes
+// those two explicitly) so the layout-rebuild pass can't confuse a full
+// single photo with them. Same 720:509 (~1.414) aspect as before, so no
+// new distortion. 2 photos: each one is 7.2" × 5.0" (691 × 480 px) —
+// rendered side-by-side inside a 100%-width borderless 2-column table; if
+// the page can't accommodate the total width, Word scales each down
+// proportionally while preserving aspect ratio. The actual embedded JPEG
+// is compressed via sharp BEFORE being added to imageMap (max 1400×900
+// inside, q78 mozjpeg) so the DOCX file size stays small.
+const OBSERVATION_PHOTO_SIZE: [number, number] = [1100, 778];
 const MULTI_PHOTO_SIZE: [number, number] = [691, 480];
 // Category icon shown in the CATEGORY column of the observation table.
 // Enlarged so the icon reads clearly/big in the report. The CATEGORY
@@ -5753,6 +5757,14 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       // render at MULTI_PHOTO_EMU_WIDTH (7.2"). Match either within ±15%.
       const isObservationPhotoCx = (cx: number): boolean => {
         if (!Number.isFinite(cx)) return false;
+        // The single-photo width is large (fills most of the landscape page),
+        // so its ±15% window can overlap the route map / GA drawing widths.
+        // Exclude those two explicitly FIRST so they are never rearranged as
+        // observation photos.
+        const ROUTE_W = ROUTE_MAP_SIZE[0] * PX_TO_EMU;
+        const GA_W = GA_DRAWING_SIZE[0] * PX_TO_EMU;
+        if (Math.abs(cx - ROUTE_W) <= ROUTE_W * 0.05) return false;
+        if (Math.abs(cx - GA_W) <= GA_W * 0.05) return false;
         const tol1 = OBSERVATION_PHOTO_EMU_WIDTH * 0.15;
         if (Math.abs(cx - OBSERVATION_PHOTO_EMU_WIDTH) <= tol1) return true;
         const tol2 = MULTI_PHOTO_EMU_WIDTH * 0.15;
