@@ -7743,6 +7743,32 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.error("[export] undefined-media content-type fix failed (non-fatal):", err);
   }
 
+  // ----- Vertical alignment: force every page to TOP.
+  // Some template sections carry <w:sectPr>…<w:vAlign w:val="center"/>, which
+  // vertically centres the WHOLE page — so when the user opens the exported
+  // file to edit it, the cursor/content sits in the middle of the page instead
+  // of the top. Rewrite page-level (sectPr) vAlign to "top" so content starts
+  // at the top. Table-cell (tcPr) vAlign is intentionally left untouched.
+  try {
+    const zip = doc.getZip();
+    const df = zip.file("word/document.xml");
+    if (df) {
+      let dx = df.asText();
+      let changed = 0;
+      dx = dx.replace(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g, (sect) => {
+        if (!/<w:vAlign\b[^>]*w:val="center"/i.test(sect)) return sect;
+        changed++;
+        return sect.replace(/<w:vAlign\b[^>]*\/>/g, '<w:vAlign w:val="top"/>');
+      });
+      if (changed) {
+        zip.file("word/document.xml", dx);
+        console.log(`[export] page vAlign set to top on ${changed} section(s)`);
+      }
+    }
+  } catch (err) {
+    console.error("[export] page vAlign top fix failed (non-fatal):", err);
+  }
+
   // ----- Step 11: Generate output buffer.
   let outBuf: Buffer;
   try {
