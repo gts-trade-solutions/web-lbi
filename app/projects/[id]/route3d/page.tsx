@@ -203,7 +203,7 @@ export default function RouteMapPage() {
 
   // ---- Draw-on-image annotation state (authored view only) ----
   type Stroke = {
-    tool: "arrow" | "pen" | "rect" | "ellipse" | "left" | "right" | "uturn" | "x" | "text";
+    tool: "arrow" | "darrow" | "pen" | "rect" | "ellipse" | "left" | "right" | "uturn" | "x" | "text";
     color: string;
     width: number;
     points: { x: number; y: number }[]; // pen: path; others: [start, end]; text: [pos]
@@ -839,19 +839,23 @@ export default function RouteMapPage() {
       ctx.stroke();
       return;
     }
-    // arrow: shaft + filled head
+    // arrow / double-arrow: shaft + filled head(s)
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
     ctx.stroke();
     const angle = Math.atan2(b.y - a.y, b.x - a.x);
     const head = Math.max(14, s.width * 3.5);
-    ctx.beginPath();
-    ctx.moveTo(b.x, b.y);
-    ctx.lineTo(b.x - head * Math.cos(angle - Math.PI / 7), b.y - head * Math.sin(angle - Math.PI / 7));
-    ctx.lineTo(b.x - head * Math.cos(angle + Math.PI / 7), b.y - head * Math.sin(angle + Math.PI / 7));
-    ctx.closePath();
-    ctx.fill();
+    const arrowHead = (hx: number, hy: number, ang: number) => {
+      ctx.beginPath();
+      ctx.moveTo(hx, hy);
+      ctx.lineTo(hx - head * Math.cos(ang - Math.PI / 7), hy - head * Math.sin(ang - Math.PI / 7));
+      ctx.lineTo(hx - head * Math.cos(ang + Math.PI / 7), hy - head * Math.sin(ang + Math.PI / 7));
+      ctx.closePath();
+      ctx.fill();
+    };
+    arrowHead(b.x, b.y, angle);
+    if (s.tool === "darrow") arrowHead(a.x, a.y, angle + Math.PI); // second head for double-arrow
   };
 
   const redrawCanvas = (extra?: Stroke | null) => {
@@ -1780,6 +1784,7 @@ export default function RouteMapPage() {
                           {([
                             ["move", "✥", "Move / select"],
                             ["arrow", "➔", "Arrow"],
+                            ["darrow", "↔", "Double arrow (measure H / W)"],
                             ["pen", "✎", "Free line"],
                             ["rect", "▭", "Rectangle"],
                             ["ellipse", "◯", "Ellipse"],
