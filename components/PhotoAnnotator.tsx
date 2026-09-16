@@ -14,6 +14,7 @@ type Stroke = {
   tool:
     | "arrow" | "darrow" | "line" | "pen"
     | "rect" | "rrect" | "ellipse" | "triangle" | "diamond" | "star"
+    | "pentagon" | "hexagon" | "callout" | "uparrow" | "downarrow"
     | "left" | "right" | "uturn" | "x" | "text";
   color: string;
   width: number;
@@ -21,10 +22,15 @@ type Stroke = {
   text?: string;
   fontSize?: number;
   fill?: boolean;
+  rot?: number; // rotation in radians, around the shape's bbox centre
+  dash?: "solid" | "dashed" | "dotted";
 };
 
 // Closed shapes that can be outlined or filled.
-const CLOSED_SHAPES = new Set(["rect", "rrect", "ellipse", "triangle", "diamond", "star"]);
+const CLOSED_SHAPES = new Set([
+  "rect", "rrect", "ellipse", "triangle", "diamond", "star",
+  "pentagon", "hexagon", "callout", "uparrow", "downarrow",
+]);
 
 // Rounded-rectangle path (manual, so it works without ctx.roundRect support).
 function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -47,6 +53,57 @@ function starPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, R: numb
     const y = cy + rad * Math.sin(ang);
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+// Regular N-gon (pentagon=5, hexagon=6) fitted to the bbox, flat-ish top.
+function polygonPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, rx: number, ry: number, sides: number) {
+  for (let i = 0; i < sides; i++) {
+    const ang = (2 * Math.PI * i) / sides - Math.PI / 2;
+    const x = cx + rx * Math.cos(ang);
+    const y = cy + ry * Math.sin(ang);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+// Speech-bubble callout: rounded box with a small tail at the bottom-left.
+function calloutPath(ctx: CanvasRenderingContext2D, L: number, T: number, W: number, H: number) {
+  const bodyH = H * 0.78;
+  const B = T + bodyH;
+  const r = Math.min(W, bodyH) * 0.16;
+  roundRectPath(ctx, L, T, W, bodyH, r);
+  ctx.moveTo(L + W * 0.22, B);
+  ctx.lineTo(L + W * 0.12, T + H);
+  ctx.lineTo(L + W * 0.42, B);
+}
+
+// Block arrow (up or down) fitted to the bbox.
+function blockArrowPath(ctx: CanvasRenderingContext2D, dir: "up" | "down", L: number, T: number, W: number, H: number) {
+  const shaftW = W * 0.44;
+  const sx0 = L + (W - shaftW) / 2;
+  const sx1 = sx0 + shaftW;
+  const headH = H * 0.45;
+  if (dir === "up") {
+    const tip = T, neck = T + headH, bot = T + H;
+    ctx.moveTo(L + W / 2, tip);
+    ctx.lineTo(L + W, neck);
+    ctx.lineTo(sx1, neck);
+    ctx.lineTo(sx1, bot);
+    ctx.lineTo(sx0, bot);
+    ctx.lineTo(sx0, neck);
+    ctx.lineTo(L, neck);
+  } else {
+    const tip = T + H, neck = T + H - headH, top = T;
+    ctx.moveTo(L + W / 2, tip);
+    ctx.lineTo(L + W, neck);
+    ctx.lineTo(sx1, neck);
+    ctx.lineTo(sx1, top);
+    ctx.lineTo(sx0, top);
+    ctx.lineTo(sx0, neck);
+    ctx.lineTo(L, neck);
   }
   ctx.closePath();
 }
@@ -81,7 +138,9 @@ export default function PhotoAnnotator({
   const [drawColor, setDrawColor] = useState("#FFD400");
   const [drawWidth, setDrawWidth] = useState(6);
   const [drawFill, setDrawFill] = useState(false);
+  const [drawDash, setDrawDash] = useState<"solid" | "dashed" | "dotted">("solid");
   const [strokes, setStrokes] = useState<Stroke[]>([]);
+  const [redoStack, setRedoStack] = useState<Stroke[]>([]);
   const [saving, setSaving] = useState(false);
   const [textDraft, setTextDraft] = useState<TextDraft | null>(null);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -144,15 +203,20 @@ export default function PhotoAnnotator({
     headAt(side, T, type === "left" ? Math.PI : 0);
   };
 
-  const drawOneStroke = (ctx: CanvasRenderingContext2D, s: Stroke) => {
+  // Draws a stroke WITHOUT rotation. The wrapper below applies rotation.
+  const drawOneStrokeRaw = (ctx: CanvasRenderingContext2D, s: Stroke) => {
     ctx.strokeStyle = s.color;
     ctx.fillStyle = s.color;
     ctx.lineWidth = s.width;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
+    if (s.dash === "dashed") ctx.setLineDash([Math.max(6, s.width * 3), Math.max(4, s.width * 2)]);
+    else if (s.dash === "dotted") ctx.setLineDash([Math.max(1, s.width), Math.max(3, s.width * 2)]);
+    else ctx.setLineDash([]);
     const pts = s.points;
     if (!pts.length) return;
     if (s.tool === "text") {
+      ctx.setLineDash([]);
       ctx.textBaseline = "top";
       ctx.font = `bold ${s.fontSize || 32}px system-ui, Segoe UI, Arial, sans-serif`;
       ctx.lineWidth = Math.max(2, (s.fontSize || 32) * 0.06);
@@ -181,6 +245,11 @@ export default function PhotoAnnotator({
       else if (s.tool === "triangle") { ctx.moveTo(cx, T); ctx.lineTo(R, B); ctx.lineTo(L, B); ctx.closePath(); }
       else if (s.tool === "diamond") { ctx.moveTo(cx, T); ctx.lineTo(R, cy); ctx.lineTo(cx, B); ctx.lineTo(L, cy); ctx.closePath(); }
       else if (s.tool === "star") starPath(ctx, cx, cy, Math.min(W, H) / 2, 5);
+      else if (s.tool === "pentagon") polygonPath(ctx, cx, cy, W / 2, H / 2, 5);
+      else if (s.tool === "hexagon") polygonPath(ctx, cx, cy, W / 2, H / 2, 6);
+      else if (s.tool === "callout") calloutPath(ctx, L, T, W, H);
+      else if (s.tool === "uparrow") blockArrowPath(ctx, "up", L, T, W, H);
+      else if (s.tool === "downarrow") blockArrowPath(ctx, "down", L, T, W, H);
       if (s.fill) {
         ctx.save();
         ctx.globalAlpha = 0.35; // translucent so the photo underneath stays visible
@@ -224,6 +293,24 @@ export default function PhotoAnnotator({
     // "line" → no heads
   };
 
+  // Applies per-shape rotation (around the bbox centre), then draws.
+  const drawOneStroke = (ctx: CanvasRenderingContext2D, s: Stroke) => {
+    const rot = s.rot || 0;
+    if (!rot) {
+      drawOneStrokeRaw(ctx, s);
+      return;
+    }
+    const b = strokeBBox(s);
+    const cx = (b.minX + b.maxX) / 2;
+    const cy = (b.minY + b.maxY) / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(rot);
+    ctx.translate(-cx, -cy);
+    drawOneStrokeRaw(ctx, s);
+    ctx.restore();
+  };
+
   const strokeBBox = (s: Stroke) => {
     if (s.tool === "text") {
       const fs = s.fontSize || 32;
@@ -256,8 +343,9 @@ export default function PhotoAnnotator({
         ctx.lineWidth = Math.max(2, 2 / dispScale);
         ctx.strokeRect(b.minX - 8, b.minY - 8, b.maxX - b.minX + 16, b.maxY - b.minY + 16);
         ctx.restore();
-        // Draggable endpoint handles for reshaping (2-point shapes only).
-        if (sel.tool !== "pen" && sel.tool !== "text") {
+        // Draggable endpoint handles for reshaping (2-point shapes only, and
+        // only when not rotated — after rotating, resize with − / +).
+        if (sel.tool !== "pen" && sel.tool !== "text" && !sel.rot) {
           const hs = Math.max(6, 9 / dispScale);
           const hpts = [sel.points[0], sel.points[sel.points.length - 1]];
           ctx.save();
@@ -330,8 +418,20 @@ export default function PhotoAnnotator({
   const hitTest = (p: { x: number; y: number }): number | null => {
     const pad = 12;
     for (let i = strokes.length - 1; i >= 0; i--) {
-      const b = strokeBBox(strokes[i]);
-      if (p.x >= b.minX - pad && p.x <= b.maxX + pad && p.y >= b.minY - pad && p.y <= b.maxY + pad) return i;
+      const s = strokes[i];
+      const b = strokeBBox(s);
+      let q = p;
+      if (s.rot) {
+        // Un-rotate the click into the shape's local frame before the bbox test.
+        const cx = (b.minX + b.maxX) / 2;
+        const cy = (b.minY + b.maxY) / 2;
+        const cos = Math.cos(-s.rot);
+        const sin = Math.sin(-s.rot);
+        const dx = p.x - cx;
+        const dy = p.y - cy;
+        q = { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos };
+      }
+      if (q.x >= b.minX - pad && q.x <= b.maxX + pad && q.y >= b.minY - pad && q.y <= b.maxY + pad) return i;
     }
     return null;
   };
@@ -378,7 +478,7 @@ export default function PhotoAnnotator({
       // handles reshapes it (drag the corner) instead of moving the whole shape.
       if (selectedIdx != null) {
         const sel = strokes[selectedIdx];
-        if (sel && sel.tool !== "pen" && sel.tool !== "text") {
+        if (sel && sel.tool !== "pen" && sel.tool !== "text" && !sel.rot) {
           const canvas = canvasRef.current!;
           const rect = canvas.getBoundingClientRect();
           const scale = rect.width / canvas.width || 1;
@@ -429,6 +529,7 @@ export default function PhotoAnnotator({
       width: drawWidth,
       points: [p, p],
       fill: drawFill && CLOSED_SHAPES.has(drawTool),
+      dash: drawDash,
     };
     redrawCanvas(drawingRef.current);
   };
@@ -464,6 +565,54 @@ export default function PhotoAnnotator({
     const s = drawingRef.current;
     drawingRef.current = null;
     setStrokes((prev) => [...prev, s]);
+    setRedoStack([]); // a new drawing invalidates the redo history
+  };
+
+  // ---- Undo / Redo (add-level history, like Word's basic undo stack) ----
+  const undo = () => {
+    if (!strokes.length) return;
+    setRedoStack((r) => [...r, strokes[strokes.length - 1]]);
+    setStrokes(strokes.slice(0, -1));
+    setSelectedIdx(null);
+  };
+  const redo = () => {
+    if (!redoStack.length) return;
+    setStrokes([...strokes, redoStack[redoStack.length - 1]]);
+    setRedoStack(redoStack.slice(0, -1));
+  };
+
+  // ---- Selected-shape editing: rotate, duplicate, layer order ----
+  const rotateSelected = (deltaDeg: number) => {
+    if (selectedIdx == null) return;
+    setStrokes((prev) => prev.map((s, i) => (i === selectedIdx ? { ...s, rot: (s.rot || 0) + (deltaDeg * Math.PI) / 180 } : s)));
+  };
+  const duplicateSelected = () => {
+    if (selectedIdx == null) return;
+    const s = strokes[selectedIdx];
+    const clone: Stroke = { ...s, points: s.points.map((p) => ({ x: p.x + 24, y: p.y + 24 })) };
+    setStrokes((prev) => [...prev, clone]);
+    setSelectedIdx(strokes.length); // select the new clone
+    setRedoStack([]);
+  };
+  const bringToFront = () => {
+    if (selectedIdx == null) return;
+    setStrokes((prev) => {
+      const copy = prev.slice();
+      const [s] = copy.splice(selectedIdx, 1);
+      copy.push(s);
+      return copy;
+    });
+    setSelectedIdx(strokes.length - 1);
+  };
+  const sendToBack = () => {
+    if (selectedIdx == null) return;
+    setStrokes((prev) => {
+      const copy = prev.slice();
+      const [s] = copy.splice(selectedIdx, 1);
+      copy.unshift(s);
+      return copy;
+    });
+    setSelectedIdx(0);
   };
 
   const commitText = () => {
@@ -574,6 +723,11 @@ export default function PhotoAnnotator({
             ["triangle", "△", "Triangle"],
             ["diamond", "◇", "Diamond"],
             ["star", "★", "Star"],
+            ["pentagon", "⬠", "Pentagon"],
+            ["hexagon", "⬡", "Hexagon"],
+            ["callout", "💬", "Callout / speech bubble"],
+            ["uparrow", "⬆", "Up block arrow"],
+            ["downarrow", "⬇", "Down block arrow"],
             ["left", "↰", "Left turn"],
             ["right", "↱", "Right turn"],
             ["uturn", "↩", "U-turn"],
@@ -604,6 +758,16 @@ export default function PhotoAnnotator({
             <option value={6}>Medium</option>
             <option value={10}>Thick</option>
           </select>
+          <select
+            value={drawDash}
+            onChange={(e) => setDrawDash(e.target.value as "solid" | "dashed" | "dotted")}
+            style={S.widthSelect}
+            title="Line style"
+          >
+            <option value="solid">Solid</option>
+            <option value="dashed">Dashed</option>
+            <option value="dotted">Dotted</option>
+          </select>
           <label
             style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 800, color: "#0f172a", cursor: "pointer", padding: "0 4px" }}
             title="Fill closed shapes (translucent, so the photo stays visible)"
@@ -622,15 +786,27 @@ export default function PhotoAnnotator({
         ) : null}
         {drawTool === "move" && selectedIdx != null ? (
           <div style={S.actions}>
+            <button style={S.ghost} onClick={() => rotateSelected(-15)} title="Rotate left 15°">⟲ Rotate</button>
+            <button style={S.ghost} onClick={() => rotateSelected(15)} title="Rotate right 15°">Rotate ⟳</button>
             <button style={S.ghost} onClick={() => resizeSelected(0.85)}>− Smaller</button>
             <button style={S.ghost} onClick={() => resizeSelected(1.18)}>Larger +</button>
+            <button style={S.ghost} onClick={duplicateSelected}>Duplicate</button>
+            <button style={S.ghost} onClick={bringToFront} title="Bring to front">Front</button>
+            <button style={S.ghost} onClick={sendToBack} title="Send to back">Back</button>
             <button style={S.ghost} onClick={deleteSelected}>Delete</button>
           </div>
         ) : null}
 
         <div style={S.actions}>
-          <button style={S.ghost} onClick={() => setStrokes((s) => s.slice(0, -1))} disabled={!total}>Undo</button>
-          <button style={S.ghost} onClick={() => setStrokes([])} disabled={!total}>Clear</button>
+          <button style={S.ghost} onClick={undo} disabled={!total}>↶ Undo</button>
+          <button style={S.ghost} onClick={redo} disabled={!redoStack.length}>↷ Redo</button>
+          <button
+            style={S.ghost}
+            onClick={() => { setStrokes([]); setRedoStack([]); setSelectedIdx(null); }}
+            disabled={!total}
+          >
+            Clear
+          </button>
           <button style={S.ghost} onClick={onClose}>Cancel</button>
           <button style={S.primary} onClick={saveAnnotated} disabled={saving || !total}>
             {saving ? "Saving…" : "Save"}
