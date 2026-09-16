@@ -11,7 +11,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
 type Stroke = {
-  tool: "arrow" | "pen" | "rect" | "ellipse" | "left" | "right" | "uturn" | "x" | "text";
+  tool: "arrow" | "darrow" | "line" | "pen" | "rect" | "ellipse" | "left" | "right" | "uturn" | "x" | "text";
   color: string;
   width: number;
   points: { x: number; y: number }[];
@@ -157,19 +157,24 @@ export default function PhotoAnnotator({
       ctx.stroke();
       return;
     }
-    // arrow: shaft + filled head
+    // line / arrow / double-arrow: shaft, plus a filled head on one or both ends.
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
     ctx.stroke();
     const angle = Math.atan2(b.y - a.y, b.x - a.x);
     const head = Math.max(14, s.width * 3.5);
-    ctx.beginPath();
-    ctx.moveTo(b.x, b.y);
-    ctx.lineTo(b.x - head * Math.cos(angle - Math.PI / 7), b.y - head * Math.sin(angle - Math.PI / 7));
-    ctx.lineTo(b.x - head * Math.cos(angle + Math.PI / 7), b.y - head * Math.sin(angle + Math.PI / 7));
-    ctx.closePath();
-    ctx.fill();
+    const arrowHead = (hx: number, hy: number, ang: number) => {
+      ctx.beginPath();
+      ctx.moveTo(hx, hy);
+      ctx.lineTo(hx - head * Math.cos(ang - Math.PI / 7), hy - head * Math.sin(ang - Math.PI / 7));
+      ctx.lineTo(hx - head * Math.cos(ang + Math.PI / 7), hy - head * Math.sin(ang + Math.PI / 7));
+      ctx.closePath();
+      ctx.fill();
+    };
+    if (s.tool === "arrow" || s.tool === "darrow") arrowHead(b.x, b.y, angle); // head at end
+    if (s.tool === "darrow") arrowHead(a.x, a.y, angle + Math.PI); // head at start too
+    // "line" → no heads
   };
 
   const strokeBBox = (s: Stroke) => {
@@ -454,7 +459,9 @@ export default function PhotoAnnotator({
           {([
             ["move", "✥", "Move / select"],
             ["arrow", "➔", "Arrow"],
-            ["pen", "✎", "Free line"],
+            ["darrow", "↔", "Double arrow (measure H / W)"],
+            ["line", "—", "Straight line"],
+            ["pen", "✎", "Free draw (scribble anything)"],
             ["rect", "▭", "Rectangle"],
             ["ellipse", "◯", "Ellipse"],
             ["left", "↰", "Left turn"],
