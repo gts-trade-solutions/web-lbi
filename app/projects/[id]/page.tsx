@@ -2,6 +2,7 @@
 
 import { toast } from "../../../components/Toast";
 import { confirmDialog } from "../../../components/ConfirmDialog";
+import PhotoAnnotator from "../../../components/PhotoAnnotator";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -862,6 +863,8 @@ export default function ProjectReportsPage() {
   // report + photo index is open; the photo list itself is derived from the
   // live `reports` state so the Word checkbox inside stays in sync.
   const [photoPreview, setPhotoPreview] = useState<{ reportId: string; index: number } | null>(null);
+  // Draw-on-photo editor: which photo is being annotated (arrows / text labels).
+  const [annotatePhoto, setAnnotatePhoto] = useState<{ url: string; reportId: string } | null>(null);
 
   // Tick/untick one photo of a report for the Word export, straight from the
   // table row. Optimistic update; reverts if the server rejects the change.
@@ -1720,6 +1723,24 @@ export default function ProjectReportsPage() {
         )}
 
         {/* ✅ PHOTO PREVIEW POPUP (click a table thumbnail) */}
+        {annotatePhoto && (
+          <PhotoAnnotator
+            photoUrl={annotatePhoto.url}
+            reportId={annotatePhoto.reportId}
+            onClose={() => setAnnotatePhoto(null)}
+            onSaved={async () => {
+              setAnnotatePhoto(null);
+              try {
+                await fetchReports(q, sortDir, vmFilter);
+              } catch {
+                /* ignore refresh error — the photo saved regardless */
+              }
+              // Jump the preview to the newly-saved annotated photo (clamped to last).
+              setPhotoPreview((p) => (p ? { ...p, index: 9999 } : p));
+            }}
+          />
+        )}
+
         {photoPreview &&
           (() => {
             const rep = reports.find((r) => r.id === photoPreview.reportId);
@@ -1825,6 +1846,18 @@ export default function ProjectReportsPage() {
                   )}
 
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    {cur.url && !isVideoUrl(cur.url) ? (
+                      <button
+                        type="button"
+                        style={{ ...styles.btnGhost, borderColor: "#7C3AED", color: "#6D28D9", fontWeight: 900 }}
+                        onClick={() =>
+                          setAnnotatePhoto({ url: cur.url as string, reportId: photoPreview.reportId })
+                        }
+                        title="Draw arrows / text labels on this photo"
+                      >
+                        ✏️ Draw on photo
+                      </button>
+                    ) : null}
                     {list.length > 1 && (
                       <>
                         <button type="button" style={styles.btnGhost} onClick={() => go(-1)}>
