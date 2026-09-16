@@ -91,6 +91,9 @@ export default function PhotoAnnotator({
   const drawingRef = useRef<Stroke | null>(null);
   const baseImgRef = useRef<HTMLImageElement | null>(null);
   const moveDragRef = useRef<{ x: number; y: number } | null>(null);
+  // Which endpoint of the selected shape is being dragged to reshape it
+  // (point index in stroke.points), or null when moving/idle.
+  const resizeHandleRef = useRef<number | null>(null);
 
   // ---- Drawing primitives (copied from the Route Map annotator) ----
   const drawTurnArrow = (
@@ -244,13 +247,32 @@ export default function PhotoAnnotator({
       for (const s of strokes) drawOneStroke(ctx, s);
       if (extra) drawOneStroke(ctx, extra);
       if (drawTool === "move" && selectedIdx != null && strokes[selectedIdx]) {
-        const b = strokeBBox(strokes[selectedIdx]);
+        const sel = strokes[selectedIdx];
+        const b = strokeBBox(sel);
+        const dispScale = canvas.width ? (parseFloat(canvas.style.width || "0") / canvas.width) || 1 : 1;
         ctx.save();
-        ctx.setLineDash([10, 7]);
+        ctx.setLineDash([10 / dispScale, 7 / dispScale]);
         ctx.strokeStyle = "#22D3EE";
-        ctx.lineWidth = 2;
+        ctx.lineWidth = Math.max(2, 2 / dispScale);
         ctx.strokeRect(b.minX - 8, b.minY - 8, b.maxX - b.minX + 16, b.maxY - b.minY + 16);
         ctx.restore();
+        // Draggable endpoint handles for reshaping (2-point shapes only).
+        if (sel.tool !== "pen" && sel.tool !== "text") {
+          const hs = Math.max(6, 9 / dispScale);
+          const hpts = [sel.points[0], sel.points[sel.points.length - 1]];
+          ctx.save();
+          ctx.setLineDash([]);
+          ctx.fillStyle = "#ffffff";
+          ctx.strokeStyle = "#0f172a";
+          ctx.lineWidth = Math.max(2, 2 / dispScale);
+          for (const hp of hpts) {
+            ctx.beginPath();
+            ctx.rect(hp.x - hs, hp.y - hs, hs * 2, hs * 2);
+            ctx.fill();
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -352,9 +374,32 @@ export default function PhotoAnnotator({
     const p = canvasPoint(e);
     if (drawTool === "move") {
       (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+      // If a shape is already selected, grabbing one of its white endpoint
+      // handles reshapes it (drag the corner) instead of moving the whole shape.
+      if (selectedIdx != null) {
+        const sel = strokes[selectedIdx];
+        if (sel && sel.tool !== "pen" && sel.tool !== "text") {
+          const canvas = canvasRef.current!;
+          const rect = canvas.getBoundingClientRect();
+          const scale = rect.width / canvas.width || 1;
+          const tol = 18 / scale;
+          const iLast = sel.points.length - 1;
+          if (Math.hypot(p.x - sel.points[0].x, p.y - sel.points[0].y) <= tol) {
+            resizeHandleRef.current = 0;
+            moveDragRef.current = null;
+            return;
+          }
+          if (Math.hypot(p.x - sel.points[iLast].x, p.y - sel.points[iLast].y) <= tol) {
+            resizeHandleRef.current = iLast;
+            moveDragRef.current = null;
+            return;
+          }
+        }
+      }
       const idx = hitTest(p);
       setSelectedIdx(idx);
       moveDragRef.current = idx != null ? { x: p.x, y: p.y } : null;
+      resizeHandleRef.current = null;
       redrawCanvas();
       return;
     }
@@ -390,6 +435,16 @@ export default function PhotoAnnotator({
   const onDrawMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const p = canvasPoint(e);
     if (drawTool === "move") {
+      // Reshaping: drag one endpoint handle.
+      if (resizeHandleRef.current != null && selectedIdx != null) {
+        const hi = resizeHandleRef.current;
+        setStrokes((prev) =>
+          prev.map((s, i) =>
+            i === selectedIdx ? { ...s, points: s.points.map((pt, pi) => (pi === hi ? { x: p.x, y: p.y } : pt)) } : s
+          )
+        );
+        return;
+      }
       if (selectedIdx == null || !moveDragRef.current) return;
       const dx = p.x - moveDragRef.current.x;
       const dy = p.y - moveDragRef.current.y;
@@ -404,6 +459,7 @@ export default function PhotoAnnotator({
   };
   const onDrawUp = () => {
     moveDragRef.current = null;
+    resizeHandleRef.current = null;
     if (!drawingRef.current) return;
     const s = drawingRef.current;
     drawingRef.current = null;
@@ -559,7 +615,9 @@ export default function PhotoAnnotator({
 
         {drawTool === "move" ? (
           <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b" }}>
-            {selectedIdx == null ? "Tap any drawing or text to select, then drag to move." : "Drag to move · − / + to resize · Delete to remove."}
+            {selectedIdx == null
+              ? "Tap any drawing or text to select it."
+              : "Drag inside to move · drag a white corner to reshape · − / + to resize · Delete to remove."}
           </div>
         ) : null}
         {drawTool === "move" && selectedIdx != null ? (
