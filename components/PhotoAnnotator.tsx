@@ -11,13 +11,45 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
 type Stroke = {
-  tool: "arrow" | "darrow" | "line" | "pen" | "rect" | "ellipse" | "left" | "right" | "uturn" | "x" | "text";
+  tool:
+    | "arrow" | "darrow" | "line" | "pen"
+    | "rect" | "rrect" | "ellipse" | "triangle" | "diamond" | "star"
+    | "left" | "right" | "uturn" | "x" | "text";
   color: string;
   width: number;
   points: { x: number; y: number }[];
   text?: string;
   fontSize?: number;
+  fill?: boolean;
 };
+
+// Closed shapes that can be outlined or filled.
+const CLOSED_SHAPES = new Set(["rect", "rrect", "ellipse", "triangle", "diamond", "star"]);
+
+// Rounded-rectangle path (manual, so it works without ctx.roundRect support).
+function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+// N-point star path centred at (cx,cy), outer radius R (inner = R*0.5).
+function starPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, R: number, points = 5) {
+  const inner = R * 0.5;
+  for (let i = 0; i < points * 2; i++) {
+    const rad = i % 2 === 0 ? R : inner;
+    const ang = (Math.PI / points) * i - Math.PI / 2;
+    const x = cx + rad * Math.cos(ang);
+    const y = cy + rad * Math.sin(ang);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
 
 type TextDraft = {
   dispX: number;
@@ -48,6 +80,7 @@ export default function PhotoAnnotator({
   const [drawTool, setDrawTool] = useState<Stroke["tool"] | "move">("arrow");
   const [drawColor, setDrawColor] = useState("#FFD400");
   const [drawWidth, setDrawWidth] = useState(6);
+  const [drawFill, setDrawFill] = useState(false);
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [saving, setSaving] = useState(false);
   const [textDraft, setTextDraft] = useState<TextDraft | null>(null);
@@ -134,13 +167,24 @@ export default function PhotoAnnotator({
       return;
     }
     const a = pts[0], b = pts[pts.length - 1];
-    if (s.tool === "rect") {
-      ctx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
-      return;
-    }
-    if (s.tool === "ellipse") {
+    if (CLOSED_SHAPES.has(s.tool)) {
+      const L = Math.min(a.x, b.x), R = Math.max(a.x, b.x);
+      const T = Math.min(a.y, b.y), B = Math.max(a.y, b.y);
+      const W = R - L, H = B - T, cx = (L + R) / 2, cy = (T + B) / 2;
       ctx.beginPath();
-      ctx.ellipse((a.x + b.x) / 2, (a.y + b.y) / 2, Math.abs(b.x - a.x) / 2, Math.abs(b.y - a.y) / 2, 0, 0, Math.PI * 2);
+      if (s.tool === "rect") ctx.rect(L, T, W, H);
+      else if (s.tool === "rrect") roundRectPath(ctx, L, T, W, H, Math.min(W, H) * 0.18);
+      else if (s.tool === "ellipse") ctx.ellipse(cx, cy, W / 2, H / 2, 0, 0, Math.PI * 2);
+      else if (s.tool === "triangle") { ctx.moveTo(cx, T); ctx.lineTo(R, B); ctx.lineTo(L, B); ctx.closePath(); }
+      else if (s.tool === "diamond") { ctx.moveTo(cx, T); ctx.lineTo(R, cy); ctx.lineTo(cx, B); ctx.lineTo(L, cy); ctx.closePath(); }
+      else if (s.tool === "star") starPath(ctx, cx, cy, Math.min(W, H) / 2, 5);
+      if (s.fill) {
+        ctx.save();
+        ctx.globalAlpha = 0.35; // translucent so the photo underneath stays visible
+        ctx.fillStyle = s.color;
+        ctx.fill();
+        ctx.restore();
+      }
       ctx.stroke();
       return;
     }
@@ -334,7 +378,13 @@ export default function PhotoAnnotator({
       return;
     }
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
-    drawingRef.current = { tool: drawTool as Stroke["tool"], color: drawColor, width: drawWidth, points: [p, p] };
+    drawingRef.current = {
+      tool: drawTool as Stroke["tool"],
+      color: drawColor,
+      width: drawWidth,
+      points: [p, p],
+      fill: drawFill && CLOSED_SHAPES.has(drawTool),
+    };
     redrawCanvas(drawingRef.current);
   };
   const onDrawMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -463,7 +513,11 @@ export default function PhotoAnnotator({
             ["line", "—", "Straight line"],
             ["pen", "✎", "Free draw (scribble anything)"],
             ["rect", "▭", "Rectangle"],
-            ["ellipse", "◯", "Ellipse"],
+            ["rrect", "▢", "Rounded rectangle"],
+            ["ellipse", "◯", "Ellipse / circle"],
+            ["triangle", "△", "Triangle"],
+            ["diamond", "◇", "Diamond"],
+            ["star", "★", "Star"],
             ["left", "↰", "Left turn"],
             ["right", "↱", "Right turn"],
             ["uturn", "↩", "U-turn"],
@@ -494,6 +548,13 @@ export default function PhotoAnnotator({
             <option value={6}>Medium</option>
             <option value={10}>Thick</option>
           </select>
+          <label
+            style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 800, color: "#0f172a", cursor: "pointer", padding: "0 4px" }}
+            title="Fill closed shapes (translucent, so the photo stays visible)"
+          >
+            <input type="checkbox" checked={drawFill} onChange={(e) => setDrawFill(e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />
+            Fill
+          </label>
         </div>
 
         {drawTool === "move" ? (
