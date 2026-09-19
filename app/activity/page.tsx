@@ -78,9 +78,17 @@ export default function ActivityLogPage() {
     load();
   }, [load]);
 
+  // Show every timestamp in India time (IST). DB timestamps are UTC; a bare
+  // "YYYY-MM-DD HH:MM:SS" (no zone) from the API must be read AS UTC, so we
+  // append "Z" before parsing, then render in Asia/Kolkata regardless of the
+  // viewer's own timezone.
   const fmtTime = (s: string) => {
     try {
-      return new Date(s).toLocaleString();
+      let iso = s;
+      if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(s) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) {
+        iso = s.replace(" ", "T") + "Z";
+      }
+      return new Date(iso).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + " IST";
     } catch {
       return s;
     }
