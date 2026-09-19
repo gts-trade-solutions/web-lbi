@@ -1858,6 +1858,32 @@ export default function ProjectReportsPage() {
                         ✏️ Draw on photo
                       </button>
                     ) : null}
+                    <button
+                      type="button"
+                      style={{ ...styles.btnGhost, borderColor: "#FDA29B", color: "#B42318", fontWeight: 900 }}
+                      onClick={async () => {
+                        if (
+                          !(await confirmDialog(
+                            "Delete this photo from the report? (e.g. remove the old one with the date stamp, keeping your cropped copy)",
+                            { confirmText: "Delete", danger: true }
+                          ))
+                        )
+                          return;
+                        try {
+                          await apiRequestJson(
+                            `/api/reports/${encodeURIComponent(photoPreview.reportId)}/photos?photoId=${encodeURIComponent(cur.id)}`,
+                            { method: "DELETE" }
+                          );
+                          await fetchReports(q, sortDir, vmFilter);
+                          setPhotoPreview((p) => (p ? { ...p, index: Math.max(0, idx - 1) } : p));
+                        } catch (e: any) {
+                          toast(e?.message || "Failed to delete photo");
+                        }
+                      }}
+                      title="Delete this photo from the report"
+                    >
+                      🗑 Delete photo
+                    </button>
                     {list.length > 1 && (
                       <>
                         <button type="button" style={styles.btnGhost} onClick={() => go(-1)}>
