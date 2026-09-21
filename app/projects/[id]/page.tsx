@@ -3,6 +3,7 @@
 import { toast } from "../../../components/Toast";
 import { confirmDialog } from "../../../components/ConfirmDialog";
 import PhotoAnnotator from "../../../components/PhotoAnnotator";
+import PhotoCropper from "../../../components/PhotoCropper";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -892,6 +893,7 @@ export default function ProjectReportsPage() {
   const [photoPreview, setPhotoPreview] = useState<{ reportId: string; index: number } | null>(null);
   // Draw-on-photo editor: which photo is being annotated (arrows / text labels).
   const [annotatePhoto, setAnnotatePhoto] = useState<{ url: string; reportId: string } | null>(null);
+  const [cropPhoto, setCropPhoto] = useState<{ url: string; reportId: string; photoId: string } | null>(null);
 
   // Tick/untick one photo of a report for the Word export, straight from the
   // table row. Optimistic update; reverts if the server rejects the change.
@@ -1829,6 +1831,36 @@ export default function ProjectReportsPage() {
           />
         )}
 
+        {/* ✅ PHOTO CROP MODAL — the cropped copy REPLACES the original */}
+        {cropPhoto && (
+          <PhotoCropper
+            photoUrl={cropPhoto.url}
+            reportId={cropPhoto.reportId}
+            onClose={() => setCropPhoto(null)}
+            onSaved={async () => {
+              const { reportId, photoId } = cropPhoto;
+              setCropPhoto(null);
+              // The cropped image is already saved as a new photo. Remove the
+              // ORIGINAL so the cropped version replaces it (crop → replace).
+              try {
+                await apiRequestJson(
+                  `/api/reports/${encodeURIComponent(reportId)}/photos?photoId=${encodeURIComponent(photoId)}`,
+                  { method: "DELETE" }
+                );
+              } catch {
+                /* keep going — the crop saved; original just wasn't removed */
+              }
+              try {
+                await fetchReports(q, sortDir, vmFilter);
+              } catch {
+                /* ignore refresh error — the crop saved regardless */
+              }
+              // Jump the preview to the newly-saved cropped photo (clamped to last).
+              setPhotoPreview((p) => (p ? { ...p, index: 9999 } : p));
+            }}
+          />
+        )}
+
         {photoPreview &&
           (() => {
             const rep = reports.find((r) => r.id === photoPreview.reportId);
@@ -1944,6 +1976,22 @@ export default function ProjectReportsPage() {
                         title="Draw arrows / text labels on this photo"
                       >
                         ✏️ Draw on photo
+                      </button>
+                    ) : null}
+                    {cur.url && !isVideoUrl(cur.url) ? (
+                      <button
+                        type="button"
+                        style={{ ...styles.btnGhost, borderColor: "#7C3AED", color: "#6D28D9", fontWeight: 900 }}
+                        onClick={() =>
+                          setCropPhoto({
+                            url: cur.url as string,
+                            reportId: photoPreview.reportId,
+                            photoId: cur.id,
+                          })
+                        }
+                        title="Crop this photo (the cropped copy replaces the original)"
+                      >
+                        ✂️ Crop photo
                       </button>
                     ) : null}
                     <button
