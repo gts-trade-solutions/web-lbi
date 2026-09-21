@@ -78,6 +78,19 @@ function projectNameOf(p: ProjectRow | null) {
   return p?.name || p?.title || p?.project_name || "Project";
 }
 
+// A photo is an "annotation drawing" when it was made with the "Draw on photo"
+// tool — those are uploaded as file_name "annotated_<timestamp>.jpg" and the S3
+// url carries the same token. Used to offer the "Extract drawings" action.
+function isDrawingPhoto(p: ReportPhotoRow): boolean {
+  const fn = String(p?.file_name || "").toLowerCase();
+  const url = String(p?.url || "").toLowerCase();
+  return fn.startsWith("annotated") || url.includes("annotated");
+}
+
+function reportHasDrawings(r: ReportRow): boolean {
+  return (r.photos || []).some(isDrawingPhoto);
+}
+
 function sanitizeFileBaseName(name: string) {
   const cleaned = String(name || "")
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
@@ -1545,6 +1558,33 @@ export default function ProjectReportsPage() {
     );
   };
 
+  // ✅ Move a report's annotation DRAWINGS into a new separate report (inserted
+  // right after it). The source report keeps its other images (photos / route
+  // map / stage-summary table). Nothing is duplicated — the drawings are
+  // re-parented, so each becomes its own report/observation.
+  const [extractingDrawings, setExtractingDrawings] = useState<Record<string, boolean>>({});
+  const extractDrawings = async (reportId: string) => {
+    if (extractingDrawings[reportId]) return;
+    const ok = window.confirm(
+      "Move the drawing images from this report into a NEW separate report (placed right after it)?\n\nThe table / route-map / photo images stay on this report."
+    );
+    if (!ok) return;
+    setExtractingDrawings((p) => ({ ...p, [reportId]: true }));
+    try {
+      const data = await apiRequestJson(
+        `/api/reports/${encodeURIComponent(reportId)}/extract-drawings`,
+        { method: "POST" }
+      );
+      const moved = Number(data?.movedPhotos || 0);
+      toast(`Moved ${moved} drawing${moved === 1 ? "" : "s"} into a new report.`);
+      await fetchReports(q, sortDir, vmFilter);
+    } catch (e: any) {
+      toast(e?.message || "Failed to extract drawings");
+    } finally {
+      setExtractingDrawings((p) => ({ ...p, [reportId]: false }));
+    }
+  };
+
   // ✅ re-number all reports in this project to have safe gaps (10,20,30...)
   const renumberSortOrders = async () => {
     if (!projectId) return;
@@ -2848,6 +2888,30 @@ export default function ProjectReportsPage() {
                               >
                                 Points
                               </button>
+
+                              {reportHasDrawings(r) && (
+                                <button
+                                  type="button"
+                                  onClick={() => extractDrawings(r.id)}
+                                  disabled={!!extractingDrawings[r.id]}
+                                  style={{
+                                    padding: "9px 12px",
+                                    borderRadius: 12,
+                                    border: "1px solid #C6B6F0",
+                                    background: "#F4F0FF",
+                                    color: "#5B2AB3",
+                                    fontWeight: 900,
+                                    fontSize: 12,
+                                    height: 36,
+                                    cursor: extractingDrawings[r.id] ? "not-allowed" : "pointer",
+                                    whiteSpace: "nowrap",
+                                    opacity: extractingDrawings[r.id] ? 0.6 : 1,
+                                  }}
+                                  title="Move the drawing images out into a new separate report (right after this one)"
+                                >
+                                  {extractingDrawings[r.id] ? "Extracting…" : "Extract drawings"}
+                                </button>
+                              )}
 
                               <Link href={`/reports/${r.id}`} style={styles.btnOpen} title="Open report">
                                 Open
