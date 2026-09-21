@@ -983,17 +983,33 @@ export default function ProjectReportsPage() {
 
   // ========= Export modal helpers =========
   const openExportModal = () => {
+    // If the user has points selected, default to exporting ONLY those selected
+    // points. Previously the mode stayed "listed"/"all", so a selection was
+    // silently ignored and the whole project downloaded instead. Conversely, if
+    // nothing is selected but a selection mode was left over from a prior run,
+    // fall back to "listed" so the export isn't blocked/empty.
+    let mode = exportMode;
+    if (stats.selectedCount > 0) {
+      if (mode !== "selectedOne" && mode !== "selectedSplit") {
+        mode = "selectedOne";
+        setExportMode("selectedOne");
+      }
+    } else if (mode === "selectedOne" || mode === "selectedSplit") {
+      mode = "listed";
+      setExportMode("listed");
+    }
+
     const baseListed = `${projectName}-${vmFilterLabel(vmFilter)}-${stats.shown}`;
     const baseSelectedOne = `${projectName}-SELECTED-${stats.selectedCount}`;
     const baseSelectedSplit = `${projectName}`;
     const baseAll = `${projectName}-ALL-REPORTS`;
 
     const defName =
-      exportMode === "listed"
+      mode === "listed"
         ? baseListed
-        : exportMode === "selectedOne"
+        : mode === "selectedOne"
           ? baseSelectedOne
-          : exportMode === "selectedSplit"
+          : mode === "selectedSplit"
             ? baseSelectedSplit
             : baseAll;
 
