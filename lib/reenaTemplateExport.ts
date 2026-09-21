@@ -773,13 +773,19 @@ async function optimizeDocxImage(
   try {
     let optimized: Buffer;
     if (type === "category") {
+      // TRIM the transparent padding baked into the source PNGs (e.g. gate.png
+      // is a 512×512 file whose glyph is only 430×152 — the rest is empty). If
+      // we kept the padding and rendered into a square cell, the glyph floated
+      // with large blank space above/below it. After trimming we resize to fit
+      // INSIDE a box (no forced square / no re-padding) so the buffer keeps the
+      // glyph's real aspect ratio; getSize then renders it at that ratio.
       optimized = await sharp(input)
         .rotate()
+        .trim({ threshold: 10 })
         .resize({
-          width: 160,
-          height: 160,
-          fit: "contain",
-          background: { r: 255, g: 255, b: 255, alpha: 0 },
+          width: 320,
+          height: 320,
+          fit: "inside",
           withoutEnlargement: true,
         })
         .png()
@@ -1305,7 +1311,17 @@ async function readTemplate(): Promise<Buffer> {
   return fs.readFile(TEMPLATE_PATH);
 }
 
-type ImageEntry = { buffer: Buffer; contentType: string; url?: string; path?: string };
+type ImageEntry = {
+  buffer: Buffer;
+  contentType: string;
+  url?: string;
+  path?: string;
+  // For category icons: the render size [w,h] in px that preserves the icon's
+  // TRIMMED aspect ratio (padding removed), capped to CATEGORY_ICON_SIZE. Used
+  // by getSize so a wide-short glyph (e.g. the gate) renders short instead of
+  // floating in a tall square cell with empty space above/below it.
+  displaySize?: [number, number];
+};
 
 type ObservationData = {
   gpsLat: string;
@@ -2209,6 +2225,27 @@ function buildRouteLocationsStepperTableXml(
   ].join("");
 }
 
+// Compute the render size [w,h] (px) for a category icon so it keeps the icon's
+// real (already trimmed) aspect ratio while fitting inside the CATEGORY_ICON_SIZE
+// box. A wide-short glyph (gate) → e.g. 240×85 instead of a 240×240 square that
+// leaves blank space above/below it. Never enlarges the icon past the box width,
+// so the visible glyph is not reduced. Falls back to the square box on failure.
+async function categoryIconDisplaySize(buffer: Buffer): Promise<[number, number]> {
+  const [maxW, maxH] = CATEGORY_ICON_SIZE;
+  try {
+    const sharp = getSharp();
+    if (!sharp) return CATEGORY_ICON_SIZE;
+    const meta = await sharp(buffer).metadata();
+    const w = meta.width || 0;
+    const h = meta.height || 0;
+    if (w <= 0 || h <= 0) return CATEGORY_ICON_SIZE;
+    const scale = Math.min(maxW / w, maxH / h);
+    return [Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale))];
+  } catch {
+    return CATEGORY_ICON_SIZE;
+  }
+}
+
 const categoryIconCache = new Map<string, ImageEntry | null>();
 
 async function loadCategoryIcon(category: unknown): Promise<ImageEntry | null> {
@@ -2246,6 +2283,7 @@ async function loadCategoryIcon(category: unknown): Promise<ImageEntry | null> {
       buffer,
       contentType: "image/png",
       path: `(auto-generated:${sourceText})`,
+      displaySize: await categoryIconDisplaySize(buffer),
     };
     categoryIconCache.set(fileName, entry);
     console.log("[category icon debug]", {
@@ -2290,7 +2328,12 @@ async function loadCategoryIcon(category: unknown): Promise<ImageEntry | null> {
     // a typical category set, not per row.
     const buffer = await optimizeDocxImage(rawBuffer, "category", fileName);
     const contentType = "image/png";
-    const entry: ImageEntry = { buffer, contentType, path: fullPath };
+    const entry: ImageEntry = {
+      buffer,
+      contentType,
+      path: fullPath,
+      displaySize: await categoryIconDisplaySize(buffer),
+    };
     categoryIconCache.set(fileName, entry);
     console.log("[category icon debug]", {
       category,
@@ -4264,8 +4307,24 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       });
       if (tagName === "routeMap" || key === "routeMap") return ROUTE_MAP_SIZE;
       if (tagName === "gaDrawing" || key === "gaDrawing") return GA_DRAWING_SIZE;
-      if (tagName === "categoryIconKey" || key.startsWith("catIcon_")) return CATEGORY_ICON_SIZE;
-      if (tagName === "categorySummaryIcon") return CATEGORY_SUMMARY_ICON_SIZE;
+      if (tagName === "categoryIconKey" || key.startsWith("catIcon_")) {
+        // Use the icon's trimmed aspect ratio so a wide-short glyph renders
+        // short (no blank space around it) instead of a fixed square.
+        const entry = key ? imageMap.get(key) : undefined;
+        return entry?.displaySize || CATEGORY_ICON_SIZE;
+      }
+      if (tagName === "categorySummaryIcon") {
+        // Summary icons share the (now non-square, trimmed) category buffer.
+        // Rescale the icon's trimmed aspect ratio into the small summary box so
+        // it isn't stretched to a square.
+        const ds = (tagValue as { displaySize?: [number, number] })?.displaySize;
+        if (Array.isArray(ds) && ds.length === 2 && ds[0] > 0 && ds[1] > 0) {
+          const [maxW, maxH] = CATEGORY_SUMMARY_ICON_SIZE;
+          const s = Math.min(maxW / ds[0], maxH / ds[1]);
+          return [Math.max(1, Math.round(ds[0] * s)), Math.max(1, Math.round(ds[1] * s))];
+        }
+        return CATEGORY_SUMMARY_ICON_SIZE;
+      }
       if (
         tagName === "photo" ||
         tagName === "photoKey" ||
@@ -7774,6 +7833,31 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     }
   } catch (err) {
     console.error("[export] page vAlign top fix failed (non-fatal):", err);
+  }
+
+  // Lower the observation row's forced minimum height. The template pins each
+  // observation row to w:trHeight val="2850" (~1.98"), which left blank space
+  // in the Category cell whenever the (now trimmed, aspect-correct) icon + its
+  // sibling cells were shorter than that floor. Keeping hRule="atLeast" means
+  // rows with taller content (a big icon or long description) still grow — we
+  // only remove the empty floor so short rows hug their content.
+  try {
+    const zip = doc.getZip();
+    const df = zip.file("word/document.xml");
+    if (df) {
+      let dx = df.asText();
+      const before = dx;
+      dx = dx.replace(
+        /<w:trHeight\b[^>]*w:val="2850"[^>]*\/>/g,
+        '<w:trHeight w:val="1000" w:hRule="atLeast"/>'
+      );
+      if (dx !== before) {
+        zip.file("word/document.xml", dx);
+        console.log("[export] observation row height floor lowered (2850 -> 1000 twips)");
+      }
+    }
+  } catch (err) {
+    console.error("[export] observation row height floor fix failed (non-fatal):", err);
   }
 
   // ----- Step 11: Generate output buffer.
