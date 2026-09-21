@@ -40,6 +40,12 @@ type ReportRow = {
   difficulty?: VehicleMovement | null; // ✅ DB column
   sort_order?: number | null; // ✅ NEW (for inserting at exact position)
   photos?: ReportPhotoRow[]; // ✅ per-photo Word-export checkboxes in the table
+  // NE Coordinates — editable in the Edit-report form. latitude/longitude are the
+  // primary columns; loc_lat/loc_lon are the mobile-capture fallback.
+  latitude?: number | null;
+  longitude?: number | null;
+  loc_lat?: number | null;
+  loc_lon?: number | null;
 };
 
 type WatermarkOpts = { enabled: boolean; text: string };
@@ -1474,6 +1480,8 @@ export default function ProjectReportsPage() {
     description: string;
     remarksAction: string;
     difficulty: VehicleMovement;
+    latitude: number | null;
+    longitude: number | null;
   }) => {
     if (!editReportRow) return;
     const reportId = editReportRow.id;
@@ -1482,6 +1490,8 @@ export default function ProjectReportsPage() {
     const finalDescription = payload.description.trim() ? payload.description.trim() : null;
     const finalRemarks = payload.remarksAction.trim() ? payload.remarksAction.trim() : null;
     const finalDifficulty = payload.difficulty ? payload.difficulty : null;
+    const finalLat = payload.latitude;
+    const finalLon = payload.longitude;
 
     await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}`, {
       method: "PUT",
@@ -1490,6 +1500,12 @@ export default function ProjectReportsPage() {
         description: finalDescription,
         remarks_action: finalRemarks,
         difficulty: finalDifficulty,
+        // NE Coordinates — write both the primary and fallback columns so the
+        // report + export stay consistent wherever they read the location from.
+        latitude: finalLat,
+        longitude: finalLon,
+        loc_lat: finalLat,
+        loc_lon: finalLon,
       }),
     });
 
@@ -1503,6 +1519,10 @@ export default function ProjectReportsPage() {
               description: finalDescription,
               remarks_action: finalRemarks,
               difficulty: finalDifficulty,
+              latitude: finalLat,
+              longitude: finalLon,
+              loc_lat: finalLat,
+              loc_lon: finalLon,
             }
           : r
       )
@@ -3453,6 +3473,8 @@ function EditReportModal({
     description: string;
     remarksAction: string;
     difficulty: VehicleMovement;
+    latitude: number | null;
+    longitude: number | null;
   }) => void | Promise<void>;
 }) {
   const initialCategory = (report.category || "").trim();
@@ -3468,6 +3490,16 @@ function EditReportModal({
   const [remarksAction, setRemarksAction] = useState(report.remarks_action || "");
   const [difficulty, setDifficulty] = useState<VehicleMovement>(normalizeVM(report.difficulty));
   const [saving, setSaving] = useState(false);
+
+  // NE Coordinates (editable). Prefer latitude/longitude, fall back to loc_*.
+  const initLat =
+    (report as { latitude?: number | null }).latitude ??
+    (report as { loc_lat?: number | null }).loc_lat;
+  const initLon =
+    (report as { longitude?: number | null }).longitude ??
+    (report as { loc_lon?: number | null }).loc_lon;
+  const [latStr, setLatStr] = useState(initLat != null ? String(initLat) : "");
+  const [lonStr, setLonStr] = useState(initLon != null ? String(initLon) : "");
 
   // ---- Photo management (view existing, remove, add) ----
   const [photos, setPhotos] = useState<ReportPhotoRow[]>([]);
@@ -3541,11 +3573,18 @@ function EditReportModal({
           ? customCategory.trim() || "Report"
           : category.trim() || "Report";
 
+      const latTrim = latStr.trim();
+      const lonTrim = lonStr.trim();
+      const latNum = latTrim === "" ? null : Number(latTrim);
+      const lonNum = lonTrim === "" ? null : Number(lonTrim);
+
       await onSave({
         category: finalCategory,
         description: description.trim(),
         remarksAction: remarksAction.trim(),
         difficulty,
+        latitude: latTrim !== "" && Number.isFinite(latNum) ? latNum : null,
+        longitude: lonTrim !== "" && Number.isFinite(lonNum) ? lonNum : null,
       });
     } finally {
       setSaving(false);
@@ -3616,6 +3655,26 @@ function EditReportModal({
                 background: "#fff",
                 opacity: category === "__custom__" ? 1 : 0.6,
               }}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={styles.routeLabel}>NE Coordinates (latitude, longitude)</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <input
+              value={latStr}
+              onChange={(e) => setLatStr(e.target.value)}
+              inputMode="decimal"
+              placeholder="N — latitude (e.g. 21.204813)"
+              style={{ height: 44, borderRadius: 14, border: "1px solid #D0D5DD", padding: "0 14px", fontWeight: 900, outline: "none", background: "#fff" }}
+            />
+            <input
+              value={lonStr}
+              onChange={(e) => setLonStr(e.target.value)}
+              inputMode="decimal"
+              placeholder="E — longitude (e.g. 81.860966)"
+              style={{ height: 44, borderRadius: 14, border: "1px solid #D0D5DD", padding: "0 14px", fontWeight: 900, outline: "none", background: "#fff" }}
             />
           </div>
         </div>
