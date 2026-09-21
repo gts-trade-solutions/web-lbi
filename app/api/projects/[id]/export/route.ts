@@ -275,6 +275,7 @@ export async function GET(request: Request, context: Ctx) {
     projectId,
     reportIds: normalizeReportIds(url.searchParams.get("reportIds") || ""),
     includePhotos: String(url.searchParams.get("includePhotos") || "1") !== "0",
+    includeGa: String(url.searchParams.get("includeGa") || "1") !== "0",
     requestedFileName: String(url.searchParams.get("fileName") || "").trim(),
     sort: url.searchParams.get("sort") === "desc" ? "desc" : "asc",
   });
@@ -289,10 +290,11 @@ async function renderAndRespond(args: {
   projectId: string;
   reportIds: string[];
   includePhotos: boolean;
+  includeGa?: boolean;
   requestedFileName: string;
   sort?: "asc" | "desc";
 }) {
-  const { projectId, reportIds, includePhotos, requestedFileName, sort } = args;
+  const { projectId, reportIds, includePhotos, includeGa, requestedFileName, sort } = args;
   let stage: string = "started";
   try {
     console.log("[export stage] started", {
@@ -314,6 +316,7 @@ async function renderAndRespond(args: {
       projectId,
       reportIds: reportIds.length ? reportIds : undefined,
       includePhotos,
+      includeGa: includeGa !== false,
       sort,
     });
 
@@ -422,6 +425,7 @@ export async function POST(request: Request, context: Ctx) {
   let body: {
     reportIds?: unknown;
     includePhotos?: unknown;
+    includeGa?: unknown;
     fileName?: unknown;
   } = {};
   try {
@@ -437,8 +441,9 @@ export async function POST(request: Request, context: Ctx) {
         .slice(0, 5000)
     : [];
   const includePhotos = body.includePhotos !== false;
+  const includeGa = body.includeGa !== false;
   const requestedFileName = String(body.fileName || "").trim();
-  const sort = body.sort === "desc" ? "desc" : "asc";
+  const sort = (body as { sort?: unknown }).sort === "desc" ? "desc" : "asc";
 
-  return renderAndRespond({ projectId, reportIds, includePhotos, requestedFileName, sort });
+  return renderAndRespond({ projectId, reportIds, includePhotos, includeGa, requestedFileName, sort });
 }

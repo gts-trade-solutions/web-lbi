@@ -365,6 +365,7 @@ async function fetchProjectExportDocx(params: {
   projectId: string;
   reportIds?: string[];
   includePhotos?: boolean;
+  includeGa?: boolean;
   fileName?: string;
   sort?: "asc" | "desc";
 }): Promise<ExportDocxResult> {
@@ -390,6 +391,9 @@ async function fetchProjectExportDocx(params: {
       if (typeof params.includePhotos === "boolean") {
         sp.set("includePhotos", params.includePhotos ? "1" : "0");
       }
+      if (typeof params.includeGa === "boolean") {
+        sp.set("includeGa", params.includeGa ? "1" : "0");
+      }
       if (params.fileName?.trim()) {
         sp.set("fileName", params.fileName.trim());
       }
@@ -414,6 +418,7 @@ async function fetchProjectExportDocx(params: {
         body: JSON.stringify({
           reportIds: params.reportIds,
           includePhotos: params.includePhotos,
+          includeGa: params.includeGa,
           fileName: params.fileName?.trim() || undefined,
           sort: params.sort,
         }),
@@ -658,6 +663,9 @@ export default function ProjectReportsPage() {
   const [exportName, setExportName] = useState("");
   const [stageRanges, setStageRanges] = useState("1-12,13-14,15-25");
   const [includePhotos, setIncludePhotos] = useState(true);
+  // Whether the GA drawing is included in the export (lets the user download a
+  // "with GA" and a "without GA" version).
+  const [includeGa, setIncludeGa] = useState(true);
 
   // Download progress modal
   const [dlOpen, setDlOpen] = useState(false);
@@ -1220,6 +1228,7 @@ export default function ProjectReportsPage() {
         const { blob, fileName: serverFileName, downloadUrl } = await fetchProjectExportDocx({
           projectId,
           includePhotos,
+          includeGa,
           fileName,
           sort: sortDir,
         });
@@ -1240,6 +1249,7 @@ export default function ProjectReportsPage() {
           projectId,
           reportIds: ids,
           includePhotos,
+          includeGa,
           fileName,
           sort: sortDir,
         });
@@ -1257,6 +1267,7 @@ export default function ProjectReportsPage() {
           projectId,
           reportIds: ids,
           includePhotos,
+          includeGa,
           fileName,
           sort: sortDir,
         });
@@ -1286,6 +1297,7 @@ export default function ProjectReportsPage() {
             projectId,
             reportIds: subset,
             includePhotos,
+            includeGa,
             fileName,
             sort: sortDir,
           });
@@ -2191,6 +2203,16 @@ export default function ProjectReportsPage() {
                         style={{ width: 16, height: 16 }}
                       />
                       Include photos
+                    </label>
+
+                    <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontWeight: 800 }}>
+                      <input
+                        type="checkbox"
+                        checked={includeGa}
+                        onChange={(e) => setIncludeGa(e.target.checked)}
+                        style={{ width: 16, height: 16 }}
+                      />
+                      Include GA drawing
                     </label>
 
                     <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontWeight: 800 }}>

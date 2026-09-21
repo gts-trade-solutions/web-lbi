@@ -831,6 +831,9 @@ export type ExportOptions = {
   projectId: string;
   reportIds?: string[];
   includePhotos?: boolean;
+  // When false, the GA Drawing image/section is left out of the report, so the
+  // user can download a "without GA drawing" version alongside the full one.
+  includeGa?: boolean;
   debug?: boolean;
   // Report order in the document. "desc" reverses the route (and the
   // cumulative KMs recompute for that direction). Defaults to "asc".
@@ -2852,6 +2855,7 @@ class ExportStepError extends Error {
 export async function generateReenaDocx(options: ExportOptions): Promise<ExportResult> {
   const projectId = options.projectId;
   const includePhotos = options.includePhotos !== false;
+  const includeGa = options.includeGa !== false; // default true; false = skip GA drawing
   const reportIdsFilter = (options.reportIds || []).filter(Boolean);
 
   console.log("[export actual] started", {
@@ -3325,20 +3329,23 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     });
   }
 
-  // ----- Step 5: GA drawing.
+  // ----- Step 5: GA drawing. Skipped entirely when includeGa is false so the
+  // user can download a "without GA drawing" version.
   await ensureGaDrawingsTable();
   let gaRow: Row | null = null;
-  try {
-    const rows = await safeQuery(
-      "SELECT * FROM project_ga_drawings WHERE project_id = ? LIMIT 1",
-      [projectId]
-    );
-    gaRow = rows[0] || null;
-  } catch (err) {
-    console.error("[export actual] ga query failed - continuing without:", err);
+  if (includeGa) {
+    try {
+      const rows = await safeQuery(
+        "SELECT * FROM project_ga_drawings WHERE project_id = ? LIMIT 1",
+        [projectId]
+      );
+      gaRow = rows[0] || null;
+    } catch (err) {
+      console.error("[export actual] ga query failed - continuing without:", err);
+    }
   }
-  const gaImageUrl = resolveImageUrl(gaRow, "image_url", "image_key");
-  console.log("[export actual] gaDrawingUrl:", gaImageUrl || "(none)");
+  const gaImageUrl = includeGa ? resolveImageUrl(gaRow, "image_url", "image_key") : "";
+  console.log("[export actual] gaDrawingUrl:", gaImageUrl || "(none)", "includeGa:", includeGa);
 
   // ----- Step 6: Route page (objective + route map).
   let routePageRow: Row | null = null;
