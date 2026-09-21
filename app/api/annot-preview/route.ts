@@ -10,7 +10,9 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const n = (url.searchParams.get("n") || "0").replace(/[^0-9]/g, "").slice(0, 4) || "0";
-  const file = path.join(process.cwd(), "public", "uploads", "annot-test", `annotated_${n}.png`);
+  // Fixed absolute dir so it works regardless of the server's working directory
+  // (Next standalone runs from a different cwd than the repo root).
+  const file = path.join("/tmp", "lbi-preview", `annotated_${n}.png`);
   try {
     const buf = fs.readFileSync(file);
     return new Response(new Uint8Array(buf), {
