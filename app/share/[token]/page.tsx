@@ -87,7 +87,10 @@ export default function SharePage() {
   return (
     <div style={styles.page}>
       <form style={styles.card} onSubmit={submit}>
-        <div style={styles.logo}>🛰️</div>
+        <div style={styles.logoWrap}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/images/race-innovations-logo.png" alt="Race Innovations" style={styles.logoImg} />
+        </div>
         <div style={styles.title}>Protected report</div>
         <div style={styles.subtitle}>
           This animated survey report is password protected. Enter the password shared with you to
@@ -142,6 +145,16 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
   },
   logo: { fontSize: 40, textAlign: "center", marginBottom: 6 },
+  logoWrap: {
+    background: "#fff",
+    borderRadius: 12,
+    padding: "12px 16px",
+    margin: "0 auto 16px",
+    maxWidth: 300,
+    display: "flex",
+    justifyContent: "center",
+  },
+  logoImg: { width: "100%", height: "auto", maxWidth: 260, display: "block" },
   title: { fontSize: 22, fontWeight: 900, textAlign: "center", color: "#fff" },
   subtitle: {
     fontSize: 13.5,

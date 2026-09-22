@@ -1522,6 +1522,16 @@ export default function RouteMapPage() {
           ) : null}
           <div ref={containerRef} style={{ width: "100%", height: "100%", background: "#0f1e2b" }} />
 
+          {/* Race Innovations logo watermark (top-left of the map) */}
+          <div style={styles.mapLogo}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/images/race-innovations-logo.png"
+              alt="Race Innovations"
+              style={{ height: 26, width: "auto", display: "block" }}
+            />
+          </div>
+
           {ready && banner ? (
             <div style={styles.banner}>{banner}</div>
           ) : null}
@@ -2803,6 +2813,17 @@ const styles: Record<string, React.CSSProperties> = {
   title: { fontSize: 16, fontWeight: 900, letterSpacing: 0.3 },
   layout: { flex: 1, display: "flex", minHeight: 0 },
   mapWrap: { position: "relative", flex: 1, minWidth: 0, background: "#000" },
+  mapLogo: {
+    position: "absolute",
+    top: 12,
+    left: 12,
+    zIndex: 5,
+    background: "rgba(255,255,255,0.94)",
+    borderRadius: 10,
+    padding: "6px 12px",
+    boxShadow: "0 4px 14px rgba(0,0,0,0.28)",
+    pointerEvents: "none",
+  },
   side: {
     width: 300,
     background: "#0f172a",
