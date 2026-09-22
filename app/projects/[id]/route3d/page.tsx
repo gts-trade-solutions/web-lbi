@@ -933,15 +933,23 @@ export default function RouteMapPage() {
     img.onerror = () => {
       if (!cancelled) baseImgRef.current = null;
     };
-    loadCanvasSafeImage(rawUrl)
-      .then((r) => {
-        revoke = r.revoke;
-        if (cancelled) return revoke();
-        img.src = r.src;
-      })
-      .catch(() => {
-        if (!cancelled) baseImgRef.current = null;
-      });
+    if (isShare) {
+      // Share/password viewers have no login token, so the login-only image
+      // proxy (loadCanvasSafeImage) 401s and the image never loads (the map
+      // "blinks"/stays blank). Load the presigned URL directly — canvas taint
+      // is fine here since share viewers only view, never save a drawing.
+      img.src = rawUrl;
+    } else {
+      loadCanvasSafeImage(rawUrl)
+        .then((r) => {
+          revoke = r.revoke;
+          if (cancelled) return revoke();
+          img.src = r.src;
+        })
+        .catch(() => {
+          if (!cancelled) baseImgRef.current = null;
+        });
+    }
     return () => {
       cancelled = true;
       revoke();
