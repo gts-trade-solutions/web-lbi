@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import pool from "../../../../../lib/db";
 import { requireAuth } from "../../../../../lib/auth";
+import { signS3Url } from "../../../../../lib/s3";
 import {
   AlignmentType,
   Document,
@@ -41,7 +42,8 @@ function normalCell(text: string) {
 
 async function fetchImageBytes(url: string): Promise<Uint8Array | null> {
   try {
-    const res = await fetch(url);
+    // Private bucket: our S3 photos are fetched through a presigned URL.
+    const res = await fetch(await signS3Url(url));
     if (!res.ok) return null;
     const ab = await res.arrayBuffer();
     return new Uint8Array(ab);

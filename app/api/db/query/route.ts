@@ -4,6 +4,7 @@ import pool from "../../../../lib/db";
 import { requireAuth } from "../../../../lib/auth";
 import { isAllowedTable, isValidIdentifier, quoteIdentifier } from "../../../../lib/tableConfig";
 import { logActivity } from "../../../../lib/activityLog";
+import { canonicalRowUrls, signRowUrls } from "../../../../lib/s3";
 
 export const runtime = "nodejs";
 
@@ -169,7 +170,7 @@ async function runInsert(body: QueryBody) {
   const table = String(body.table || "").trim();
   const tableSql = sanitizeTable(table);
   const rawRows = Array.isArray(body.payload) ? body.payload : [body.payload];
-  const rows = rawRows.filter((r) => r && typeof r === "object");
+  const rows = canonicalRowUrls(table, rawRows.filter((r) => r && typeof r === "object"));
   if (!rows.length) return { error: "Insert payload is required", status: 400 };
 
   const prepared = rows.map((row) => {
@@ -227,7 +228,8 @@ async function runUpdate(body: QueryBody) {
   const table = String(body.table || "").trim();
   const tableSql = sanitizeTable(table);
   const where = buildWhere(table, body.filters || []);
-  const payload = body.payload && typeof body.payload === "object" ? body.payload : null;
+  const payload =
+    body.payload && typeof body.payload === "object" ? canonicalRowUrls(table, body.payload) : null;
   if (!payload) return { error: "Update payload is required", status: 400 };
 
   const columns = Object.keys(payload).filter(isValidIdentifier);
@@ -333,8 +335,10 @@ export async function POST(request: Request) {
       await logActivity(request, result._audit);
     }
 
+    // Photo/file URLs leave the server as presigned URLs (private bucket).
+    const data = typeof result?.data === "undefined" ? null : result.data;
     return Response.json({
-      data: typeof result?.data === "undefined" ? null : result.data,
+      data: data ? await signRowUrls(String(body.table), data) : data,
       count: result?.count ?? null,
     });
   } catch (e: any) {

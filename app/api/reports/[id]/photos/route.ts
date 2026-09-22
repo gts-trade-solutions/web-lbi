@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import pool from "../../../../../lib/db";
 import { requireAuth } from "../../../../../lib/auth";
+import { canonicalS3Url, signRowUrls } from "../../../../../lib/s3";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,7 +81,7 @@ export async function GET(request: Request, context: Ctx) {
       "SELECT * FROM report_photos WHERE report_id = ? ORDER BY created_at ASC",
       [reportId]
     );
-    return Response.json({ photos: Array.isArray(rows) ? rows : [] });
+    return Response.json({ photos: await signRowUrls("report_photos", Array.isArray(rows) ? rows : []) });
   } catch (error) {
     if (unauthorized(error)) {
       return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -90,9 +91,62 @@ export async function GET(request: Request, context: Ctx) {
   }
 }
 
-// PATCH /api/reports/:id/photos — update per-photo Word-export selection.
-// Body: { photoId, include } for one photo, or
-//       { selections: [{ id, include }, ...] } for several at once.
+/** Only links a browser can actually show — never javascript: and friends. */
+function isImageUrl(url: string): boolean {
+  return url.length <= 2048 && (/^https?:\/\//i.test(url) || /^\/(?!\/)/.test(url));
+}
+
+/**
+ * Swap the picture behind an existing photo, keeping everything else.
+ *
+ * The draw and crop tools used to save their result as a *new* photo (and
+ * crop then deleted the original). Photos are ordered by created_at, so the
+ * edited one jumped to the end — Photo 1 became Photo 3 in the Word export —
+ * and the new row lost the photo's export tick and image_key. Updating the
+ * row in place keeps its position, its number and its settings, and only the
+ * picture changes.
+ */
+async function replacePhotoImage(reportId: string, body: Record<string, unknown>) {
+  const photoId = String(body?.photoId || body?.id || "").trim();
+  const url = canonicalS3Url(String(body?.url || "").trim());
+  if (!photoId) return Response.json({ error: "photoId is required" }, { status: 400 });
+  if (!isImageUrl(url)) return Response.json({ error: "A valid image url is required" }, { status: 400 });
+
+  const cols = await getColumns();
+  const sets: string[] = ["url = ?"];
+  const values: unknown[] = [url];
+  if (cols.has("file_name") && body?.file_name) {
+    sets.push("file_name = ?");
+    values.push(String(body.file_name).slice(0, 255));
+  }
+  for (const dim of ["width", "height"] as const) {
+    const n = Number(body?.[dim]);
+    if (cols.has(dim) && Number.isFinite(n) && n > 0) {
+      sets.push(`${dim} = ?`);
+      values.push(Math.round(n));
+    }
+  }
+  values.push(photoId, reportId);
+
+  const [result] = await pool.query(
+    `UPDATE report_photos SET ${sets.join(", ")} WHERE id = ? AND report_id = ?`,
+    values
+  );
+  if (!Number((result as { affectedRows?: number })?.affectedRows || 0)) {
+    return Response.json({ error: "Photo not found" }, { status: 404 });
+  }
+  const [rows] = await pool.query("SELECT * FROM report_photos WHERE id = ? LIMIT 1", [photoId]);
+  return Response.json({
+    ok: true,
+    photo: Array.isArray(rows) && rows[0] ? await signRowUrls("report_photos", rows[0]) : null,
+  });
+}
+
+// PATCH /api/reports/:id/photos
+//   { photoId, url, width?, height?, file_name? } — replace a photo's image
+//     in place (draw / crop tools).
+//   { photoId, include } or { selections: [{ id, include }, ...] } — update
+//     the per-photo Word-export selection.
 export async function PATCH(request: Request, context: Ctx) {
   try {
     requireAuth(request);
@@ -100,6 +154,8 @@ export async function PATCH(request: Request, context: Ctx) {
     if (!reportId) return Response.json({ error: "Report id is required" }, { status: 400 });
 
     const body = await request.json().catch(() => ({} as any));
+    if (typeof body?.url === "string") return await replacePhotoImage(reportId, body);
+
     const selections: Array<{ id: string; include: boolean }> = Array.isArray(body?.selections)
       ? body.selections
           .map((s: any) => ({ id: String(s?.id || "").trim(), include: !!s?.include }))
@@ -128,7 +184,7 @@ export async function PATCH(request: Request, context: Ctx) {
       return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
     console.error("[api/reports/:id/photos] PATCH error:", error);
-    return Response.json({ error: "Failed to update photo selection" }, { status: 500 });
+    return Response.json({ error: "Failed to update photo" }, { status: 500 });
   }
 }
 
@@ -242,7 +298,7 @@ export async function POST(request: Request, context: Ctx) {
       const row: Record<string, unknown> = {
         id: p?.id || uuidv4(),
         report_id: reportId,
-        url: String(p.url || "").trim(),
+        url: canonicalS3Url(String(p.url || "").trim()),
       };
       if (cols.has("file_name")) {
         row.file_name =
@@ -369,7 +425,7 @@ export async function POST(request: Request, context: Ctx) {
     return Response.json(
       {
         ok: true,
-        photos: Array.isArray(verifyRows) ? verifyRows : [],
+        photos: await signRowUrls("report_photos", Array.isArray(verifyRows) ? verifyRows : []),
         insertedCount: inserted.length,
         failedCount: failed.length,
         failed: failed.length ? failed : undefined,

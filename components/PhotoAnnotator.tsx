@@ -1,14 +1,17 @@
 "use client";
 
 // Draw arrows / lines / shapes / text labels (e.g. "H-6.2m") directly onto a
-// report photo and Save — the flattened image is uploaded as a new photo on the
-// report (via /api/upload), so it flows into the grid and the Word export.
+// report photo and Save — the flattened image REPLACES the photo it was drawn
+// on (same position, same export settings), so it flows into the grid and the
+// Word export without adding a second copy.
 //
 // This is the same drawing tool used in the Route Map (route3d) view, packaged
 // as a reusable full-screen editor so the reports grid photo viewer can use it
 // too. Cross-origin (S3) photos are loaded through /api/image-proxy so the
 // canvas stays exportable (toBlob doesn't taint).
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { replacePhotoImage } from "../lib/replacePhoto";
+import { loadCanvasSafeImage } from "../lib/authedImage";
 
 type Stroke = {
   tool:
@@ -118,19 +121,17 @@ type TextDraft = {
   value: string;
 };
 
-function authHeaders(): Record<string, string> {
-  const t = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-  return t ? { Authorization: `Bearer ${t}` } : {};
-}
-
 export default function PhotoAnnotator({
   photoUrl,
   reportId,
+  photoId,
   onClose,
   onSaved,
 }: {
   photoUrl: string;
   reportId: string;
+  /** The photo being drawn on — saving replaces it rather than adding one. */
+  photoId: string;
   onClose: () => void;
   onSaved?: (newUrl: string) => void;
 }) {
@@ -368,13 +369,11 @@ export default function PhotoAnnotator({
   );
 
   // Load the photo into the canvas on mount. External (S3) URLs go through the
-  // same-origin proxy so the canvas stays exportable.
+  // same-origin (login-only) proxy so the canvas stays exportable.
   useEffect(() => {
     if (!photoUrl) return;
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const isExternal = /^https?:\/\//i.test(photoUrl) && !photoUrl.startsWith(origin);
-    const url = isExternal ? `/api/image-proxy?url=${encodeURIComponent(photoUrl)}` : photoUrl;
     let cancelled = false;
+    let revoke = () => {};
     const img = new Image();
     img.onload = () => {
       if (cancelled) return;
@@ -396,9 +395,18 @@ export default function PhotoAnnotator({
     img.onerror = () => {
       if (!cancelled) baseImgRef.current = null;
     };
-    img.src = url;
+    loadCanvasSafeImage(photoUrl)
+      .then((r) => {
+        revoke = r.revoke;
+        if (cancelled) return revoke();
+        img.src = r.src;
+      })
+      .catch(() => {
+        if (!cancelled) baseImgRef.current = null;
+      });
     return () => {
       cancelled = true;
+      revoke();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [photoUrl]);
@@ -639,16 +647,14 @@ export default function PhotoAnnotator({
       }
       const blob: Blob | null = await new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92));
       if (!blob) throw new Error("Couldn't export the annotated image — the photo host is blocking cross-origin canvas export.");
-      const fd = new FormData();
-      fd.append("file", blob, `annotated_${Date.now()}.jpg`);
-      fd.append("folder", "uploads");
-      fd.append("reportId", reportId);
-      fd.append("width", String(canvas.width));
-      fd.append("height", String(canvas.height));
-      const res = await fetch("/api/upload", { method: "POST", credentials: "include", headers: authHeaders(), body: fd });
-      const data = await res.json().catch(() => ({} as Record<string, unknown>));
-      if (!res.ok) throw new Error((data as { error?: string })?.error || "Upload failed");
-      const newUrl = String((data as { url?: string; photo?: { url?: string } })?.url || (data as { photo?: { url?: string } })?.photo?.url || "");
+      const newUrl = await replacePhotoImage({
+        reportId,
+        photoId,
+        blob,
+        fileName: `annotated_${Date.now()}.jpg`,
+        width: canvas.width,
+        height: canvas.height,
+      });
       onSaved?.(newUrl);
       onClose();
     } catch (err) {

@@ -2,6 +2,7 @@
 import pool from "../../../../lib/db";
 import { requireAuth } from "../../../../lib/auth";
 import { isAllowedTable, isValidIdentifier, quoteIdentifier } from "../../../../lib/tableConfig";
+import { canonicalRowUrls, signRowUrls } from "../../../../lib/s3";
 
 export const runtime = "nodejs";
 
@@ -17,7 +18,7 @@ export async function GET(request: Request, { params }: { params: { table: strin
     const [rows] = await pool.query(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`, [params.id]);
     const row = Array.isArray(rows) ? (rows[0] as any) : null;
     if (!row) return Response.json({ error: "Not found" }, { status: 404 });
-    return Response.json({ data: row });
+    return Response.json({ data: await signRowUrls(params.table, row) });
   } catch (e: any) {
     if (e?.message === "Unauthorized") return Response.json({ error: "Unauthorized" }, { status: 401 });
     return Response.json({ error: "Failed to fetch row" }, { status: 400 });
@@ -28,7 +29,7 @@ export async function PATCH(request: Request, { params }: { params: { table: str
   try {
     requireAuth(request);
     const table = getTableOrThrow(params.table);
-    const body = await request.json().catch(() => ({}));
+    const body = canonicalRowUrls(params.table, await request.json().catch(() => ({})));
     const keys = Object.keys(body || {}).filter(isValidIdentifier);
     if (!keys.length) return Response.json({ error: "No valid fields to update" }, { status: 400 });
 

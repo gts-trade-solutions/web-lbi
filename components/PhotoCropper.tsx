@@ -2,17 +2,14 @@
 
 // Crop a report photo and save. The user drags a crop box (move + 8 resize
 // handles) over the image; "Apply crop" renders the selected region at full
-// resolution, uploads it as a new photo on the report (via /api/upload), and
-// the parent removes the original so the CROPPED version replaces it.
+// resolution and REPLACES the original photo with it in place — same
+// position in the list, same Word-export settings.
 //
 // Cross-origin (S3) photos are loaded through /api/image-proxy so the canvas
 // stays exportable (toBlob doesn't taint on a same-origin image).
 import React, { useEffect, useRef, useState } from "react";
-
-function authHeaders(): Record<string, string> {
-  const t = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-  return t ? { Authorization: `Bearer ${t}` } : {};
-}
+import { loadCanvasSafeImage } from "../lib/authedImage";
+import { replacePhotoImage } from "../lib/replacePhoto";
 
 // Crop rect stored as fractions (0..1) of the image so it's resolution-free.
 type Crop = { x: number; y: number; w: number; h: number };
@@ -23,14 +20,16 @@ const MIN_FRAC = 0.05; // crop can't get smaller than 5% of the image
 export default function PhotoCropper({
   photoUrl,
   reportId,
+  photoId,
   onClose,
   onSaved,
 }: {
   photoUrl: string;
   reportId: string;
+  /** The photo being cropped — saving replaces it in place. */
+  photoId: string;
   onClose: () => void;
-  // Called after the cropped image uploaded successfully. The parent should
-  // delete the ORIGINAL photo and refresh so the crop replaces it.
+  // Called once the crop has replaced the photo. The parent only refreshes.
   onSaved?: (newUrl: string) => void;
 }) {
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -40,22 +39,35 @@ export default function PhotoCropper({
   const [saving, setSaving] = useState(false);
   const [crop, setCrop] = useState<Crop>({ x: 0.1, y: 0.1, w: 0.8, h: 0.8 });
 
-  const proxied = (() => {
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const isExternal = /^https?:\/\//i.test(photoUrl) && !photoUrl.startsWith(origin);
-    return isExternal ? `/api/image-proxy?url=${encodeURIComponent(photoUrl)}` : photoUrl;
-  })();
+  const [proxied, setProxied] = useState("");
 
   // Preload so we have the natural dimensions for the export crop.
   useEffect(() => {
-    const img = new Image();
-    img.onload = () => {
-      imgRef.current = img;
-      setLoaded(true);
+    const ac = new AbortController();
+    let revoke = () => {};
+    setLoaded(false);
+    setFailed(false);
+    loadCanvasSafeImage(photoUrl, ac.signal)
+      .then((r) => {
+        revoke = r.revoke;
+        if (ac.signal.aborted) return revoke();
+        const img = new Image();
+        img.onload = () => {
+          imgRef.current = img;
+          setProxied(r.src);
+          setLoaded(true);
+        };
+        img.onerror = () => setFailed(true);
+        img.src = r.src;
+      })
+      .catch(() => {
+        if (!ac.signal.aborted) setFailed(true);
+      });
+    return () => {
+      ac.abort();
+      revoke();
     };
-    img.onerror = () => setFailed(true);
-    img.src = proxied;
-  }, [proxied]);
+  }, [photoUrl]);
 
   // ---- Drag/resize interaction (pointer based) ----
   const dragRef = useRef<{
@@ -139,26 +151,14 @@ export default function PhotoCropper({
         throw new Error("Couldn't export the crop — the photo host is blocking canvas export.");
       }
 
-      const fd = new FormData();
-      fd.append("file", blob, `cropped_${Date.now()}.jpg`);
-      fd.append("folder", "uploads");
-      fd.append("reportId", reportId);
-      fd.append("width", String(sw));
-      fd.append("height", String(sh));
-
-      const res = await fetch("/api/upload", {
-        method: "POST",
-        credentials: "include",
-        headers: authHeaders(),
-        body: fd,
+      const newUrl = await replacePhotoImage({
+        reportId,
+        photoId,
+        blob,
+        fileName: `cropped_${Date.now()}.jpg`,
+        width: sw,
+        height: sh,
       });
-      const data = await res.json().catch(() => ({} as Record<string, unknown>));
-      if (!res.ok) throw new Error((data as { error?: string })?.error || "Upload failed");
-      const newUrl = String(
-        (data as { url?: string; photo?: { url?: string } })?.url ||
-          (data as { photo?: { url?: string } })?.photo?.url ||
-          ""
-      );
       onSaved?.(newUrl);
       onClose();
     } catch (err) {

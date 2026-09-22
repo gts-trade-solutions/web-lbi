@@ -2611,6 +2611,10 @@ export default function ProjectsPage() {
             📜 Activity Log
           </button>
 
+          <button style={styles.btnGhost} onClick={() => router.push("/app-download")}>
+            📱 Download app
+          </button>
+
           <input
             ref={importDocxRef}
             type="file"

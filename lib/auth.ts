@@ -107,6 +107,31 @@ export function requireAuth(request: Request) {
   return user;
 }
 
+// Short-lived download tickets. Signed with a key DERIVED from the JWT secret
+// so a ticket can never be replayed as a login token (verifyToken rejects it).
+// Used where the browser has to navigate to a file (so no Authorization header
+// can be sent) and the Secure auth cookie is not stored over plain HTTP.
+type DownloadTicketPayload = JwtPayload & { uid: string; purpose: string };
+
+function getTicketSecret() {
+  return `${getJwtSecret()}:download-ticket`;
+}
+
+export function signDownloadTicket(userId: string, purpose: string, ttlSeconds = 120) {
+  return jwt.sign({ uid: userId, purpose } as DownloadTicketPayload, getTicketSecret(), {
+    expiresIn: ttlSeconds,
+  });
+}
+
+export function verifyDownloadTicket(ticket: string, purpose: string) {
+  try {
+    const p = jwt.verify(ticket, getTicketSecret()) as DownloadTicketPayload;
+    return p?.purpose === purpose && p?.uid ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 export function makeAuthCookieHeader(token: string) {
   const maxAge = parseExpiresToSeconds(getTokenExpiry());
   return `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}; ${cookieOpts(maxAge)}`;

@@ -3,56 +3,45 @@
 // don't send CORS headers, so loading them cross-origin taints the canvas and
 // export fails. Fetching them through this same-origin route removes the taint.
 //
-// Locked to https + AWS S3 hosts (plus the configured bucket host) so it can't
-// be abused as an open proxy / SSRF vector.
+// Login required. Only objects in OUR bucket are served, read with the S3 SDK
+// (server credentials), so it works with a private bucket and can't be used as
+// an open proxy / SSRF vector. Clients call it with fetch() + the Bearer token
+// and turn the response into a blob: URL (see lib/authedImage.ts).
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { requireAuth } from "../../../lib/auth";
+import { getBucketName, s3Client, s3KeyFromUrl } from "../../../lib/s3";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function allowedHost(host: string): boolean {
-  const h = host.toLowerCase();
-  // Never proxy raw IPs (blocks 169.254.169.254 metadata etc.).
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return false;
-  if (h.endsWith(".amazonaws.com")) return true;
-  try {
-    const bucket = process.env.NEXT_PUBLIC_S3_BUCKET_URL || "";
-    if (bucket) {
-      const bh = new URL(bucket).host.toLowerCase();
-      if (bh && h === bh) return true;
-    }
-  } catch {
-    /* ignore malformed env */
-  }
-  return false;
-}
-
 export async function GET(request: Request) {
+  try {
+    requireAuth(request);
+  } catch {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   const { searchParams } = new URL(request.url);
   const target = searchParams.get("url") || "";
   if (!target) return new Response("Missing url", { status: 400 });
 
-  let parsed: URL;
-  try {
-    parsed = new URL(target);
-  } catch {
-    return new Response("Bad url", { status: 400 });
-  }
-  if (parsed.protocol !== "https:" || !allowedHost(parsed.host)) {
-    return new Response("Host not allowed", { status: 403 });
-  }
+  const key = s3KeyFromUrl(target);
+  if (!key) return new Response("Host not allowed", { status: 403 });
 
   try {
-    const upstream = await fetch(parsed.toString(), { cache: "no-store" });
-    if (!upstream.ok) return new Response("Upstream error", { status: upstream.status });
-    const buf = await upstream.arrayBuffer();
-    const ct = upstream.headers.get("content-type") || "image/jpeg";
-    return new Response(buf, {
+    const obj = await s3Client.send(new GetObjectCommand({ Bucket: getBucketName(), Key: key }));
+    if (!obj.Body) return new Response("Not found", { status: 404 });
+    return new Response(obj.Body.transformToWebStream(), {
       status: 200,
       headers: {
-        "Content-Type": ct,
-        "Cache-Control": "public, max-age=3600",
+        "Content-Type": obj.ContentType || "image/jpeg",
+        "Cache-Control": "private, max-age=3600",
       },
     });
-  } catch {
+  } catch (err: any) {
+    const status = err?.$metadata?.httpStatusCode;
+    if (status === 404 || err?.name === "NoSuchKey") return new Response("Not found", { status: 404 });
+    console.error("[api/image-proxy] S3 read failed:", key, err?.name || err);
     return new Response("Fetch failed", { status: 502 });
   }
 }

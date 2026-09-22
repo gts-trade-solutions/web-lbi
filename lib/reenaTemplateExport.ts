@@ -5,7 +5,7 @@ import { promises as fs, existsSync } from "fs";
 import PizZip from "pizzip";
 import Docxtemplater from "docxtemplater";
 import pool from "./db";
-import { getReadSignedUrl } from "./s3";
+import { getReadSignedUrl, s3KeyFromUrl } from "./s3";
 import { injectDifficultyThemeColors } from "./wordThemeColors";
 import { composeObservation } from "./observationTemplates";
 
@@ -912,40 +912,7 @@ async function safeQuery(sql: string, args: unknown[] = []): Promise<Row[]> {
  * Returns null if the URL does not match either form.
  */
 function extractS3Key(url: string): string | null {
-  if (!url) return null;
-  try {
-    const u = new URL(url);
-    const publicBase = (process.env.NEXT_PUBLIC_S3_BUCKET_URL || "").replace(/\/+$/, "");
-    if (publicBase) {
-      const baseUrl = new URL(publicBase);
-      if (u.host === baseUrl.host) {
-        const basePath = baseUrl.pathname.replace(/\/+$/, "");
-        let p = u.pathname;
-        if (basePath && p.startsWith(basePath)) p = p.slice(basePath.length);
-        return p.replace(/^\/+/, "") || null;
-      }
-    }
-    const bucket = process.env.AWS_S3_BUCKET_NAME || "";
-    const region = process.env.AWS_S3_REGION || "";
-    if (
-      bucket &&
-      (u.host === `${bucket}.s3.${region}.amazonaws.com` ||
-        u.host === `${bucket}.s3.amazonaws.com` ||
-        u.host === `s3.${region}.amazonaws.com` ||
-        u.host === `s3.amazonaws.com`)
-    ) {
-      let p = u.pathname.replace(/^\/+/, "");
-      if (u.host.startsWith("s3.")) {
-        // s3.region.amazonaws.com/bucket/key form
-        const prefix = `${bucket}/`;
-        if (p.startsWith(prefix)) p = p.slice(prefix.length);
-      }
-      return p || null;
-    }
-  } catch {
-    return null;
-  }
-  return null;
+  return s3KeyFromUrl(url);
 }
 
 /**
@@ -1151,8 +1118,9 @@ async function fetchImageBuffer(
   for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt += 1) {
     const suffix = attempt ? `#retry${attempt}` : "";
 
-    // Direct fetch.
-    const direct: ImageFetchResult = await tryFetch(normalized, `direct${suffix}`);
+    // Direct fetch — skipped for our own bucket: it is private, so a plain GET
+    // is a guaranteed 403 and only wastes a round trip per photo.
+    const direct: ImageFetchResult = key ? null : await tryFetch(normalized, `direct${suffix}`);
     if (direct && direct !== RETRYABLE) return direct;
 
     // Signed URL fallback for private buckets.
@@ -2267,8 +2235,8 @@ async function loadCategoryIcon(category: unknown): Promise<ImageEntry | null> {
     }
     const sourceText =
       autoCategoryByFileName.get(fileName) || String(category || "");
-    const buffer = await generateCategoryIcon(sourceText);
-    if (!buffer || buffer.length === 0) {
+    const rawBuffer = await generateCategoryIcon(sourceText);
+    if (!rawBuffer || rawBuffer.length === 0) {
       categoryIconCache.set(fileName, null);
       console.warn("[category icon debug]", {
         category,
@@ -2279,6 +2247,10 @@ async function loadCategoryIcon(category: unknown): Promise<ImageEntry | null> {
       });
       return null;
     }
+    // Trim the transparent padding so the auto-generated glyph (the location-pin
+    // / warning-triangle fallback) fills its box with no side gaps — the same
+    // trim the file-based icons already get in optimizeDocxImage.
+    const buffer = await optimizeDocxImage(rawBuffer, "category", fileName);
     const entry: ImageEntry = {
       buffer,
       contentType: "image/png",

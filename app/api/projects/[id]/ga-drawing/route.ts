@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import pool from "../../../../../lib/db";
 import { requireAuth } from "../../../../../lib/auth";
+import { canonicalS3Url, signRowUrls, signS3Url } from "../../../../../lib/s3";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,6 +82,11 @@ export async function GET(request: Request, context: Ctx) {
     );
     const gaDrawing = Array.isArray(gaRows) && gaRows.length ? (gaRows[0] as any) : null;
 
+    // Private bucket: stored URLs go out presigned.
+    if (page) await signRowUrls("project_route_pages", page);
+    await signRowUrls("project_route_page_images", images);
+    if (gaDrawing) await signRowUrls("project_ga_drawings", gaDrawing);
+
     return Response.json({
       page: page || null,
       locations,
@@ -108,7 +114,8 @@ export async function POST(request: Request, context: Ctx) {
     const objective = String(body?.objective || "").trim();
     const mapMode = String(body?.mapMode || "preset").trim();
     const presetMapKey = body?.presetMapKey ? String(body.presetMapKey).trim() : null;
-    const mapFileUrl = body?.mapFileUrl ? String(body.mapFileUrl).trim() : null;
+    // Clients echo back the presigned URLs they were given; store the permanent one.
+    const mapFileUrl = body?.mapFileUrl ? canonicalS3Url(String(body.mapFileUrl).trim()) : null;
     const conclusionHtml = body?.conclusionHtml ? String(body.conclusionHtml) : null;
     const routeLocations = Array.isArray(body?.routeLocations) ? body.routeLocations : [];
     const incomingImages = Array.isArray(body?.gaImages) ? body.gaImages : [];
@@ -189,7 +196,7 @@ export async function POST(request: Request, context: Ctx) {
         project_page_id: pageId,
         project_id: projectId,
         user_id: authUser.id,
-        file_url: String(x?.file_url || x?.imageUrl || x?.url || "").trim(),
+        file_url: canonicalS3Url(String(x?.file_url || x?.imageUrl || x?.url || "").trim()),
         file_name: String(x?.file_name || x?.fileName || "").trim() || null,
         mime_type: String(x?.mime_type || x?.mimeType || "").trim() || null,
         file_size: Number.isFinite(Number(x?.file_size ?? x?.fileSize)) ? Number(x?.file_size ?? x?.fileSize) : null,
@@ -217,7 +224,7 @@ export async function POST(request: Request, context: Ctx) {
     await ensureGaDrawingsTable();
 
     const firstImage = imageRows[0] || null;
-    const imageUrl = String(body?.imageUrl || firstImage?.file_url || "").trim() || null;
+    const imageUrl = canonicalS3Url(String(body?.imageUrl || firstImage?.file_url || "").trim()) || null;
     const imageKey = String(body?.imageKey || "").trim() || null;
     const fileName = String(body?.fileName || firstImage?.file_name || "").trim() || null;
 
@@ -237,7 +244,7 @@ export async function POST(request: Request, context: Ctx) {
     return Response.json({
       ok: true,
       pageId,
-      imageUrl,
+      imageUrl: imageUrl ? await signS3Url(imageUrl) : imageUrl,
       imageKey,
       fileName,
       conclusionHtml,

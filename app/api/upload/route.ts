@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { requireAuth } from "../../../lib/auth";
-import { s3Client, S3_BUCKET_NAME, safeObjectKey } from "../../../lib/s3";
+import { s3Client, S3_BUCKET_NAME, safeObjectKey, signS3Url } from "../../../lib/s3";
 import pool from "../../../lib/db";
 
 export const runtime = "nodejs";
@@ -243,7 +243,10 @@ export async function POST(request: Request) {
     // naive client treating 2xx as "all good" still sees a failure.
     const dbInsertSuccess = !reportId || saveResult?.saved === true;
     const responseBody = {
+      // `url` is the permanent address clients store; the bucket is private,
+      // so anything that DISPLAYS the upload right away uses `signedUrl`.
       url,
+      signedUrl: await signS3Url(url),
       key,
       path: key,
       fileName,

@@ -3,6 +3,7 @@
 // share session AND that the report actually belongs to this link's project
 // (so a session can't be used to read some other project's photos).
 import pool from "../../../../../../../lib/db";
+import { signRowUrls } from "../../../../../../../lib/s3";
 import {
   getShareByToken,
   parseSelectedIds,
@@ -46,7 +47,7 @@ export async function GET(request: Request, context: Ctx) {
       "SELECT * FROM report_photos WHERE report_id = ? ORDER BY created_at ASC",
       [reportId]
     );
-    return Response.json({ photos: Array.isArray(rows) ? rows : [] });
+    return Response.json({ photos: await signRowUrls("report_photos", Array.isArray(rows) ? rows : []) });
   } catch (error) {
     console.error("[api/share/:token/reports/:reportId/photos] error:", error);
     return Response.json({ error: "Failed to load photos" }, { status: 500 });

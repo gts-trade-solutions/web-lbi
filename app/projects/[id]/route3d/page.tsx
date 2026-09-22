@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
+import { loadCanvasSafeImage } from "../../../../lib/authedImage";
 
 type ReportPoint = {
   id: string;
@@ -54,6 +55,12 @@ function authHeaders(): Record<string, string> {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// Photo URLs arrive presigned (…?X-Amz-…), and the signature can differ between
+// responses, so compare photos by address without the query string.
+function sameFile(a: string, b: string) {
+  return !!a && !!b && a.split("?")[0] === b.split("?")[0];
 }
 
 // Inject the Google Maps JS API "inline bootstrap loader" exactly once.
@@ -711,7 +718,7 @@ export default function RouteMapPage() {
       const urls = await fetchAllPhotos(lightbox.reportId);
       if (cancelled) return;
       const list = urls.length ? urls : lightbox.url ? [lightbox.url] : [];
-      const clickedAt = list.indexOf(lightbox.url);
+      const clickedAt = list.findIndex((u) => sameFile(u, lightbox.url));
       setLbPhotos(list);
       setLbIndex(clickedAt >= 0 ? clickedAt : 0);
     })();
@@ -888,11 +895,10 @@ export default function RouteMapPage() {
     const rawUrl = lbPhotos[lbIndex] || lightbox.url;
     if (!rawUrl) return;
     // Cross-origin photos (S3) taint the canvas and block toBlob on Save. Route
-    // them through the same-origin proxy so the photo loads AND stays exportable.
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const isExternal = /^https?:\/\//i.test(rawUrl) && !rawUrl.startsWith(origin);
-    const url = isExternal ? `/api/image-proxy?url=${encodeURIComponent(rawUrl)}` : rawUrl;
+    // them through the same-origin (login-only) proxy so the photo loads AND
+    // stays exportable.
     let cancelled = false;
+    let revoke = () => {};
     const img = new Image();
     img.onload = () => {
       if (cancelled) return;
@@ -917,9 +923,18 @@ export default function RouteMapPage() {
     img.onerror = () => {
       if (!cancelled) baseImgRef.current = null;
     };
-    img.src = url;
+    loadCanvasSafeImage(rawUrl)
+      .then((r) => {
+        revoke = r.revoke;
+        if (cancelled) return revoke();
+        img.src = r.src;
+      })
+      .catch(() => {
+        if (!cancelled) baseImgRef.current = null;
+      });
     return () => {
       cancelled = true;
+      revoke();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawMode, lbIndex, lightbox]);
@@ -1139,7 +1154,7 @@ export default function RouteMapPage() {
       setDrawMode(false);
       if (urls.length) {
         setLbPhotos(urls);
-        const at = newUrl ? urls.indexOf(newUrl) : -1;
+        const at = newUrl ? urls.findIndex((u) => sameFile(u, newUrl)) : -1;
         setLbIndex(at >= 0 ? at : urls.length - 1);
       }
     } catch (err) {

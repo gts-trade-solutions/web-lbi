@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import pool from "../../../../../lib/db";
 import { requireAuth } from "../../../../../lib/auth";
+import { signRowUrls } from "../../../../../lib/s3";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -112,6 +113,7 @@ export async function GET(request: Request, context: Ctx) {
           );
           photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
         }
+        await signRowUrls("report_photos", photoRows);
         const byReport = new Map<string, Record<string, unknown>[]>();
         for (const p of photoRows) {
           const key = String(p.report_id || "").trim();

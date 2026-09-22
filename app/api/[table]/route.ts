@@ -2,6 +2,7 @@
 import pool from "../../../lib/db";
 import { requireAuth } from "../../../lib/auth";
 import { isAllowedTable, isValidIdentifier, quoteIdentifier } from "../../../lib/tableConfig";
+import { canonicalRowUrls, signRowUrls } from "../../../lib/s3";
 
 export const runtime = "nodejs";
 
@@ -18,7 +19,7 @@ export async function GET(request: Request, { params }: { params: { table: strin
     const limit = Number(searchParams.get("limit") || 100);
 
     const [rows] = await pool.query(`SELECT * FROM ${table} LIMIT ?`, [Math.max(1, Math.min(limit, 500))]);
-    return Response.json({ data: Array.isArray(rows) ? rows : [] });
+    return Response.json({ data: await signRowUrls(params.table, Array.isArray(rows) ? rows : []) });
   } catch (e: any) {
     if (e?.message === "Unauthorized") return Response.json({ error: "Unauthorized" }, { status: 401 });
     return Response.json({ error: "Failed to fetch rows" }, { status: 400 });
@@ -32,7 +33,7 @@ export async function POST(request: Request, { params }: { params: { table: stri
     const table = getTableOrThrow(tableName);
     const body = await request.json().catch(() => ({}));
     const rows = Array.isArray(body) ? body : [body];
-    const validRows = rows.filter((r) => r && typeof r === "object");
+    const validRows = canonicalRowUrls(tableName, rows.filter((r) => r && typeof r === "object"));
     if (!validRows.length) return Response.json({ error: "Invalid payload" }, { status: 400 });
 
     const columns = Array.from(new Set(validRows.flatMap((r) => Object.keys(r)).filter(isValidIdentifier)));

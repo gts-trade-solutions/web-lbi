@@ -892,7 +892,7 @@ export default function ProjectReportsPage() {
   // live `reports` state so the Word checkbox inside stays in sync.
   const [photoPreview, setPhotoPreview] = useState<{ reportId: string; index: number } | null>(null);
   // Draw-on-photo editor: which photo is being annotated (arrows / text labels).
-  const [annotatePhoto, setAnnotatePhoto] = useState<{ url: string; reportId: string } | null>(null);
+  const [annotatePhoto, setAnnotatePhoto] = useState<{ url: string; reportId: string; photoId: string } | null>(null);
   const [cropPhoto, setCropPhoto] = useState<{ url: string; reportId: string; photoId: string } | null>(null);
 
   // Tick/untick one photo of a report for the Word export, straight from the
@@ -1587,6 +1587,58 @@ export default function ProjectReportsPage() {
     }
   };
 
+  // ✅ Split a report that bundles several photos into ONE report PER photo.
+  // The source keeps its first photo; every other photo is moved to a new
+  // report inserted right after it — each keeping the SAME category AND
+  // description. Nothing is duplicated or deleted (photos are re-parented).
+  const [splittingPhotos, setSplittingPhotos] = useState<Record<string, boolean>>({});
+  const splitPhotos = async (reportId: string) => {
+    if (splittingPhotos[reportId]) return;
+    const count = reports.find((r) => r.id === reportId)?.photos?.length || 0;
+    const ok = window.confirm(
+      `Split this report's ${count} photos into ${count} separate reports (one per photo), each keeping the SAME category and description?\n\nThe first photo stays on this report; the rest become new reports placed right after it.`
+    );
+    if (!ok) return;
+    setSplittingPhotos((p) => ({ ...p, [reportId]: true }));
+    try {
+      const data = await apiRequestJson(
+        `/api/reports/${encodeURIComponent(reportId)}/split-photos`,
+        { method: "POST" }
+      );
+      const made = Number(data?.newReports || 0);
+      toast(`Split into ${made + 1} reports (${made} new).`);
+      await fetchReports(q, sortDir, vmFilter);
+    } catch (e: any) {
+      toast(e?.message || "Failed to split photos");
+    } finally {
+      setSplittingPhotos((p) => ({ ...p, [reportId]: false }));
+    }
+  };
+
+  // ✅ Delete an entire report (hard delete via DELETE /api/reports/:id, which
+  // also writes the audit log). Confirms first — it can't be undone.
+  const [deletingReport, setDeletingReport] = useState<Record<string, boolean>>({});
+  const deleteReport = async (reportId: string) => {
+    if (deletingReport[reportId]) return;
+    if (
+      !(await confirmDialog(
+        "Delete this entire report (and its photos)? This cannot be undone.",
+        { confirmText: "Delete", danger: true }
+      ))
+    )
+      return;
+    setDeletingReport((p) => ({ ...p, [reportId]: true }));
+    try {
+      await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}`, { method: "DELETE" });
+      setReports((prev) => prev.filter((r) => r.id !== reportId));
+      toast("Report deleted.");
+    } catch (e: any) {
+      toast(e?.message || "Failed to delete report");
+    } finally {
+      setDeletingReport((p) => ({ ...p, [reportId]: false }));
+    }
+  };
+
   // ✅ re-number all reports in this project to have safe gaps (10,20,30...)
   const renumberSortOrders = async () => {
     if (!projectId) return;
@@ -1813,50 +1865,40 @@ export default function ProjectReportsPage() {
         )}
 
         {/* ✅ PHOTO PREVIEW POPUP (click a table thumbnail) */}
+        {/* ✅ DRAW ON PHOTO — the drawing REPLACES the photo in place */}
         {annotatePhoto && (
           <PhotoAnnotator
             photoUrl={annotatePhoto.url}
             reportId={annotatePhoto.reportId}
+            photoId={annotatePhoto.photoId}
             onClose={() => setAnnotatePhoto(null)}
             onSaved={async () => {
               setAnnotatePhoto(null);
+              // The same photo now shows the drawing, in the same place — so
+              // the viewer stays where it is rather than jumping to the end.
               try {
                 await fetchReports(q, sortDir, vmFilter);
               } catch {
                 /* ignore refresh error — the photo saved regardless */
               }
-              // Jump the preview to the newly-saved annotated photo (clamped to last).
-              setPhotoPreview((p) => (p ? { ...p, index: 9999 } : p));
             }}
           />
         )}
 
-        {/* ✅ PHOTO CROP MODAL — the cropped copy REPLACES the original */}
+        {/* ✅ PHOTO CROP MODAL — the crop REPLACES the photo in place */}
         {cropPhoto && (
           <PhotoCropper
             photoUrl={cropPhoto.url}
             reportId={cropPhoto.reportId}
+            photoId={cropPhoto.photoId}
             onClose={() => setCropPhoto(null)}
             onSaved={async () => {
-              const { reportId, photoId } = cropPhoto;
               setCropPhoto(null);
-              // The cropped image is already saved as a new photo. Remove the
-              // ORIGINAL so the cropped version replaces it (crop → replace).
-              try {
-                await apiRequestJson(
-                  `/api/reports/${encodeURIComponent(reportId)}/photos?photoId=${encodeURIComponent(photoId)}`,
-                  { method: "DELETE" }
-                );
-              } catch {
-                /* keep going — the crop saved; original just wasn't removed */
-              }
               try {
                 await fetchReports(q, sortDir, vmFilter);
               } catch {
                 /* ignore refresh error — the crop saved regardless */
               }
-              // Jump the preview to the newly-saved cropped photo (clamped to last).
-              setPhotoPreview((p) => (p ? { ...p, index: 9999 } : p));
             }}
           />
         )}
@@ -1971,9 +2013,13 @@ export default function ProjectReportsPage() {
                         type="button"
                         style={{ ...styles.btnGhost, borderColor: "#7C3AED", color: "#6D28D9", fontWeight: 900 }}
                         onClick={() =>
-                          setAnnotatePhoto({ url: cur.url as string, reportId: photoPreview.reportId })
+                          setAnnotatePhoto({
+                            url: cur.url as string,
+                            reportId: photoPreview.reportId,
+                            photoId: cur.id,
+                          })
                         }
-                        title="Draw arrows / text labels on this photo"
+                        title="Draw arrows / text labels on this photo (the drawing replaces it)"
                       >
                         ✏️ Draw on photo
                       </button>
@@ -1989,7 +2035,7 @@ export default function ProjectReportsPage() {
                             photoId: cur.id,
                           })
                         }
-                        title="Crop this photo (the cropped copy replaces the original)"
+                        title="Crop this photo (the crop replaces it)"
                       >
                         ✂️ Crop photo
                       </button>
@@ -2961,9 +3007,55 @@ export default function ProjectReportsPage() {
                                 </button>
                               )}
 
+                              {(r.photos?.length || 0) >= 2 && (
+                                <button
+                                  type="button"
+                                  onClick={() => splitPhotos(r.id)}
+                                  disabled={!!splittingPhotos[r.id]}
+                                  style={{
+                                    padding: "9px 12px",
+                                    borderRadius: 12,
+                                    border: "1px solid #A6E7CE",
+                                    background: "#ECFDF3",
+                                    color: "#067647",
+                                    fontWeight: 900,
+                                    fontSize: 12,
+                                    height: 36,
+                                    cursor: splittingPhotos[r.id] ? "not-allowed" : "pointer",
+                                    whiteSpace: "nowrap",
+                                    opacity: splittingPhotos[r.id] ? 0.6 : 1,
+                                  }}
+                                  title="Split each photo into its own separate report (same category & description)"
+                                >
+                                  {splittingPhotos[r.id] ? "Splitting…" : "Split photos"}
+                                </button>
+                              )}
+
                               <Link href={`/reports/${r.id}`} style={styles.btnOpen} title="Open report">
                                 Open
                               </Link>
+
+                              <button
+                                type="button"
+                                onClick={() => deleteReport(r.id)}
+                                disabled={!!deletingReport[r.id]}
+                                style={{
+                                  padding: "9px 12px",
+                                  borderRadius: 12,
+                                  border: "1px solid #FDA29B",
+                                  background: "#FEF3F2",
+                                  color: "#B42318",
+                                  fontWeight: 900,
+                                  fontSize: 12,
+                                  height: 36,
+                                  cursor: deletingReport[r.id] ? "not-allowed" : "pointer",
+                                  whiteSpace: "nowrap",
+                                  opacity: deletingReport[r.id] ? 0.6 : 1,
+                                }}
+                                title="Delete this entire report"
+                              >
+                                {deletingReport[r.id] ? "Deleting…" : "🗑 Delete"}
+                              </button>
                             </div>
                           </td>
                         </tr>
