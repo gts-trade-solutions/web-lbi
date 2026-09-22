@@ -145,7 +145,7 @@ export default function RouteMapPage() {
   // Read the unlocked session synchronously on mount (lazy init). Reading it
   // in an effect instead would make the first render see no session and bounce
   // back to the password gate even when we DO have one — an endless loop.
-  const [shareSession] = useState<string>(() => {
+  const [shareSession, setShareSession] = useState<string>(() => {
     if (typeof window === "undefined") return "";
     const t = new URLSearchParams(window.location.search).get("share") || "";
     if (!t) return "";
@@ -155,6 +155,7 @@ export default function RouteMapPage() {
       return "";
     }
   });
+
 
   // "Share this report" dialog (authored side only, never in share view).
   const [shareOpen, setShareOpen] = useState(false);
@@ -567,8 +568,26 @@ export default function RouteMapPage() {
   useEffect(() => {
     // Share mode: wait for the session; bounce back to the password gate if
     // it's missing/expired. Normal mode: wait for the project id.
+    // Read the session directly from storage (not just React state) so a
+    // hydration-empty state never bounces us when a valid session exists — the
+    // cause of the password-gate flip/blink loop.
+    let sess = shareSession;
+    if (isShare && !sess) {
+      try {
+        sess = sessionStorage.getItem(`share_sess_${shareToken}`) || "";
+      } catch {
+        /* ignore */
+      }
+      // A hydration-empty state but a valid session in storage: sync it into
+      // state and re-run (so reports AND photo fetches use it) instead of
+      // bouncing to the password gate — this is what breaks the flip/blink loop.
+      if (sess) {
+        setShareSession(sess);
+        return;
+      }
+    }
     if (isShare) {
-      if (!shareSession) {
+      if (!sess) {
         router.replace(`/share/${encodeURIComponent(shareToken)}`);
         return;
       }
@@ -582,7 +601,7 @@ export default function RouteMapPage() {
         const res = isShare
           ? await fetch(`/api/share/${encodeURIComponent(shareToken)}/reports`, {
               method: "GET",
-              headers: { "X-Share-Session": shareSession },
+              headers: { "X-Share-Session": sess },
             })
           : await fetch(
               `/api/projects/${encodeURIComponent(projectId)}/reports?sort=asc`,
@@ -590,6 +609,15 @@ export default function RouteMapPage() {
             );
         const data = await res.json().catch(() => ({} as any));
         if (res.status === 401 && isShare) {
+          // The server rejected the session (genuinely stale). Clear it so the
+          // password gate shows the box instead of auto-bouncing back here — no
+          // more loop.
+          try {
+            sessionStorage.removeItem(`share_sess_${shareToken}`);
+            sessionStorage.removeItem(`share_proj_${shareToken}`);
+          } catch {
+            /* ignore */
+          }
           router.replace(`/share/${encodeURIComponent(shareToken)}`);
           return;
         }
