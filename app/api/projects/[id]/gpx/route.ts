@@ -4,8 +4,18 @@
 // directly (fast, reliable) instead of the client shim's hundreds of round
 // trips. Coordinates come from report_path_points.latitude/longitude, falling
 // back to the report's own loc_lat/loc_lon.
+//
+// Which points join into lines is decided in lib/gpx-track.ts — each report's
+// trace is its own <trkseg>, so traces are never stitched to one another.
 import pool from "../../../../../lib/db";
 import { requireAuth } from "../../../../../lib/auth";
+import {
+  buildSegments,
+  gpxTime,
+  validLatLon,
+  type GpxReport,
+  type TrackPoint,
+} from "../../../../../lib/gpx-track";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,15 +29,6 @@ function xmlEsc(s: unknown) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-function validLatLon(lat: number, lon: number) {
-  return (
-    Number.isFinite(lat) &&
-    Number.isFinite(lon) &&
-    Math.abs(lat) <= 90 &&
-    Math.abs(lon) <= 180 &&
-    !(lat === 0 && lon === 0)
-  );
 }
 async function getColumns(table: string): Promise<Set<string>> {
   const [rows] = await pool.query(`SHOW COLUMNS FROM ${table}`);
@@ -71,8 +72,10 @@ export async function GET(request: Request, context: Ctx) {
     );
     let reports = Array.isArray(reportRows) ? (reportRows as any[]) : [];
     if (reportIds.length) {
-      const set = new Set(reportIds);
-      reports = reports.filter((r) => set.has(String(r.id)));
+      // Keep the order the page sent, not the database's: the line is drawn
+      // point to point in this order, so it must match what is on screen.
+      const byId = new Map(reports.map((r) => [String(r.id), r]));
+      reports = reportIds.map((id) => byId.get(id)).filter(Boolean);
     }
     if (!reports.length) {
       // Log WHY there are no reports so a production failure is diagnosable
@@ -117,55 +120,75 @@ export async function GET(request: Request, context: Ctx) {
       /* table may not exist on some installs — fall back to report coords */
     }
 
-    // Build the track (in report order) + one waypoint per report.
-    const trkpts: string[] = [];
+    // One waypoint per report, and the report's own data for the track.
     const wpts: string[] = [];
-    let trackCount = 0;
+    const trackInput: GpxReport[] = [];
     for (const r of reports) {
       const rid = String(r.id);
       const label = `${r.point_key || ""} ${r.category || "Report"}`.trim();
       const rLat = Number(r.loc_lat ?? r.latitude);
       const rLon = Number(r.loc_lon ?? r.longitude);
-      if (validLatLon(rLat, rLon)) {
+      const hasObs = validLatLon(rLat, rLon);
+      if (hasObs) {
         wpts.push(
           `  <wpt lat="${rLat}" lon="${rLon}"><name>${xmlEsc(label)}</name>` +
             `${r.description ? `<desc>${xmlEsc(r.description)}</desc>` : ""}</wpt>`
         );
       }
 
-      const pts = byReport.get(rid) || [];
-      if (pts.length) {
-        for (const p of pts) {
-          const lat = Number(p.latitude);
-          const lon = Number(p.longitude);
-          if (!validLatLon(lat, lon)) continue;
-          const t = p.timestamp || p.created_at;
-          const timeXml = t ? `<time>${xmlEsc(new Date(t).toISOString())}</time>` : "";
-          trkpts.push(`    <trkpt lat="${lat}" lon="${lon}">${timeXml}</trkpt>`);
-          trackCount++;
-        }
-      } else if (validLatLon(rLat, rLon)) {
-        // No recorded track for this report — use its observation point.
-        trkpts.push(`    <trkpt lat="${rLat}" lon="${rLon}"></trkpt>`);
-        trackCount++;
+      const path: TrackPoint[] = [];
+      for (const p of byReport.get(rid) || []) {
+        const lat = Number(p.latitude);
+        const lon = Number(p.longitude);
+        if (!validLatLon(lat, lon)) continue;
+        // An unparseable timestamp used to throw here and fail the whole
+        // export; now it just leaves that point without a time.
+        path.push({ lat, lon, time: gpxTime(p.timestamp || p.created_at) });
       }
+      trackInput.push({
+        id: rid,
+        lat: hasObs ? rLat : null,
+        lon: hasObs ? rLon : null,
+        path,
+      });
     }
 
-    if (!trackCount && !wpts.length) {
+    const segments = buildSegments(trackInput);
+
+    if (!segments.length && !wpts.length) {
       return Response.json(
         { error: "No valid coordinates found to export GPX." },
         { status: 400 }
       );
     }
 
+    // Several <trkseg>s in one <trk> is standard GPX: viewers draw each as its
+    // own line and leave the gaps between them empty.
+    const trkXml = segments.length
+      ? `  <trk><name>${xmlEsc(projectName)} route</name>\n` +
+        segments
+          .map(
+            (seg) =>
+              `    <trkseg>\n` +
+              seg
+                .map(
+                  (p) =>
+                    `      <trkpt lat="${p.lat}" lon="${p.lon}">` +
+                    `${p.time ? `<time>${p.time}</time>` : ""}</trkpt>`
+                )
+                .join("\n") +
+              `\n    </trkseg>`
+          )
+          .join("\n") +
+        `\n  </trk>\n`
+      : "";
+
     const gpx =
       `<?xml version="1.0" encoding="UTF-8"?>\n` +
       `<gpx version="1.1" creator="LBI Web App" xmlns="http://www.topografix.com/GPX/1/1">\n` +
       `  <metadata><name>${xmlEsc(projectName)}</name></metadata>\n` +
       `${wpts.join("\n")}${wpts.length ? "\n" : ""}` +
-      `  <trk><name>${xmlEsc(projectName)} route</name><trkseg>\n` +
-      `${trkpts.join("\n")}\n` +
-      `  </trkseg></trk>\n` +
+      trkXml +
       `</gpx>\n`;
 
     const safeName =
