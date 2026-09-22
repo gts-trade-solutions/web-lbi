@@ -10,6 +10,7 @@
 // packages required. Handles the coordinate formats these reports use, incl.
 // "N12 59.312E80 10.350" (lat and lon run together) and DMS.
 import PizZip from "pizzip";
+import { collectCrops, makePhotoGetter, type Crop } from "./docxImageCrop";
 
 export type DocxPoint = {
   point_key: string;
@@ -39,8 +40,9 @@ export type DocxReport = {
   frontImages: FrontImage[];
   // The report's OBJECTIVE paragraph, when present (goes on the route page).
   objective: string;
-  // Read a photo's bytes out of the same .docx.
-  getPhoto: (zipPath: string) => Buffer | null;
+  // Read a photo's bytes out of the same .docx — cropped the way the
+  // author cropped it in Word/PowerPoint (see lib/docxImageCrop.ts).
+  getPhoto: (zipPath: string) => Promise<Buffer | null>;
 };
 
 // Headings that introduce a front-matter image. Order matters: the more
@@ -277,6 +279,19 @@ function sliceByTag(text: string, tagRe: RegExp): string[] {
 // clearance sub-table, then the road / cross-section images. The row-per-point
 // parser would mis-read row 0 as a COLUMN header, so this format is detected
 // and handled separately.
+/** Raw bytes of one file inside the .docx / .pptx, or null. */
+function readZip(zip: PizZip): (zipPath: string) => Buffer | null {
+  return (zipPath) => {
+    const f = zip.file(zipPath);
+    if (!f) return null;
+    try {
+      return Buffer.from(f.asUint8Array());
+    } catch {
+      return null;
+    }
+  };
+}
+
 function looksLikeGpsBlockFormat(xml: string): boolean {
   const plain = xml.replace(/<[^>]+>/g, " ");
   const m = plain.match(/GPS\s*No\.?\s*\d+\s*,?\s*Co-?ordinates?\s*:/gi);
@@ -447,15 +462,13 @@ function parseGpsBlockReport(buffer: Buffer): DocxReport {
     } as DocxPoint);
   });
 
-  const getPhoto = (zipPath: string): Buffer | null => {
-    const f = zip.file(zipPath);
-    if (!f) return null;
-    try {
-      return Buffer.from(f.asUint8Array());
-    } catch {
-      return null;
-    }
-  };
+  const getPhoto = makePhotoGetter(
+    readZip(zip),
+    collectCrops(xml, (id) => {
+      const t = relMap[id];
+      return t && /media\//.test(t) ? "word/" + t.replace(/^\/*/, "") : null;
+    })
+  );
 
   return { points, frontImages: [], objective: "", getPhoto };
 }
@@ -659,15 +672,13 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
   const frontImages = extractFrontImages(frontXml, relMap);
   const objective = extractObjective(frontXml);
 
-  const getPhoto = (zipPath: string): Buffer | null => {
-    const f = zip.file(zipPath);
-    if (!f) return null;
-    try {
-      return Buffer.from(f.asUint8Array());
-    } catch {
-      return null;
-    }
-  };
+  const getPhoto = makePhotoGetter(
+    readZip(zip),
+    collectCrops(xml, (id) => {
+      const t = relMap[id];
+      return t && /media\//.test(t) ? "word/" + t.replace(/^\/*/, "") : null;
+    })
+  );
 
   return { points, frontImages, objective, getPhoto };
 }
@@ -692,6 +703,8 @@ export function parsePptxReport(buffer: Buffer): DocxReport {
   type SlideInfo = { xml: string; media: string[] };
   const slides: SlideInfo[] = [];
   const freq: Record<string, number> = {};
+  // Crops live in each slide's own XML, resolved through that slide's rels.
+  const pptxCrops = new Map<string, Crop>();
   for (const sn of slideNames) {
     const sx = zip.file(sn)?.asText() || "";
     const relsPath = sn.replace(/slides\/(slide\d+)\.xml/, "slides/_rels/$1.xml.rels");
@@ -708,6 +721,14 @@ export function parsePptxReport(buffer: Buffer): DocxReport {
       )
     );
     media.forEach((m) => (freq[m] = (freq[m] || 0) + 1));
+    collectCrops(sx, (id) => {
+      const t = relMap[id];
+      return t && /media\//.test(t)
+        ? "ppt/" + t.replace(/^\.\.\//, "").replace(/^\/*/, "")
+        : null;
+    }).forEach((crop, path) => {
+      if (!pptxCrops.has(path)) pptxCrops.set(path, crop);
+    });
     slides.push({ xml: sx, media });
   }
   const brandingCut = Math.max(3, Math.floor(slideNames.length * 0.1));
@@ -786,15 +807,7 @@ export function parsePptxReport(buffer: Buffer): DocxReport {
     }
   }
 
-  const getPhoto = (zipPath: string): Buffer | null => {
-    const f = zip.file(zipPath);
-    if (!f) return null;
-    try {
-      return Buffer.from(f.asUint8Array());
-    } catch {
-      return null;
-    }
-  };
+  const getPhoto = makePhotoGetter(readZip(zip), pptxCrops);
 
   return { points, frontImages: [], objective: "", getPhoto };
 }

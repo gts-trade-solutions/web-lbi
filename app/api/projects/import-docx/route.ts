@@ -177,7 +177,7 @@ export async function POST(request: Request) {
       // Upload this point's photos.
       let photoIdx = 0;
       for (const zipPath of p.photoNames) {
-        const bytes = getPhoto(zipPath);
+        const bytes = await getPhoto(zipPath);
         if (!bytes || bytes.length < 1000) continue; // skip empties/icons that slipped through
         photoIdx += 1;
         const base = zipPath.split("/").pop() || `photo_${photoIdx}`;
@@ -219,7 +219,7 @@ export async function POST(request: Request) {
     let drawingsSaved = 0;
     try {
       const uploadFront = async (fi: { label: string; zipPath: string }) => {
-        const bytes = getPhoto(fi.zipPath);
+        const bytes = await getPhoto(fi.zipPath);
         if (!bytes || bytes.length < 1000) return null; // skip tiny logos/icons
         const base = fi.zipPath.split("/").pop() || "image.png";
         const key = `reports/photos/imported/${projectId}/front/${fi.label.replace(/\s+/g, "_")}_${base}`;
