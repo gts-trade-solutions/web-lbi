@@ -956,6 +956,73 @@ export default function ProjectReportsPage() {
     window.open(`/projects/${encodeURIComponent(projectId)}/finalized`, "_blank");
   };
 
+  // ---- Stage Summary editor: edit the category/count rows that go into the
+  // Word export's Stage Summary table. Starts from the auto-computed rows; a
+  // saved override replaces them in the export (in the saved order).
+  type StageRow = { label: string; count: number };
+  const [stageOpen, setStageOpen] = useState(false);
+  const [stageRows, setStageRows] = useState<StageRow[]>([]);
+  const [stageOverridden, setStageOverridden] = useState(false);
+  const [stageLoading, setStageLoading] = useState(false);
+  const [stageSaving, setStageSaving] = useState(false);
+  const openStageSummary = async () => {
+    if (!projectId) return;
+    setStageOpen(true);
+    setStageLoading(true);
+    try {
+      const data = await apiRequestJson(
+        `/api/projects/${encodeURIComponent(projectId)}/stage-summary`,
+        { method: "GET" }
+      );
+      setStageRows(((data?.rows || []) as StageRow[]).map((r) => ({ label: String(r.label ?? ""), count: Number(r.count) || 0 })));
+      setStageOverridden(!!data?.overridden);
+    } catch (e: any) {
+      toast(e?.message || "Failed to load stage summary");
+      setStageRows([]);
+    } finally {
+      setStageLoading(false);
+    }
+  };
+  const saveStageSummary = async () => {
+    if (!projectId || stageSaving) return;
+    const rows = stageRows.map((r) => ({ label: r.label.trim(), count: Number(r.count) || 0 })).filter((r) => r.label);
+    if (!rows.length) {
+      toast("Add at least one category row.");
+      return;
+    }
+    setStageSaving(true);
+    try {
+      await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}/stage-summary`, {
+        method: "PUT",
+        body: JSON.stringify({ rows }),
+      });
+      setStageOverridden(true);
+      toast("Stage Summary saved — it will be used in the Word export.");
+      setStageOpen(false);
+    } catch (e: any) {
+      toast(e?.message || "Failed to save stage summary");
+    } finally {
+      setStageSaving(false);
+    }
+  };
+  const resetStageSummary = async () => {
+    if (!projectId || stageSaving) return;
+    if (!(await confirmDialog("Reset the Stage Summary to the auto-calculated counts?", { confirmText: "Reset" }))) return;
+    setStageSaving(true);
+    try {
+      const data = await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}/stage-summary`, {
+        method: "DELETE",
+      });
+      setStageRows(((data?.rows || []) as StageRow[]).map((r) => ({ label: String(r.label ?? ""), count: Number(r.count) || 0 })));
+      setStageOverridden(false);
+      toast("Reset to auto-calculated counts.");
+    } catch (e: any) {
+      toast(e?.message || "Failed to reset stage summary");
+    } finally {
+      setStageSaving(false);
+    }
+  };
+
   const toggleOne = (id: string) => setSelected((prev) => ({ ...prev, [id]: !prev[id] }));
 
   // Checkbox click handler that supports Shift+click range selection.
@@ -2111,6 +2178,96 @@ export default function ProjectReportsPage() {
             );
           })()}
 
+        {/* ✅ STAGE SUMMARY EDITOR MODAL */}
+        {stageOpen && (
+          <div style={styles.modalOverlay} onMouseDown={() => !stageSaving && setStageOpen(false)}>
+            <div
+              style={{ ...styles.modalCard, width: "min(680px, 96vw)", maxHeight: "88vh", display: "grid", gap: 12, overflow: "hidden" }}
+              onMouseDown={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Edit Stage Summary"
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={styles.modalTitle}>📊 Stage Summary</div>
+                  <div style={styles.modalHint}>
+                    {stageOverridden
+                      ? "Custom (edited) — this is what the Word export uses."
+                      : "Auto-calculated from the reports. Edit any value to override it in the export."}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setStageOpen(false)}
+                  style={{ width: 36, height: 36, borderRadius: 12, border: "1px solid #EAECF0", background: "#fff", fontWeight: 900, fontSize: 16, cursor: "pointer", flexShrink: 0 }}
+                  title="Close"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {stageLoading ? (
+                <div style={{ padding: 30, textAlign: "center", fontWeight: 800, color: "#667085" }}>Loading…</div>
+              ) : (
+                <>
+                  <div style={{ overflow: "auto", maxHeight: "56vh", border: "1px solid #EAECF0", borderRadius: 12 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 84px 96px", alignItems: "stretch" }}>
+                      <div style={{ fontWeight: 900, fontSize: 12, color: "#475467", padding: "10px 12px", background: "#F9FAFB", borderBottom: "1px solid #EAECF0" }}>Category</div>
+                      <div style={{ fontWeight: 900, fontSize: 12, color: "#475467", padding: "10px 12px", background: "#F9FAFB", borderBottom: "1px solid #EAECF0", textAlign: "center" }}>Count</div>
+                      <div style={{ fontWeight: 900, fontSize: 12, color: "#475467", padding: "10px 12px", background: "#F9FAFB", borderBottom: "1px solid #EAECF0", textAlign: "center" }}>Row</div>
+                      {stageRows.map((row, i) => (
+                        <React.Fragment key={i}>
+                          <input
+                            value={row.label}
+                            onChange={(e) => setStageRows((prev) => prev.map((r, j) => (j === i ? { ...r, label: e.target.value } : r)))}
+                            placeholder="Category name"
+                            style={{ border: "none", borderBottom: "1px solid #F2F4F7", padding: "10px 12px", fontWeight: 700, outline: "none", minWidth: 0 }}
+                          />
+                          <input
+                            value={String(row.count)}
+                            inputMode="numeric"
+                            onChange={(e) => {
+                              const n = e.target.value.replace(/[^0-9]/g, "");
+                              setStageRows((prev) => prev.map((r, j) => (j === i ? { ...r, count: n === "" ? 0 : Number(n) } : r)));
+                            }}
+                            style={{ border: "none", borderBottom: "1px solid #F2F4F7", padding: "10px 12px", fontWeight: 800, textAlign: "center", outline: "none", minWidth: 0 }}
+                          />
+                          <div style={{ display: "inline-flex", gap: 2, alignItems: "center", justifyContent: "center", borderBottom: "1px solid #F2F4F7" }}>
+                            <button type="button" title="Move up" disabled={i === 0} onClick={() => setStageRows((prev) => { if (i === 0) return prev; const c = [...prev]; [c[i - 1], c[i]] = [c[i], c[i - 1]]; return c; })} style={{ width: 24, height: 24, borderRadius: 6, border: "1px solid #EAECF0", background: "#fff", cursor: i === 0 ? "default" : "pointer", opacity: i === 0 ? 0.4 : 1, fontWeight: 900 }}>↑</button>
+                            <button type="button" title="Move down" disabled={i === stageRows.length - 1} onClick={() => setStageRows((prev) => { if (i >= prev.length - 1) return prev; const c = [...prev]; [c[i + 1], c[i]] = [c[i], c[i + 1]]; return c; })} style={{ width: 24, height: 24, borderRadius: 6, border: "1px solid #EAECF0", background: "#fff", cursor: i === stageRows.length - 1 ? "default" : "pointer", opacity: i === stageRows.length - 1 ? 0.4 : 1, fontWeight: 900 }}>↓</button>
+                            <button type="button" title="Remove row" onClick={() => setStageRows((prev) => prev.filter((_, j) => j !== i))} style={{ width: 24, height: 24, borderRadius: 6, border: "1px solid #FDA29B", background: "#fff", color: "#B42318", cursor: "pointer", fontWeight: 900 }}>✕</button>
+                          </div>
+                        </React.Fragment>
+                      ))}
+                      {!stageRows.length && (
+                        <div style={{ gridColumn: "1 / -1", padding: 20, textAlign: "center", color: "#667085", fontWeight: 700 }}>No rows — add one below.</div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <button type="button" onClick={() => setStageRows((prev) => [...prev, { label: "", count: 0 }])} style={styles.btnGhost}>
+                      + Add row
+                    </button>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: "#667085" }}>
+                      Total: {stageRows.reduce((a, r) => a + (Number(r.count) || 0), 0)}
+                    </span>
+                    {stageOverridden && (
+                      <button type="button" onClick={resetStageSummary} disabled={stageSaving} style={{ ...styles.btnGhost, borderColor: "#FDA29B", color: "#B42318", marginLeft: "auto" }}>
+                        Reset to auto
+                      </button>
+                    )}
+                    <button type="button" onClick={saveStageSummary} disabled={stageSaving} style={{ ...styles.btnPrimary, marginLeft: stageOverridden ? 0 : "auto" }}>
+                      {stageSaving ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* ✅ EDIT REPORT MODAL */}
         {editOpen && editReportRow && projectId && (
           <EditReportModal
@@ -2654,6 +2811,14 @@ export default function ProjectReportsPage() {
               title="Upload / download the finalized Word report (stored in S3)"
             >
               📎 Finalized
+            </button>
+
+            <button
+              style={styles.btnGhost}
+              onClick={openStageSummary}
+              title="Edit the Stage Summary (category counts) used in the Word export"
+            >
+              📊 Stage Summary
             </button>
 
             <button

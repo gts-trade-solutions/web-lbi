@@ -8,6 +8,7 @@ import pool from "./db";
 import { getReadSignedUrl, s3KeyFromUrl } from "./s3";
 import { injectDifficultyThemeColors } from "./wordThemeColors";
 import { composeObservation } from "./observationTemplates";
+import { getCategoryDisplayName, normalizeCategory, type StageSummaryRow } from "./categoryDisplay";
 
 // docxtemplater-image-module-free has no TypeScript types shipped.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1411,46 +1412,8 @@ function getDifficultyTableColors(value: unknown): {
 
 const CATEGORY_ICONS_DIR = path.join(process.cwd(), "public", "images", "report-icons");
 
-function normalizeCategory(value: unknown) {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-function getCategoryDisplayName(category: unknown): string {
-  const c = normalizeCategory(category);
-  if (!c) return String(category || "-");
-  if (c.includes("footpath bridge")) return "Footpath Bridge";
-  if (c.includes("low tension")) return "Low Tension Cable";
-  if (c.includes("high tension")) return "High Tension Cable";
-  if (c.includes("tower")) return "Tower Line Cable";
-  if (c.includes("underpass")) return "Underpass Bridge";
-  if (c.includes("tree")) return "Tree Branches";
-  if (c.includes("river bridge")) return "River Bridge";
-  if (
-    c.includes("signal pole") ||
-    c.includes("speed pole") ||
-    c.includes("side signboard")
-  ) {
-    return "Side Signboard / Signal Pole / Speed Pole";
-  }
-  if (
-    c.includes("signboard") ||
-    c.includes("camera pole") ||
-    c.includes("electric sign")
-  ) {
-    return "Signboard / Electric Signboard / Camera Pole";
-  }
-  if (c.includes("toll")) return "Toll Plaza";
-  if (c.includes("damage") || c.includes("pothole")) return "Damaged Road";
-  if (c.includes("narrow")) return "Narrow Road";
-  if (c.includes("gate")) return "Gate";
-  if (c.includes("bend")) return "Bend";
-  if (c.includes("petrol")) return "Petrol Bunk";
-  if (c.includes("railway")) return "Railway Level Crossing";
-  return String(category || "-");
-}
+// normalizeCategory + getCategoryDisplayName now live in ./categoryDisplay
+// (shared with the Stage Summary editor API) and are imported at the top.
 
 // Underscore-key normaliser: turns "Footpath Bridge" → "footpath_bridge",
 // "Side Signboard / Signal Pole" → "side_signboard_signal_pole", etc.
@@ -7708,8 +7671,38 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // content" corruption was the template's orphaned .undefined media, fixed
   // above — not this table.)
   const STAGE_SUMMARY_ENABLED = true;
+  // Per-project Stage Summary OVERRIDE (edited in the app via
+  // /api/projects/:id/stage-summary). When present it replaces the
+  // auto-computed rows in the table below, in the saved order.
+  let stageSummaryOverride: StageSummaryRow[] | null = null;
   try {
-    if (STAGE_SUMMARY_ENABLED && categorySummary.length) {
+    if (projectId) {
+      const [ovRows] = await pool.query(
+        "SELECT data_json FROM project_stage_summary WHERE project_id = ? LIMIT 1",
+        [projectId]
+      );
+      const raw =
+        Array.isArray(ovRows) && ovRows.length
+          ? (ovRows[0] as { data_json?: string }).data_json
+          : null;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          stageSummaryOverride = parsed
+            .map((r) => ({ label: String(r?.label ?? "").trim(), count: Number(r?.count) || 0 }))
+            .filter((r) => r.label);
+        }
+      }
+    }
+  } catch (ovErr) {
+    console.warn("[stage summary] override load failed - using auto:", ovErr);
+  }
+  try {
+    const stageRows: StageSummaryRow[] =
+      stageSummaryOverride && stageSummaryOverride.length
+        ? stageSummaryOverride
+        : categorySummary.map((c) => ({ label: c.categoryLabel, count: c.count }));
+    if (STAGE_SUMMARY_ENABLED && stageRows.length) {
       const zip = doc.getZip();
       const docFile = zip.file("word/document.xml");
       if (docFile) {
@@ -7717,8 +7710,12 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const FONT = "Neue Haas Grotesk Text Pro";
         const esc = (s: string) =>
           String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        const total = categorySummary.reduce((a, c) => a + c.count, 0) || 1;
-        const sorted = [...categorySummary].sort((a, b) => b.count - a.count);
+        const total = stageRows.reduce((a, c) => a + c.count, 0) || 1;
+        // Keep the user's saved order for an override; sort auto rows by count.
+        const sorted =
+          stageSummaryOverride && stageSummaryOverride.length
+            ? stageRows
+            : [...stageRows].sort((a, b) => b.count - a.count);
         // Bigger font (14pt) + roomier cell padding for a clearer, airier table.
         const cell = (text: string, bold: boolean, fill: string, color: string, align: string) =>
           `<w:tc><w:tcPr>${fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/>` : ""}` +
@@ -7730,7 +7727,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const dRows = sorted
           .map((c) => {
             const pct = Math.round((c.count / total) * 100);
-            return `<w:tr>${cell(c.categoryLabel, false, "", "111827", "left")}${cell(String(c.count), false, "", "111827", "center")}${cell(pct + "%", false, "", "111827", "center")}</w:tr>`;
+            return `<w:tr>${cell(c.label, false, "", "111827", "left")}${cell(String(c.count), false, "", "111827", "center")}${cell(pct + "%", false, "", "111827", "center")}</w:tr>`;
           })
           .join("");
         const tRow = `<w:tr>${cell("Total", true, "", "111827", "left")}${cell(String(total), true, "", "111827", "center")}${cell("100%", true, "", "111827", "center")}</w:tr>`;
