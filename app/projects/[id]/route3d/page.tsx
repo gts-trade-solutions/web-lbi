@@ -1528,7 +1528,15 @@ export default function RouteMapPage() {
             <img
               src="/images/race-innovations-logo.png"
               alt="Race Innovations"
-              style={{ height: 26, width: "auto", display: "block" }}
+              style={{
+                height: 30,
+                width: "auto",
+                display: "block",
+                // White halo so the dark logo stays legible over the map,
+                // without a solid white box behind it.
+                filter:
+                  "drop-shadow(0 0 2px rgba(255,255,255,0.95)) drop-shadow(0 0 5px rgba(255,255,255,0.8))",
+              }}
             />
           </div>
 
@@ -2818,10 +2826,6 @@ const styles: Record<string, React.CSSProperties> = {
     top: 12,
     left: 12,
     zIndex: 5,
-    background: "rgba(255,255,255,0.94)",
-    borderRadius: 10,
-    padding: "6px 12px",
-    boxShadow: "0 4px 14px rgba(0,0,0,0.28)",
     pointerEvents: "none",
   },
   side: {
