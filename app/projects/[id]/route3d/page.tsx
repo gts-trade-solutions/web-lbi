@@ -671,7 +671,13 @@ export default function RouteMapPage() {
             headers: authHeaders(),
           });
       const data = await res.json().catch(() => ({} as any));
-      const url = String(data?.photos?.[0]?.url || "") || null;
+      // Prefer the user's annotated version (the drawn-on photo) as the marker
+      // preview, so the route map shows the same marked-up image as the report.
+      const photos: any[] = Array.isArray(data?.photos) ? data.photos : [];
+      const annotated = photos.find((p) =>
+        String(p?.file_name || p?.url || "").toLowerCase().includes("annotated")
+      );
+      const url = String((annotated || photos[0])?.url || "") || null;
       photoCacheRef.current[reportId] = url;
       return url;
     } catch {
@@ -696,9 +702,13 @@ export default function RouteMapPage() {
             headers: authHeaders(),
           });
       const data = await res.json().catch(() => ({} as any));
-      const list: string[] = Array.isArray(data?.photos)
-        ? data.photos.map((x: any) => String(x?.url || "")).filter(Boolean)
-        : [];
+      const rows: any[] = Array.isArray(data?.photos) ? data.photos : [];
+      // Lead the carousel with annotated photos so the drawn-on version shows
+      // first — same emphasis as the listed reports.
+      const isAnn = (p: any) =>
+        String(p?.file_name || p?.url || "").toLowerCase().includes("annotated");
+      const ordered = [...rows].sort((a, b) => (isAnn(b) ? 1 : 0) - (isAnn(a) ? 1 : 0));
+      const list: string[] = ordered.map((x: any) => String(x?.url || "")).filter(Boolean);
       return list;
     } catch {
       return [];
