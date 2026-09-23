@@ -880,10 +880,17 @@ const GA_DRAWING_SIZE: [number, number] = [1344, 912];
 const OBSERVATION_PHOTO_SIZE: [number, number] = [900, 636];
 const MULTI_PHOTO_SIZE: [number, number] = [691, 480];
 // Category icon shown in the CATEGORY column of the observation table.
-// Enlarged so the icon reads clearly/big in the report. The CATEGORY
-// column width is derived from this size (see OBS_COL_DXA) so the column
-// grows with the image instead of clipping it.
-const CATEGORY_ICON_SIZE: [number, number] = [240, 240];
+// WIDTH stays 240 so wide glyphs (gate, etc.) keep their full width and the
+// CATEGORY column width (derived from [0], see OBS_COL_DXA) is unchanged.
+// HEIGHT is capped at 150 (was 240): a tall portrait icon (e.g. a location
+// pin) rendered at the full 240px = 2.5" made the observation ROW ~2.5" tall,
+// so table (~3") + the 6.63" photo together exceeded the ~10" page content
+// height and the photo spilled onto the next page — a half-empty page after
+// the report. Capping the icon height to 150px (~1.56") keeps the table under
+// ~2", so table + photo fit together on one page with comfortable margin.
+// Aspect ratio is preserved (categoryIconDisplaySize fits inside this box),
+// so nothing is stretched; wide-short glyphs are unaffected (already < 150 tall).
+const CATEGORY_ICON_SIZE: [number, number] = [240, 150];
 const CATEGORY_SUMMARY_ICON_SIZE: [number, number] = [80, 80];
 
 // Word stores image extents in EMU (1 px = 9525 EMU). The layout-rebuild
