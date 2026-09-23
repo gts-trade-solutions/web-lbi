@@ -5668,8 +5668,25 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       //      grey "Photo not available" paragraph so every table has
       //      something below it.
       //   5. Skip the PAGE_BREAK after the LAST observation.
+      //
+      // IMPORTANT: this uses <w:pageBreakBefore/> (a paragraph PROPERTY),
+      // NOT a hard <w:br w:type="page"/> run. A hard break is a break
+      // WITHIN the text flow: the empty paragraph that carries it must be
+      // placed somewhere, and when the preceding observation fills the
+      // page to the bottom (the single photo is ~6.6" tall, so a report
+      // with a long description does) that empty paragraph cannot fit on
+      // the full page — it flows to the next page ALONE and its break then
+      // pushes the following table down another page. Result: one BLANK
+      // page after (almost) every report. pageBreakBefore instead just
+      // tells this (empty, ~0-height) paragraph to render at the TOP of a
+      // fresh page, with the next observation's table immediately below it
+      // on that SAME page — so each report still starts on its own page,
+      // but no blank page is ever stranded, however full the previous page
+      // was. The XML blank-page scanners below can't fix the hard-break
+      // case because the blank page is produced by Word's layout engine at
+      // render time, not by empty XML they could detect.
       const PAGE_BREAK_PARA =
-        '<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:br w:type="page"/></w:r></w:p>';
+        '<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>';
       // <w:keepNext/> binds this spacer paragraph to the FOLLOWING
       // paragraph (the image/placeholder) — Word will not insert a
       // page break between them. Together with the smaller 500x310
@@ -6559,8 +6576,11 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
         if (routeMapEnd > 0) {
+          // pageBreakBefore (property) not a hard <w:br> — see PAGE_BREAK_PARA
+          // note above: a hard break after a full route-map page strands a
+          // blank page; this renders the stepper at the top of a fresh page.
           const STEPPER_PAGE_BREAK =
-            `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:br w:type="page"/></w:r></w:p>`;
+            `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>`;
           const fullStepperBlock = STEPPER_PAGE_BREAK + stepperPara;
           xml = xml.slice(0, routeMapEnd) + fullStepperBlock + xml.slice(routeMapEnd);
           routeLocationsStepperInjected = true;
@@ -6595,8 +6615,9 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
         if (routeMapEndFB > 0) {
+          // pageBreakBefore (property) not a hard <w:br> — see PAGE_BREAK_PARA note.
           const STEPPER_PAGE_BREAK_FB =
-            `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:br w:type="page"/></w:r></w:p>`;
+            `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>`;
           const tableXml = buildRouteLocationsStepperTableXml(routeLocationLabels);
           // Trailing empty paragraph (Word requires a paragraph after a table)
           const trailingPara = `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>`;
@@ -7734,9 +7755,12 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const borders = `<w:tblBorders><w:top w:val="single" w:sz="4" w:color="B7C4BF"/><w:left w:val="single" w:sz="4" w:color="B7C4BF"/><w:bottom w:val="single" w:sz="4" w:color="B7C4BF"/><w:right w:val="single" w:sz="4" w:color="B7C4BF"/><w:insideH w:val="single" w:sz="4" w:color="D7E0DC"/><w:insideV w:val="single" w:sz="4" w:color="D7E0DC"/></w:tblBorders>`;
         const grid = `<w:tblGrid><w:gridCol w:w="6600"/><w:gridCol w:w="1600"/><w:gridCol w:w="1600"/></w:tblGrid>`;
         const table = `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>${borders}<w:tblLayout w:type="fixed"/></w:tblPr>${grid}${hRow}${dRows}${tRow}</w:tbl>`;
-        const heading = `<w:p><w:pPr><w:spacing w:before="0" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="163A2A"/><w:sz w:val="40"/><w:szCs w:val="40"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
-        const pageBreak = `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
-        const block = pageBreak + heading + table + `<w:p/>`;
+        // pageBreakBefore on the heading (a paragraph PROPERTY) makes the
+        // Stage Summary start its own page WITHOUT a standalone hard-break
+        // paragraph that would strand a blank page when the preceding
+        // observation fills its page — see the PAGE_BREAK_PARA note above.
+        const heading = `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="163A2A"/><w:sz w:val="40"/><w:szCs w:val="40"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
+        const block = heading + table + `<w:p/>`;
         // Insert BEFORE the final body-level section properties — the ONLY
         // structurally-safe spot. (Placing it at the GA section boundary means
         // rewriting a section break, which repeatedly corrupted the file.) The
