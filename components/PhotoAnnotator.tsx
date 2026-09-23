@@ -119,6 +119,9 @@ type TextDraft = {
   font: number;
   naturalFont: number;
   value: string;
+  // When set, this draft is EDITING an existing text stroke at that index
+  // (re-type it) rather than placing a new one.
+  editIdx?: number | null;
 };
 
 export default function PhotoAnnotator({
@@ -469,13 +472,7 @@ export default function PhotoAnnotator({
   const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     if (textDraft) {
-      const d = textDraft;
-      if (d.value.trim()) {
-        setStrokes((prev) => [
-          ...prev,
-          { tool: "text", color: drawColor, width: drawWidth, points: [{ x: d.cx, y: d.cy }], text: d.value.trim(), fontSize: d.naturalFont },
-        ]);
-      }
+      setStrokes(strokesWithDraft(textDraft));
       setTextDraft(null);
       if (drawTool !== "text") return;
     }
@@ -517,8 +514,27 @@ export default function PhotoAnnotator({
       if (!canvas || !wrap) return;
       const wrapRect = wrap.getBoundingClientRect();
       const canvasRect = canvas.getBoundingClientRect();
-      const naturalFont = Math.max(28, drawWidth * 7);
       const scale = canvas.width ? canvasRect.width / canvas.width : 1;
+      // Tapping an existing text label re-opens it for editing (re-type it),
+      // keeping its position — instead of only being able to place new text.
+      const hitIdx = hitTest(p);
+      const hitStroke = hitIdx != null ? strokes[hitIdx] : null;
+      if (hitStroke && hitStroke.tool === "text") {
+        const nf = hitStroke.fontSize || 32;
+        setSelectedIdx(hitIdx);
+        setTextDraft({
+          dispX: e.clientX - wrapRect.left,
+          dispY: e.clientY - wrapRect.top,
+          cx: hitStroke.points[0].x,
+          cy: hitStroke.points[0].y,
+          naturalFont: nf,
+          font: nf * scale,
+          value: hitStroke.text || "",
+          editIdx: hitIdx,
+        });
+        return;
+      }
+      const naturalFont = Math.max(28, drawWidth * 7);
       setTextDraft({
         dispX: e.clientX - wrapRect.left,
         dispY: e.clientY - wrapRect.top,
@@ -527,6 +543,7 @@ export default function PhotoAnnotator({
         naturalFont,
         font: naturalFont * scale,
         value: "",
+        editIdx: null,
       });
       return;
     }
@@ -623,14 +640,25 @@ export default function PhotoAnnotator({
     setSelectedIdx(0);
   };
 
-  const commitText = () => {
-    const d = textDraft;
-    if (d && d.value.trim()) {
-      setStrokes((prev) => [
-        ...prev,
-        { tool: "text", color: drawColor, width: drawWidth, points: [{ x: d.cx, y: d.cy }], text: d.value.trim(), fontSize: d.naturalFont },
-      ]);
+  // Apply a text draft to the strokes: EDIT the existing stroke in place when
+  // editIdx is set (empty text removes it), otherwise append a new text stroke.
+  const strokesWithDraft = (d: TextDraft | null): Stroke[] => {
+    if (!d) return strokes;
+    const val = d.value.trim();
+    if (d.editIdx != null) {
+      if (!val) return strokes.filter((_, i) => i !== d.editIdx);
+      return strokes.map((s, i) => (i === d.editIdx ? { ...s, text: val } : s));
     }
+    return val
+      ? [
+          ...strokes,
+          { tool: "text", color: drawColor, width: drawWidth, points: [{ x: d.cx, y: d.cy }], text: val, fontSize: d.naturalFont },
+        ]
+      : strokes;
+  };
+
+  const commitText = () => {
+    setStrokes(strokesWithDraft(textDraft));
     setTextDraft(null);
   };
 
@@ -639,10 +667,20 @@ export default function PhotoAnnotator({
     if (!canvas || saving) return;
     setSaving(true);
     try {
-      if (textDraft && textDraft.value.trim()) {
+      if (textDraft) {
+        // Bake a pending text edit/placement into the image before exporting.
+        // Redraw base + all strokes (with the draft applied) so an EDIT replaces
+        // the old text instead of drawing on top of it, and no selection box
+        // leaks into the saved image.
+        const finalStrokes = strokesWithDraft(textDraft);
         const ctx = canvas.getContext("2d");
-        if (ctx)
-          drawOneStroke(ctx, { tool: "text", color: drawColor, width: drawWidth, points: [{ x: textDraft.cx, y: textDraft.cy }], text: textDraft.value.trim(), fontSize: textDraft.naturalFont });
+        if (ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          const base = baseImgRef.current;
+          if (base) ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
+          for (const s of finalStrokes) drawOneStroke(ctx, s);
+        }
+        setStrokes(finalStrokes);
         setTextDraft(null);
       }
       const blob: Blob | null = await new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92));
@@ -788,6 +826,11 @@ export default function PhotoAnnotator({
             {selectedIdx == null
               ? "Tap any drawing or text to select it."
               : "Drag inside to move · drag a white corner to reshape · − / + to resize · Delete to remove."}
+          </div>
+        ) : null}
+        {drawTool === "text" ? (
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b" }}>
+            Tap to place a label · tap an existing label to re-edit it · Enter to confirm.
           </div>
         ) : null}
         {drawTool === "move" && selectedIdx != null ? (
