@@ -1063,6 +1063,41 @@ export default function ProjectReportsPage() {
     setSelMenuOpen(false);
   };
 
+  // Bulk-delete every selected report. Each goes through DELETE /api/reports/:id
+  // so it stays audit-logged. Hard delete — confirms first, can't be undone.
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const bulkDeleteSelected = async () => {
+    if (bulkDeleting) return;
+    const ids = selectedIdsInOrder;
+    if (!ids.length) return;
+    if (
+      !(await confirmDialog(
+        `Delete ${ids.length} selected report${ids.length === 1 ? "" : "s"} (and their photos)? This cannot be undone.`,
+        { confirmText: `Delete ${ids.length}`, danger: true }
+      ))
+    )
+      return;
+    setBulkDeleting(true);
+    let done = 0;
+    let failed = 0;
+    try {
+      for (const id of ids) {
+        try {
+          await apiRequestJson(`/api/reports/${encodeURIComponent(id)}`, { method: "DELETE" });
+          done += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      const gone = new Set(ids);
+      setReports((prev) => prev.filter((r) => !gone.has(r.id)));
+      clearSelection();
+      toast(failed ? `Deleted ${done}, ${failed} failed.` : `Deleted ${done} report${done === 1 ? "" : "s"}.`);
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
   // ========= Export modal helpers =========
   const openExportModal = () => {
     // If the user has points selected, default to exporting ONLY those selected
@@ -2831,6 +2866,25 @@ export default function ProjectReportsPage() {
                 ? "Creating..."
                 : `Create project from selected${stats.selectedCount ? ` (${stats.selectedCount})` : ""}`}
             </button>
+
+            {stats.selectedCount > 0 && (
+              <button
+                style={{
+                  ...styles.btnGhost,
+                  borderColor: "#FDA29B",
+                  background: "#FEF3F2",
+                  color: "#B42318",
+                  fontWeight: 900,
+                  opacity: bulkDeleting ? 0.6 : 1,
+                  cursor: bulkDeleting ? "not-allowed" : "pointer",
+                }}
+                onClick={bulkDeleteSelected}
+                disabled={bulkDeleting}
+                title="Delete all selected reports"
+              >
+                {bulkDeleting ? "Deleting…" : `🗑 Delete selected (${stats.selectedCount})`}
+              </button>
+            )}
           </div>
         </div>
 
