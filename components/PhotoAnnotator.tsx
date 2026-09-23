@@ -335,7 +335,13 @@ export default function PhotoAnnotator({
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const base = baseImgRef.current;
       if (base) ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
-      for (const s of strokes) drawOneStroke(ctx, s);
+      // Hide the text stroke currently being edited so its live editor input
+      // isn't doubled up by the committed label underneath it.
+      const editingIdx = textDraft?.editIdx ?? null;
+      for (let i = 0; i < strokes.length; i++) {
+        if (editingIdx === i) continue;
+        drawOneStroke(ctx, strokes[i]);
+      }
       if (extra) drawOneStroke(ctx, extra);
       if (drawTool === "move" && selectedIdx != null && strokes[selectedIdx]) {
         const sel = strokes[selectedIdx];
@@ -368,7 +374,7 @@ export default function PhotoAnnotator({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [strokes, drawTool, selectedIdx]
+    [strokes, drawTool, selectedIdx, textDraft]
   );
 
   // Load the photo into the canvas on mount. External (S3) URLs go through the
