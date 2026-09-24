@@ -124,6 +124,11 @@ type TextDraft = {
   editIdx?: number | null;
 };
 
+function annoAuthHeaders(): Record<string, string> {
+  const t = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
 export default function PhotoAnnotator({
   photoUrl,
   reportId,
@@ -153,6 +158,10 @@ export default function PhotoAnnotator({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawingRef = useRef<Stroke | null>(null);
   const baseImgRef = useRef<HTMLImageElement | null>(null);
+  // The URL the strokes are drawn OVER. On a first drawing this is the photo
+  // itself; after a save it's the preserved original (anno_base_url), so
+  // reopening edits the strokes over the clean base instead of a baked image.
+  const baseUrlRef = useRef<string>(photoUrl);
   const moveDragRef = useRef<{ x: number; y: number } | null>(null);
   // Which endpoint of the selected shape is being dragged to reshape it
   // (point index in stroke.points), or null when moving/idle.
@@ -377,48 +386,89 @@ export default function PhotoAnnotator({
     [strokes, drawTool, selectedIdx, textDraft]
   );
 
-  // Load the photo into the canvas on mount. External (S3) URLs go through the
-  // same-origin (login-only) proxy so the canvas stays exportable.
+  // Load the photo into the canvas on mount. If this photo carries a SAVED
+  // drawing (anno_json + anno_base_url from a previous "Draw on photo"), restore
+  // the strokes and draw them over the PRESERVED base image so they can be
+  // edited again — instead of drawing on top of the already-flattened picture.
+  // External (S3) URLs go through the same-origin (login-only) proxy so the
+  // canvas stays exportable.
   useEffect(() => {
     if (!photoUrl) return;
     let cancelled = false;
     let revoke = () => {};
-    const img = new Image();
-    img.onload = () => {
-      if (cancelled) return;
-      baseImgRef.current = img;
-      const w = img.naturalWidth || 1200;
-      const h = img.naturalHeight || 800;
-      const canvas = canvasRef.current;
-      if (canvas) {
-        canvas.width = w;
-        canvas.height = h;
-        const maxW = Math.min(window.innerWidth * 0.9, 1280);
-        const maxH = window.innerHeight * 0.72;
-        const scale = Math.min(maxW / w, maxH / h, 1);
-        canvas.style.width = `${Math.round(w * scale)}px`;
-        canvas.style.height = `${Math.round(h * scale)}px`;
-      }
-      redrawCanvas();
-    };
-    img.onerror = () => {
-      if (!cancelled) baseImgRef.current = null;
-    };
-    loadCanvasSafeImage(photoUrl)
-      .then((r) => {
-        revoke = r.revoke;
-        if (cancelled) return revoke();
-        img.src = r.src;
-      })
-      .catch(() => {
+
+    const loadBase = (url: string) => {
+      const img = new Image();
+      img.onload = () => {
+        if (cancelled) return;
+        baseImgRef.current = img;
+        const w = img.naturalWidth || 1200;
+        const h = img.naturalHeight || 800;
+        const canvas = canvasRef.current;
+        if (canvas) {
+          canvas.width = w;
+          canvas.height = h;
+          const maxW = Math.min(window.innerWidth * 0.9, 1280);
+          const maxH = window.innerHeight * 0.72;
+          const scale = Math.min(maxW / w, maxH / h, 1);
+          canvas.style.width = `${Math.round(w * scale)}px`;
+          canvas.style.height = `${Math.round(h * scale)}px`;
+        }
+        redrawCanvas();
+      };
+      img.onerror = () => {
         if (!cancelled) baseImgRef.current = null;
-      });
+      };
+      loadCanvasSafeImage(url)
+        .then((r) => {
+          revoke = r.revoke;
+          if (cancelled) return revoke();
+          img.src = r.src;
+        })
+        .catch(() => {
+          if (!cancelled) baseImgRef.current = null;
+        });
+    };
+
+    (async () => {
+      let baseUrl = photoUrl;
+      try {
+        const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}/photos`, {
+          headers: annoAuthHeaders(),
+          credentials: "include",
+        });
+        if (res.ok) {
+          const data = await res.json().catch(() => null);
+          const row =
+            data && Array.isArray(data.photos)
+              ? data.photos.find((p: any) => String(p?.id) === String(photoId))
+              : null;
+          const rawBase = row?.anno_base_url;
+          const rawAnno = row?.anno_json;
+          if (rawBase && typeof rawBase === "string") baseUrl = rawBase;
+          if (rawAnno && typeof rawAnno === "string") {
+            try {
+              const parsed = JSON.parse(rawAnno);
+              if (Array.isArray(parsed) && !cancelled) setStrokes(parsed);
+            } catch {
+              /* corrupt anno — ignore, start clean */
+            }
+          }
+        }
+      } catch {
+        /* no saved strokes / offline — fall back to the plain photo */
+      }
+      if (cancelled) return;
+      baseUrlRef.current = baseUrl;
+      loadBase(baseUrl);
+    })();
+
     return () => {
       cancelled = true;
       revoke();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [photoUrl]);
+  }, [photoUrl, reportId, photoId]);
 
   useEffect(() => {
     redrawCanvas();
@@ -673,20 +723,19 @@ export default function PhotoAnnotator({
     if (!canvas || saving) return;
     setSaving(true);
     try {
+      // Strokes to persist + flatten. A pending text draft is applied here so an
+      // EDIT replaces the old text instead of drawing on top of it, and no
+      // selection box leaks into the saved image.
+      const strokesToSave = strokesWithDraft(textDraft);
       if (textDraft) {
-        // Bake a pending text edit/placement into the image before exporting.
-        // Redraw base + all strokes (with the draft applied) so an EDIT replaces
-        // the old text instead of drawing on top of it, and no selection box
-        // leaks into the saved image.
-        const finalStrokes = strokesWithDraft(textDraft);
         const ctx = canvas.getContext("2d");
         if (ctx) {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
           const base = baseImgRef.current;
           if (base) ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
-          for (const s of finalStrokes) drawOneStroke(ctx, s);
+          for (const s of strokesToSave) drawOneStroke(ctx, s);
         }
-        setStrokes(finalStrokes);
+        setStrokes(strokesToSave);
         setTextDraft(null);
       }
       const blob: Blob | null = await new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92));
@@ -698,6 +747,10 @@ export default function PhotoAnnotator({
         fileName: `annotated_${Date.now()}.jpg`,
         width: canvas.width,
         height: canvas.height,
+        // Persist the vector strokes + the untouched base image so this drawing
+        // can be reopened and edited later instead of drawn over.
+        annoJson: JSON.stringify(strokesToSave),
+        annoBaseUrl: baseUrlRef.current || photoUrl,
       });
       onSaved?.(newUrl);
       onClose();

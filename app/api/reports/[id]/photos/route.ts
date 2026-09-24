@@ -70,6 +70,28 @@ async function ensureIncludeInExportColumn() {
   }
 }
 
+// Re-editable drawings. When the user draws on a photo we flatten the strokes
+// into the saved image (for display/export) but ALSO keep the vector strokes
+// (`anno_json`) and the untouched base image they were drawn over
+// (`anno_base_url`) so "Draw on photo" can reopen and edit them later instead
+// of drawing on top of a baked-in picture. Added lazily so existing databases
+// upgrade themselves on first use.
+async function ensureAnnoColumns() {
+  try {
+    const cols = await getColumns();
+    if (!cols.has("anno_json")) {
+      await pool.query("ALTER TABLE report_photos ADD COLUMN anno_json LONGTEXT NULL");
+      console.log("[api/reports/:id/photos] added anno_json column");
+    }
+    if (!cols.has("anno_base_url")) {
+      await pool.query("ALTER TABLE report_photos ADD COLUMN anno_base_url VARCHAR(2048) NULL");
+      console.log("[api/reports/:id/photos] added anno_base_url column");
+    }
+  } catch (err) {
+    console.error("[api/reports/:id/photos] ensure anno columns failed:", err);
+  }
+}
+
 export async function GET(request: Request, context: Ctx) {
   try {
     requireAuth(request);
@@ -77,6 +99,7 @@ export async function GET(request: Request, context: Ctx) {
     if (!reportId) return Response.json({ error: "Report id is required" }, { status: 400 });
 
     await ensureIncludeInExportColumn();
+    await ensureAnnoColumns();
     const [rows] = await pool.query(
       "SELECT * FROM report_photos WHERE report_id = ? ORDER BY created_at ASC",
       [reportId]
@@ -112,6 +135,7 @@ async function replacePhotoImage(reportId: string, body: Record<string, unknown>
   if (!photoId) return Response.json({ error: "photoId is required" }, { status: 400 });
   if (!isImageUrl(url)) return Response.json({ error: "A valid image url is required" }, { status: 400 });
 
+  await ensureAnnoColumns();
   const cols = await getColumns();
   const sets: string[] = ["url = ?"];
   const values: unknown[] = [url];
@@ -125,6 +149,19 @@ async function replacePhotoImage(reportId: string, body: Record<string, unknown>
       sets.push(`${dim} = ?`);
       values.push(Math.round(n));
     }
+  }
+  // Re-editable drawings: the draw tool sends the vector strokes (anno_json)
+  // and the untouched base image (anno_base_url). Any other image replacement
+  // (e.g. crop) sends neither, which CLEARS them — the strokes no longer match
+  // the new picture, so re-editing must start fresh.
+  if (cols.has("anno_json")) {
+    sets.push("anno_json = ?");
+    values.push(typeof body?.anno_json === "string" && body.anno_json ? String(body.anno_json) : null);
+  }
+  if (cols.has("anno_base_url")) {
+    const base = body?.anno_base_url ? canonicalS3Url(String(body.anno_base_url)) : "";
+    sets.push("anno_base_url = ?");
+    values.push(base && isImageUrl(base) ? base : null);
   }
   values.push(photoId, reportId);
 

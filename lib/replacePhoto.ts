@@ -19,6 +19,11 @@ export async function replacePhotoImage(opts: {
   fileName: string;
   width: number;
   height: number;
+  // Re-editable drawings: the draw tool passes the vector strokes and the
+  // untouched base image so the annotation can be reopened and edited later.
+  // Omitted by other callers (e.g. crop), which clears any stored strokes.
+  annoJson?: string | null;
+  annoBaseUrl?: string | null;
 }): Promise<string> {
   // 1. Upload the image by itself. No reportId: with one, /api/upload also
   //    creates a new photo row, which is exactly the duplicate we avoid.
@@ -45,6 +50,8 @@ export async function replacePhotoImage(opts: {
       file_name: opts.fileName,
       width: opts.width,
       height: opts.height,
+      ...(opts.annoJson !== undefined ? { anno_json: opts.annoJson } : {}),
+      ...(opts.annoBaseUrl !== undefined ? { anno_base_url: opts.annoBaseUrl } : {}),
     }),
   });
   const data = (await res.json().catch(() => ({}))) as { error?: string };
