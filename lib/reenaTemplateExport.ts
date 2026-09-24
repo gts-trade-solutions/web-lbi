@@ -3110,6 +3110,54 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     if (key && !photosByReportId.has(key)) reportsFullyExcludedByUser.add(key);
   }
 
+  // ---- ONE REPORT BLOCK PER PHOTO ----
+  // The client wants every photo to appear as its OWN observation block —
+  // same table info (category / description / GPS / remarks), one photo each
+  // — so a report with 3 included photos renders as 3 blocks, not one block
+  // holding several photos. Expand the report list here: repeat each report
+  // once per included photo. The per-photo claim guard in the loop
+  // (usedPhotoKeys) then hands block #1 the report's 1st photo, block #2 the
+  // 2nd, and so on, because each duplicate re-reads the report's remaining
+  // UNCLAIMED photos. Repeat-POINT de-duplication (same coordinate/point_key
+  // as an earlier report) is applied HERE so a duplicate point is dropped
+  // once and its photo copies are never created. Reports with 0 or 1 photo
+  // expand to a single block, exactly as before. Duplicates are tracked in
+  // `splitDupRows` so the loop's own repeat-skip lets them through.
+  const splitDupRows = new WeakSet<object>();
+  const expandedReports: Row[] = [];
+  {
+    const seenCoordExp = new Set<string>();
+    const seenPkExp = new Set<string>();
+    for (const r of reports) {
+      const latE = pickLat(r);
+      const lngE = pickLng(r);
+      const coordKeyE =
+        latE !== null && lngE !== null ? `${latE.toFixed(6)},${lngE.toFixed(6)}` : "";
+      const pkE = String(r.point_key || "").trim();
+      if ((coordKeyE && seenCoordExp.has(coordKeyE)) || (pkE && seenPkExp.has(pkE))) {
+        continue; // duplicate point — drop it (and all its photo copies)
+      }
+      if (coordKeyE) seenCoordExp.add(coordKeyE);
+      if (pkE) seenPkExp.add(pkE);
+      const ridE = String(r.id || "").trim();
+      const nPhotos = (photosByReportId.get(ridE) || []).length;
+      const blocks = Math.max(1, nPhotos);
+      for (let pi = 0; pi < blocks; pi += 1) {
+        if (pi === 0) {
+          expandedReports.push(r);
+        } else {
+          const dup: Row = { ...r };
+          splitDupRows.add(dup);
+          expandedReports.push(dup);
+        }
+      }
+    }
+  }
+  console.log("[DOCX PHOTO SPLIT EXPANSION]", {
+    originalReports: reports.length,
+    expandedBlocks: expandedReports.length,
+  });
+
   // Spec-mandated point_key fallback. When a report has no row in
   // report_photos by report_id (typical when bulk upload landed photos
   // against a different reports.id but the same point_key), we fall
@@ -3502,7 +3550,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // Adapt photo dimensions/quality to scale so very large reports produce a
   // file Word can still open and the server doesn't run out of memory holding
   // thousands of images. ~2 photos/report worst case.
-  const approxPhotos = reports.length * 2;
+  const approxPhotos = expandedReports.length * 2;
   OBS_PHOTO_TARGET =
     approxPhotos > 6000
       ? { width: 820, height: 540, quality: 60 } // huge (~5000+ pts): ~45KB/photo
@@ -3515,7 +3563,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // min 4 min, max 45 min so very large reports aren't cut off. NOTE: the
   // server's reverse-proxy read timeout (nginx proxy_read_timeout) must be
   // raised to match, or the request is cut off before the file is ready.
-  const PHOTO_PHASE_DEADLINE_MS = Math.min(2_700_000, Math.max(240_000, reports.length * 700));
+  const PHOTO_PHASE_DEADLINE_MS = Math.min(2_700_000, Math.max(240_000, expandedReports.length * 700));
   const phaseStartedAt = Date.now();
   let phaseDeadlineHit = false;
 
@@ -3536,8 +3584,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const seenCoordKeys = new Set<string>();
   const seenPointKeys = new Set<string>();
   let skippedRepeatPoints = 0;
-  for (let i = 0; i < reports.length; i += 1) {
-    const r = reports[i];
+  for (let i = 0; i < expandedReports.length; i += 1) {
+    const r = expandedReports[i];
     const rid = String(r.id || "").trim();
     const lat = pickLat(r);
     const lng = pickLng(r);
@@ -3548,8 +3596,11 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     const coordKey =
       hasLat && hasLon ? `${lat!.toFixed(6)},${lng!.toFixed(6)}` : "";
     const pointKey = String(r.point_key || "").trim();
-    const isRepeatCoord = coordKey !== "" && seenCoordKeys.has(coordKey);
-    const isRepeatPointKey = pointKey !== "" && seenPointKeys.has(pointKey);
+    // Split duplicates (extra photos of the same report) legitimately share
+    // the report's coordinate/point_key — never treat them as repeat points.
+    const isSplitDup = splitDupRows.has(r);
+    const isRepeatCoord = !isSplitDup && coordKey !== "" && seenCoordKeys.has(coordKey);
+    const isRepeatPointKey = !isSplitDup && pointKey !== "" && seenPointKeys.has(pointKey);
     if (isRepeatCoord || isRepeatPointKey) {
       skippedRepeatPoints += 1;
       console.log("[DOCX SKIP REPEAT POINT]", {
@@ -3561,8 +3612,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       });
       continue;
     }
-    if (coordKey) seenCoordKeys.add(coordKey);
-    if (pointKey) seenPointKeys.add(pointKey);
+    if (!isSplitDup) {
+      if (coordKey) seenCoordKeys.add(coordKey);
+      if (pointKey) seenPointKeys.add(pointKey);
+    }
 
     let photoKey = "";
     let photoMissingReason: string | null = null;
@@ -3578,7 +3631,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       console.warn("[export stage] photo phase deadline reached", {
         deadlineMs: PHOTO_PHASE_DEADLINE_MS,
         elapsedMs: phaseElapsed,
-        remainingObservations: reports.length - i,
+        remainingObservations: expandedReports.length - i,
       });
     }
 
@@ -3681,9 +3734,12 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         photoMissingReason = "no report_photos rows for report_id";
       }
 
-      // Pick best 2 photos (by resolution then date) and try to fetch them.
-      // If 2 succeed → composite side-by-side; if 1 → single centered image.
-      const selectedPhotos = pickBestTwoPhotos(reportPhotos);
+      // ONE photo per block: each observation block renders exactly the one
+      // photo it claimed above (firstPhotoRow). A report's other photos are
+      // rendered by its OTHER split blocks (see the per-photo expansion
+      // "ONE REPORT BLOCK PER PHOTO"), so we no longer pair two photos
+      // side-by-side in a single block.
+      const selectedPhotos = firstPhotoRow ? [firstPhotoRow] : [];
       let fetchedAny = false;
       let lastFetchFailureReason: string | null = null;
       const fetchedBuffers: Array<{ buffer: Buffer; contentType: string }> = [];
