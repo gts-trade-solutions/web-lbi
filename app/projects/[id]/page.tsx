@@ -15,6 +15,8 @@ import {
   generateProjectGPXByReportIds,
 } from "../../../lib/download";
 import { descriptionForCategory } from "../../../lib/observationTemplates";
+import { fetchPhotoBlob } from "../../../lib/authedImage";
+import PizZip from "pizzip";
 
 type VehicleMovement = "green" | "yellow" | "red" | "";
 type VMFilter = "all" | "green" | "yellow" | "red" | "unset";
@@ -4448,6 +4450,76 @@ function PhotoUploadModal({
     }
   };
 
+  // ---- Photo downloads (single + bulk zip). Photos live in a login-gated
+  // bucket, so the bytes are fetched through the auth'd /api/image-proxy.
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [downloadingAll, setDownloadingAll] = useState(false);
+
+  const photoFileName = (p: ReportPhotoRow, idx: number) => {
+    let name = String(p.file_name || "").trim();
+    if (!name && p.url) {
+      try {
+        name = decodeURIComponent(new URL(p.url).pathname.split("/").pop() || "");
+      } catch {
+        name = "";
+      }
+    }
+    if (!name) name = `photo_${idx}`;
+    if (!/\.[a-z0-9]{2,5}$/i.test(name)) name += ".jpg";
+    return name;
+  };
+
+  const downloadablePhotos = () => existing.filter((p) => p.url && !isVideoUrl(p.url));
+
+  const downloadOnePhoto = async (p: ReportPhotoRow, idx: number) => {
+    if (!p.url) return;
+    setDownloadingId(p.id);
+    try {
+      const blob = await fetchPhotoBlob(p.url);
+      downloadBlob(blob, photoFileName(p, idx));
+    } catch (e: any) {
+      toast(e?.message || "Photo download failed");
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  const downloadAllPhotos = async () => {
+    const list = downloadablePhotos();
+    if (!list.length) {
+      toast("No photos to download.");
+      return;
+    }
+    setDownloadingAll(true);
+    try {
+      const zip = new PizZip();
+      let added = 0;
+      let failed = 0;
+      for (let i = 0; i < list.length; i += 1) {
+        const p = list[i];
+        try {
+          const blob = await fetchPhotoBlob(p.url!);
+          const buf = await blob.arrayBuffer();
+          zip.file(`${String(i + 1).padStart(3, "0")}_${photoFileName(p, i + 1)}`, buf);
+          added += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      if (!added) {
+        toast("Could not download any photos.");
+        return;
+      }
+      const content = zip.generate({ type: "blob", compression: "DEFLATE" } as any) as unknown as Blob;
+      downloadBlob(content, `report-${reportId}-photos.zip`);
+      if (failed) toast(`Downloaded ${added} photo(s); ${failed} could not be fetched.`);
+    } catch (e: any) {
+      toast(e?.message || "Bulk download failed");
+    } finally {
+      setDownloadingAll(false);
+    }
+  };
+
   return (
     <div style={styles.modalOverlay} onMouseDown={onClose}>
       <div
@@ -4460,8 +4532,24 @@ function PhotoUploadModal({
         <div style={styles.modalTitle}>Report Photos</div>
         <div style={styles.modalHint}>
           Tick the photos you want in the Word file — unticked photos stay saved but are left out of the
-          export. The Word template places at most <b>2 ticked photos</b> per report.
+          export. Each ticked photo becomes its own block in the report.
         </div>
+
+        {!loadingExisting && downloadablePhotos().length > 0 && (
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 4 }}>
+            <button
+              type="button"
+              style={{ ...styles.btnGhost, opacity: downloadingAll ? 0.6 : 1 }}
+              onClick={downloadAllPhotos}
+              disabled={downloadingAll}
+              title="Download all photos of this report as a ZIP"
+            >
+              {downloadingAll
+                ? "Preparing ZIP…"
+                : `⬇ Download all (${downloadablePhotos().length})`}
+            </button>
+          </div>
+        )}
 
         {loadingExisting ? (
           <div style={{ padding: 12, fontWeight: 800, color: "#667085" }}>Loading photos...</div>
@@ -4486,7 +4574,7 @@ function PhotoUploadModal({
               gap: 10,
             }}
           >
-            {existing.filter((p) => !isVideoUrl(p.url)).map((p) => {
+            {existing.filter((p) => !isVideoUrl(p.url)).map((p, idx) => {
               const included = isIncluded(p);
               return (
                 <label
@@ -4542,6 +4630,31 @@ function PhotoUploadModal({
                     >
                       {included ? "In Word file" : "Not in Word"}
                     </span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        downloadOnePhoto(p, idx + 1);
+                      }}
+                      disabled={downloadingId === p.id}
+                      title="Download this photo"
+                      style={{
+                        marginLeft: "auto",
+                        flexShrink: 0,
+                        border: "1px solid #D0D5DD",
+                        background: "#fff",
+                        borderRadius: 8,
+                        padding: "2px 8px",
+                        fontSize: 12,
+                        fontWeight: 900,
+                        cursor: "pointer",
+                        color: "#344054",
+                        opacity: downloadingId === p.id ? 0.5 : 1,
+                      }}
+                    >
+                      {downloadingId === p.id ? "…" : "⬇"}
+                    </button>
                   </div>
                 </label>
               );

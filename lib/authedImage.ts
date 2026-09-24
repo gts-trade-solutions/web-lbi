@@ -13,6 +13,27 @@ function authHeaders(): Record<string, string> {
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
+// Fetch a report photo's raw bytes (for download), going through the same
+// login-gated /api/image-proxy so private-bucket photos work. Same-origin
+// URLs are fetched directly. Returns the Blob; the caller saves it.
+export async function fetchPhotoBlob(
+  photoUrl: string,
+  signal?: AbortSignal
+): Promise<Blob> {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const isExternal = /^https?:\/\//i.test(photoUrl) && !photoUrl.startsWith(origin);
+  const target = isExternal
+    ? `/api/image-proxy?url=${encodeURIComponent(photoUrl)}`
+    : photoUrl;
+  const res = await fetch(target, {
+    headers: authHeaders(),
+    credentials: "include",
+    signal,
+  });
+  if (!res.ok) throw new Error(`Photo download failed (${res.status})`);
+  return res.blob();
+}
+
 export async function loadCanvasSafeImage(
   photoUrl: string,
   signal?: AbortSignal
