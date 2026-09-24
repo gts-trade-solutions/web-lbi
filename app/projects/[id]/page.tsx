@@ -1558,6 +1558,33 @@ export default function ProjectReportsPage() {
     setPhotoOpen(true);
   };
 
+  // Erase a drawing/crop and bring back the untouched original photo (works
+  // when the original is still stored — anno_base_url for new drawings, or the
+  // image_key for older ones). Server decides and reports if it can't.
+  const [removingDrawingId, setRemovingDrawingId] = useState<string | null>(null);
+  const removeDrawing = async (reportId: string, photo: ReportPhotoRow) => {
+    if (!photo?.id) return;
+    const ok = await confirmDialog(
+      "Remove the drawing and bring back the original photo (before the arrows / labels)? This works only if the original photo is still stored.",
+      { confirmText: "Remove drawing" }
+    );
+    if (!ok) return;
+    setRemovingDrawingId(photo.id);
+    try {
+      await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}/photos`, {
+        method: "PATCH",
+        body: JSON.stringify({ photoId: photo.id, restoreOriginal: true }),
+      });
+      await fetchReports(q, sortDir, vmFilter);
+      setPhotoPreview(null);
+      toast("Drawing removed — original photo restored.");
+    } catch (e: any) {
+      toast(e?.message || "Could not restore the original photo.");
+    } finally {
+      setRemovingDrawingId(null);
+    }
+  };
+
   // ---- Photo downloads from the click-a-thumbnail preview (single + zip).
   // Bytes go through the login-gated /api/image-proxy (fetchPhotoBlob).
   const [dlPhotoBusy, setDlPhotoBusy] = useState(false);
@@ -2277,6 +2304,18 @@ export default function ProjectReportsPage() {
                         title="Crop this photo (the crop replaces it)"
                       >
                         ✂️ Crop photo
+                      </button>
+                    ) : null}
+                    {(cur.url && /annotated|cropped/i.test(cur.url)) ||
+                    (cur.file_name && /annotated|cropped/i.test(cur.file_name)) ? (
+                      <button
+                        type="button"
+                        style={{ ...styles.btnGhost, borderColor: "#F79009", color: "#B54708", fontWeight: 900, opacity: removingDrawingId === cur.id ? 0.6 : 1 }}
+                        onClick={() => removeDrawing(photoPreview.reportId, cur)}
+                        disabled={removingDrawingId === cur.id}
+                        title="Remove the drawing and restore the original photo (if the original is still stored)"
+                      >
+                        {removingDrawingId === cur.id ? "Restoring…" : "🧹 Remove drawing"}
                       </button>
                     ) : null}
                     <button

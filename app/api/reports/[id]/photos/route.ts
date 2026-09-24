@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import pool from "../../../../../lib/db";
 import { requireAuth } from "../../../../../lib/auth";
-import { canonicalS3Url, signRowUrls } from "../../../../../lib/s3";
+import { canonicalS3Url, signRowUrls, getPublicS3Url, s3KeyFromUrl } from "../../../../../lib/s3";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -179,6 +179,91 @@ async function replacePhotoImage(reportId: string, body: Record<string, unknown>
   });
 }
 
+/**
+ * Erase a drawing (or crop) and bring back the ORIGINAL photo. The draw & crop
+ * tools only swap the row's `url` (they upload a new object and never delete the
+ * old one) and never touch `image_key`, so the untouched original is often still
+ * reachable — via `anno_base_url` (drawings made after that feature) or via
+ * `image_key` (the key the photo was first uploaded under). We verify the
+ * candidate actually exists before swapping it in, then clear any stored strokes.
+ */
+async function restoreOriginalPhoto(reportId: string, body: Record<string, unknown>) {
+  const photoId = String(body?.photoId || body?.id || "").trim();
+  if (!photoId) return Response.json({ error: "photoId is required" }, { status: 400 });
+
+  await ensureAnnoColumns();
+  const cols = await getColumns();
+  const [rows] = await pool.query(
+    "SELECT * FROM report_photos WHERE id = ? AND report_id = ? LIMIT 1",
+    [photoId, reportId]
+  );
+  const row = Array.isArray(rows) && rows[0] ? (rows[0] as Record<string, unknown>) : null;
+  if (!row) return Response.json({ error: "Photo not found" }, { status: 404 });
+
+  const currentUrl = canonicalS3Url(String(row.url || ""));
+  const candidates: string[] = [];
+  if (cols.has("anno_base_url") && row.anno_base_url) {
+    candidates.push(canonicalS3Url(String(row.anno_base_url)));
+  }
+  if (cols.has("image_key") && row.image_key) {
+    const ik = String(row.image_key).trim();
+    if (/^https?:\/\//i.test(ik)) candidates.push(canonicalS3Url(ik));
+    else if (ik) {
+      try {
+        candidates.push(getPublicS3Url(ik));
+      } catch {
+        /* bucket url not configured — skip */
+      }
+    }
+  }
+
+  // First candidate that differs from the current (drawn) image AND exists.
+  let restored: string | null = null;
+  for (const c of candidates) {
+    if (!c || canonicalS3Url(c) === currentUrl) continue;
+    if (!s3KeyFromUrl(c) && !/^https?:\/\//i.test(c)) continue;
+    try {
+      const head = await fetch(c, { method: "HEAD" });
+      if (head.ok) {
+        restored = c;
+        break;
+      }
+    } catch {
+      /* not reachable — try the next candidate */
+    }
+  }
+
+  if (!restored) {
+    return Response.json(
+      {
+        error:
+          "No clean original is stored for this photo, so the drawing can't be removed automatically. Re-upload the original photo to replace it.",
+      },
+      { status: 409 }
+    );
+  }
+
+  const sets: string[] = ["url = ?"];
+  const values: unknown[] = [canonicalS3Url(restored)];
+  if (cols.has("file_name")) {
+    sets.push("file_name = ?");
+    values.push(String(restored).split("/").pop()?.slice(0, 255) || null);
+  }
+  if (cols.has("anno_json")) sets.push("anno_json = NULL");
+  if (cols.has("anno_base_url")) sets.push("anno_base_url = NULL");
+  values.push(photoId, reportId);
+  await pool.query(
+    `UPDATE report_photos SET ${sets.join(", ")} WHERE id = ? AND report_id = ?`,
+    values
+  );
+  const [after] = await pool.query("SELECT * FROM report_photos WHERE id = ? LIMIT 1", [photoId]);
+  return Response.json({
+    ok: true,
+    restored: true,
+    photo: Array.isArray(after) && after[0] ? await signRowUrls("report_photos", after[0]) : null,
+  });
+}
+
 // PATCH /api/reports/:id/photos
 //   { photoId, url, width?, height?, file_name? } — replace a photo's image
 //     in place (draw / crop tools).
@@ -191,6 +276,7 @@ export async function PATCH(request: Request, context: Ctx) {
     if (!reportId) return Response.json({ error: "Report id is required" }, { status: 400 });
 
     const body = await request.json().catch(() => ({} as any));
+    if (body?.restoreOriginal) return await restoreOriginalPhoto(reportId, body);
     if (typeof body?.url === "string") return await replacePhotoImage(reportId, body);
 
     const selections: Array<{ id: string; include: boolean }> = Array.isArray(body?.selections)
