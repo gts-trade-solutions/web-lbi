@@ -1627,6 +1627,72 @@ export default function ProjectReportsPage() {
     }
   };
 
+  // Download the PHOTOS ONLY (no Word file) of the selected reports — or all
+  // listed reports when nothing is selected — as one ZIP, one folder per
+  // report. Built in the browser, so very large sets should be done in batches.
+  const [dlSelBusy, setDlSelBusy] = useState(false);
+  const downloadSelectedReportPhotos = async () => {
+    const base = filteredSortedReports;
+    const chosen = base.some((r) => selected[r.id]) ? base.filter((r) => selected[r.id]) : base;
+    const items: Array<{ folder: string; name: string; url: string }> = [];
+    chosen.forEach((r, ri) => {
+      const photos = (r.photos || []).filter((p) => p?.url && !isVideoUrl(p.url as string));
+      const cat =
+        String(r.category || "report").replace(/[^\w\- ]+/g, "").trim().slice(0, 40) || "report";
+      const folder = `${String(ri + 1).padStart(3, "0")}_${cat}`;
+      photos.forEach((p, pi) => {
+        let nm = String(p.file_name || "").trim();
+        if (!nm) {
+          try {
+            nm = decodeURIComponent(new URL(p.url as string).pathname.split("/").pop() || "");
+          } catch {
+            nm = "";
+          }
+        }
+        if (!nm) nm = `photo_${pi + 1}`;
+        if (!/\.[a-z0-9]{2,5}$/i.test(nm)) nm += ".jpg";
+        items.push({ folder, name: `${String(pi + 1).padStart(2, "0")}_${nm}`, url: p.url as string });
+      });
+    });
+    if (!items.length) {
+      toast("No photos in those reports.");
+      return;
+    }
+    if (items.length > 120) {
+      const ok = await confirmDialog(
+        `This will build a ZIP of ${items.length} photos in your browser, which can be slow / memory-heavy for very large sets. For thousands of photos, select fewer reports and download in batches. Continue?`,
+        { confirmText: "Download" }
+      );
+      if (!ok) return;
+    }
+    setDlSelBusy(true);
+    try {
+      const zip = new PizZip();
+      let added = 0;
+      let failed = 0;
+      for (const it of items) {
+        try {
+          const blob = await fetchPhotoBlob(it.url);
+          zip.file(`${it.folder}/${it.name}`, await blob.arrayBuffer());
+          added += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      if (!added) {
+        toast("Could not download any photos.");
+        return;
+      }
+      const content = zip.generate({ type: "blob", compression: "DEFLATE" } as any) as unknown as Blob;
+      downloadBlob(content, `photos_${(projectName || projectId || "project").toString().slice(0, 40)}.zip`);
+      toast(`Downloaded ${added} photo(s)${failed ? `; ${failed} failed` : ""}.`);
+    } catch (e: any) {
+      toast(e?.message || "Photo download failed");
+    } finally {
+      setDlSelBusy(false);
+    }
+  };
+
   // ✅ Convert the currently selected reports into a brand-new project.
   // The source project is left untouched; reports, photos and path points
   // (and optionally the GA setup) are copied into the new project.
@@ -2835,6 +2901,22 @@ export default function ProjectReportsPage() {
               }
             >
               {xlsxLoading ? "Preparing…" : "KM + Coords (Excel)"}
+            </button>
+
+            {/* Download the photos ONLY (no Word file) of the selected/listed reports. */}
+            <button
+              style={{ ...styles.btnGhost, opacity: dlSelBusy ? 0.6 : 1 }}
+              onClick={downloadSelectedReportPhotos}
+              disabled={loading || dlSelBusy}
+              title={
+                stats.selectedCount
+                  ? `Download the photos (only) of ${stats.selectedCount} selected report(s) as a ZIP`
+                  : "Download the photos (only) of all listed reports as a ZIP"
+              }
+            >
+              {dlSelBusy
+                ? "Zipping photos…"
+                : `⬇ Photos${stats.selectedCount ? ` (${stats.selectedCount})` : ""}`}
             </button>
 
             {/* ✅ only change: Export button now uses gate */}
