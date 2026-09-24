@@ -2258,9 +2258,9 @@ export default function ProjectReportsPage() {
                             photoId: cur.id,
                           })
                         }
-                        title="Draw arrows / text labels on this photo (the drawing replaces it)"
+                        title="Draw or edit arrows / text labels on this photo (reopens your saved drawing so you can move or re-type it)"
                       >
-                        ✏️ Draw on photo
+                        ✏️ Draw / edit
                       </button>
                     ) : null}
                     {cur.url && !isVideoUrl(cur.url) ? (
@@ -2277,30 +2277,6 @@ export default function ProjectReportsPage() {
                         title="Crop this photo (the crop replaces it)"
                       >
                         ✂️ Crop photo
-                      </button>
-                    ) : null}
-                    {cur.url && !isVideoUrl(cur.url) ? (
-                      <button
-                        type="button"
-                        style={{ ...styles.btnGhost, borderColor: "#1570EF", color: "#175CD3", fontWeight: 900, opacity: dlPhotoBusy ? 0.6 : 1 }}
-                        onClick={() => downloadSinglePhoto(cur, idx + 1)}
-                        disabled={dlPhotoBusy}
-                        title="Download this photo to your device"
-                      >
-                        {dlPhotoBusy ? "…" : "⬇ Download"}
-                      </button>
-                    ) : null}
-                    {list.filter((p) => p.url && !isVideoUrl(p.url)).length > 1 ? (
-                      <button
-                        type="button"
-                        style={{ ...styles.btnGhost, borderColor: "#1570EF", color: "#175CD3", fontWeight: 900, opacity: dlZipBusy ? 0.6 : 1 }}
-                        onClick={() => downloadReportPhotosZip(photoPreview.reportId, list)}
-                        disabled={dlZipBusy}
-                        title="Download ALL photos of this report as a ZIP"
-                      >
-                        {dlZipBusy
-                          ? "Preparing ZIP…"
-                          : `⬇ Download all (${list.filter((p) => p.url && !isVideoUrl(p.url)).length})`}
                       </button>
                     ) : null}
                     <button
