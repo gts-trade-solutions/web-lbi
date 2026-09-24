@@ -1558,6 +1558,75 @@ export default function ProjectReportsPage() {
     setPhotoOpen(true);
   };
 
+  // ---- Photo downloads from the click-a-thumbnail preview (single + zip).
+  // Bytes go through the login-gated /api/image-proxy (fetchPhotoBlob).
+  const [dlPhotoBusy, setDlPhotoBusy] = useState(false);
+  const [dlZipBusy, setDlZipBusy] = useState(false);
+
+  const photoDlName = (p: ReportPhotoRow, idx: number) => {
+    let name = String(p?.file_name || "").trim();
+    if (!name && p?.url) {
+      try {
+        name = decodeURIComponent(new URL(p.url).pathname.split("/").pop() || "");
+      } catch {
+        name = "";
+      }
+    }
+    if (!name) name = `photo_${idx}`;
+    if (!/\.[a-z0-9]{2,5}$/i.test(name)) name += ".jpg";
+    return name;
+  };
+
+  const downloadSinglePhoto = async (p: ReportPhotoRow, idx: number) => {
+    if (!p?.url) return;
+    setDlPhotoBusy(true);
+    try {
+      const blob = await fetchPhotoBlob(p.url);
+      downloadBlob(blob, photoDlName(p, idx));
+    } catch (e: any) {
+      toast(e?.message || "Photo download failed");
+    } finally {
+      setDlPhotoBusy(false);
+    }
+  };
+
+  const downloadReportPhotosZip = async (reportId: string, list: ReportPhotoRow[]) => {
+    const photos = list.filter((p) => p.url && !isVideoUrl(p.url));
+    if (!photos.length) {
+      toast("No photos to download.");
+      return;
+    }
+    setDlZipBusy(true);
+    try {
+      const zip = new PizZip();
+      let added = 0;
+      let failed = 0;
+      for (let i = 0; i < photos.length; i += 1) {
+        try {
+          const blob = await fetchPhotoBlob(photos[i].url!);
+          zip.file(
+            `${String(i + 1).padStart(3, "0")}_${photoDlName(photos[i], i + 1)}`,
+            await blob.arrayBuffer()
+          );
+          added += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      if (!added) {
+        toast("Could not download any photos.");
+        return;
+      }
+      const content = zip.generate({ type: "blob", compression: "DEFLATE" } as any) as unknown as Blob;
+      downloadBlob(content, `report-${reportId}-photos.zip`);
+      if (failed) toast(`Downloaded ${added} photo(s); ${failed} could not be fetched.`);
+    } catch (e: any) {
+      toast(e?.message || "Bulk download failed");
+    } finally {
+      setDlZipBusy(false);
+    }
+  };
+
   // ✅ Convert the currently selected reports into a brand-new project.
   // The source project is left untouched; reports, photos and path points
   // (and optionally the GA setup) are copied into the new project.
@@ -2142,6 +2211,30 @@ export default function ProjectReportsPage() {
                         title="Crop this photo (the crop replaces it)"
                       >
                         ✂️ Crop photo
+                      </button>
+                    ) : null}
+                    {cur.url && !isVideoUrl(cur.url) ? (
+                      <button
+                        type="button"
+                        style={{ ...styles.btnGhost, borderColor: "#1570EF", color: "#175CD3", fontWeight: 900, opacity: dlPhotoBusy ? 0.6 : 1 }}
+                        onClick={() => downloadSinglePhoto(cur, idx + 1)}
+                        disabled={dlPhotoBusy}
+                        title="Download this photo to your device"
+                      >
+                        {dlPhotoBusy ? "…" : "⬇ Download"}
+                      </button>
+                    ) : null}
+                    {list.filter((p) => p.url && !isVideoUrl(p.url)).length > 1 ? (
+                      <button
+                        type="button"
+                        style={{ ...styles.btnGhost, borderColor: "#1570EF", color: "#175CD3", fontWeight: 900, opacity: dlZipBusy ? 0.6 : 1 }}
+                        onClick={() => downloadReportPhotosZip(photoPreview.reportId, list)}
+                        disabled={dlZipBusy}
+                        title="Download ALL photos of this report as a ZIP"
+                      >
+                        {dlZipBusy
+                          ? "Preparing ZIP…"
+                          : `⬇ Download all (${list.filter((p) => p.url && !isVideoUrl(p.url)).length})`}
                       </button>
                     ) : null}
                     <button
