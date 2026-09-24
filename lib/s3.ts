@@ -166,7 +166,7 @@ export function canonicalS3Url<T>(url: T): T | string {
 
 // Columns that hold photo/file URLs, per table.
 export const URL_COLUMNS: Record<string, string[]> = {
-  report_photos: ["url", "anno_base_url"],
+  report_photos: ["url", "anno_base_url", "original_url"],
   project_route_pages: ["map_file_url"],
   project_route_page_images: ["file_url"],
   project_ga_drawings: ["image_url"],

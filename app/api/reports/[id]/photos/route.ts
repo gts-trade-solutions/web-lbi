@@ -87,6 +87,13 @@ async function ensureAnnoColumns() {
       await pool.query("ALTER TABLE report_photos ADD COLUMN anno_base_url VARCHAR(2048) NULL");
       console.log("[api/reports/:id/photos] added anno_base_url column");
     }
+    // Write-once copy of the UNTOUCHED original image. Captured the first time
+    // a photo is drawn on / cropped, and never overwritten after, so the clean
+    // original is always kept and can be viewed or restored.
+    if (!cols.has("original_url")) {
+      await pool.query("ALTER TABLE report_photos ADD COLUMN original_url VARCHAR(2048) NULL");
+      console.log("[api/reports/:id/photos] added original_url column");
+    }
   } catch (err) {
     console.error("[api/reports/:id/photos] ensure anno columns failed:", err);
   }
@@ -97,6 +104,22 @@ export async function GET(request: Request, context: Ctx) {
     requireAuth(request);
     const reportId = String(context.params?.id || "").trim();
     if (!reportId) return Response.json({ error: "Report id is required" }, { status: 400 });
+
+    // ?resolveOriginal=<photoId> — return the untouched original image URL for
+    // that photo (or null), so the UI can show the original before a drawing.
+    const resolveId = new URL(request.url).searchParams.get("resolveOriginal");
+    if (resolveId) {
+      const orig = await findOriginalUrl(reportId, String(resolveId).trim());
+      let originalUrl: string | null = null;
+      if (orig) {
+        const signed = await signRowUrls("report_photos", [{ url: orig } as Record<string, unknown>]);
+        originalUrl =
+          Array.isArray(signed) && signed[0] && typeof signed[0].url === "string"
+            ? (signed[0].url as string)
+            : orig;
+      }
+      return Response.json({ originalUrl });
+    }
 
     await ensureIncludeInExportColumn();
     await ensureAnnoColumns();
@@ -163,6 +186,26 @@ async function replacePhotoImage(reportId: string, body: Record<string, unknown>
     sets.push("anno_base_url = ?");
     values.push(base && isImageUrl(base) ? base : null);
   }
+  // Capture the pre-edit image as the WRITE-ONCE original the first time this
+  // photo is modified, so the clean original is always kept for view/restore.
+  if (cols.has("original_url")) {
+    try {
+      const [curRows] = await pool.query(
+        "SELECT url, original_url FROM report_photos WHERE id = ? AND report_id = ? LIMIT 1",
+        [photoId, reportId]
+      );
+      const curRow =
+        Array.isArray(curRows) && curRows[0] ? (curRows[0] as Record<string, unknown>) : null;
+      const existingOriginal = curRow?.original_url ? String(curRow.original_url).trim() : "";
+      const curUrl = curRow?.url ? canonicalS3Url(String(curRow.url)) : "";
+      if (!existingOriginal && curUrl && curUrl !== url) {
+        sets.push("original_url = ?");
+        values.push(curUrl);
+      }
+    } catch (err) {
+      console.error("[api/reports/:id/photos] original_url capture failed:", err);
+    }
+  }
   values.push(photoId, reportId);
 
   const [result] = await pool.query(
@@ -187,10 +230,11 @@ async function replacePhotoImage(reportId: string, body: Record<string, unknown>
  * `image_key` (the key the photo was first uploaded under). We verify the
  * candidate actually exists before swapping it in, then clear any stored strokes.
  */
-async function restoreOriginalPhoto(reportId: string, body: Record<string, unknown>) {
-  const photoId = String(body?.photoId || body?.id || "").trim();
-  if (!photoId) return Response.json({ error: "photoId is required" }, { status: 400 });
-
+// Resolve the untouched original image URL for a photo (canonical), or null if
+// none is recoverable. Tries, in order: the write-once `original_url`, the
+// drawing base (`anno_base_url`), then the first-upload `image_key`. Each
+// candidate must differ from the current (edited) image and actually exist.
+async function findOriginalUrl(reportId: string, photoId: string): Promise<string | null> {
   await ensureAnnoColumns();
   const cols = await getColumns();
   const [rows] = await pool.query(
@@ -198,13 +242,11 @@ async function restoreOriginalPhoto(reportId: string, body: Record<string, unkno
     [photoId, reportId]
   );
   const row = Array.isArray(rows) && rows[0] ? (rows[0] as Record<string, unknown>) : null;
-  if (!row) return Response.json({ error: "Photo not found" }, { status: 404 });
-
+  if (!row) return null;
   const currentUrl = canonicalS3Url(String(row.url || ""));
   const candidates: string[] = [];
-  if (cols.has("anno_base_url") && row.anno_base_url) {
-    candidates.push(canonicalS3Url(String(row.anno_base_url)));
-  }
+  if (cols.has("original_url") && row.original_url) candidates.push(canonicalS3Url(String(row.original_url)));
+  if (cols.has("anno_base_url") && row.anno_base_url) candidates.push(canonicalS3Url(String(row.anno_base_url)));
   if (cols.has("image_key") && row.image_key) {
     const ik = String(row.image_key).trim();
     if (/^https?:\/\//i.test(ik)) candidates.push(canonicalS3Url(ik));
@@ -216,23 +258,24 @@ async function restoreOriginalPhoto(reportId: string, body: Record<string, unkno
       }
     }
   }
-
-  // First candidate that differs from the current (drawn) image AND exists.
-  let restored: string | null = null;
   for (const c of candidates) {
     if (!c || canonicalS3Url(c) === currentUrl) continue;
     if (!s3KeyFromUrl(c) && !/^https?:\/\//i.test(c)) continue;
     try {
       const head = await fetch(c, { method: "HEAD" });
-      if (head.ok) {
-        restored = c;
-        break;
-      }
+      if (head.ok) return canonicalS3Url(c) as string;
     } catch {
       /* not reachable — try the next candidate */
     }
   }
+  return null;
+}
 
+async function restoreOriginalPhoto(reportId: string, body: Record<string, unknown>) {
+  const photoId = String(body?.photoId || body?.id || "").trim();
+  if (!photoId) return Response.json({ error: "photoId is required" }, { status: 400 });
+
+  const restored = await findOriginalUrl(reportId, photoId);
   if (!restored) {
     return Response.json(
       {
@@ -243,6 +286,7 @@ async function restoreOriginalPhoto(reportId: string, body: Record<string, unkno
     );
   }
 
+  const cols = await getColumns();
   const sets: string[] = ["url = ?"];
   const values: unknown[] = [canonicalS3Url(restored)];
   if (cols.has("file_name")) {

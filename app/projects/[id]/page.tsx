@@ -1585,6 +1585,42 @@ export default function ProjectReportsPage() {
     }
   };
 
+  // View the untouched original of a drawn/cropped photo (without changing it).
+  const [viewingOriginal, setViewingOriginal] = useState(false);
+  const [originalUrl, setOriginalUrl] = useState<string | null>(null);
+  const [resolvingOriginal, setResolvingOriginal] = useState(false);
+  const openOriginalView = async (reportId: string, photo: ReportPhotoRow) => {
+    // Prefer an original we already have on the row; otherwise ask the server
+    // (covers older photos recoverable only via image_key).
+    const direct = photo.original_url || photo.anno_base_url || null;
+    if (direct) {
+      setOriginalUrl(direct);
+      setViewingOriginal(true);
+      return;
+    }
+    setResolvingOriginal(true);
+    try {
+      const data = await apiRequestJson(
+        `/api/reports/${encodeURIComponent(reportId)}/photos?resolveOriginal=${encodeURIComponent(photo.id)}`
+      );
+      if (data?.originalUrl) {
+        setOriginalUrl(String(data.originalUrl));
+        setViewingOriginal(true);
+      } else {
+        toast("No stored original for this photo — it was modified before originals were kept.");
+      }
+    } catch (e: any) {
+      toast(e?.message || "Could not load the original photo.");
+    } finally {
+      setResolvingOriginal(false);
+    }
+  };
+  // Always start on the edited image when the previewed photo changes.
+  useEffect(() => {
+    setViewingOriginal(false);
+    setOriginalUrl(null);
+  }, [photoPreview?.reportId, photoPreview?.index]);
+
   // ---- Photo downloads from the click-a-thumbnail preview (single + zip).
   // Bytes go through the login-gated /api/image-proxy (fetchPhotoBlob).
   const [dlPhotoBusy, setDlPhotoBusy] = useState(false);
@@ -2218,7 +2254,11 @@ export default function ProjectReportsPage() {
                           textOverflow: "ellipsis",
                         }}
                       >
-                        {list.length > 1 ? `Photo ${idx + 1} of ${list.length}` : "Report photo"}
+                        {viewingOriginal
+                          ? "Original photo (before drawing)"
+                          : list.length > 1
+                          ? `Photo ${idx + 1} of ${list.length}`
+                          : "Report photo"}
                       </div>
                     </div>
                     <button
@@ -2258,7 +2298,7 @@ export default function ProjectReportsPage() {
                     ) : (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
-                        src={cur.url}
+                        src={viewingOriginal && originalUrl ? originalUrl : (cur.url as string)}
                         alt={cur.file_name || "Report photo"}
                         style={{
                           width: "100%",
@@ -2316,6 +2356,28 @@ export default function ProjectReportsPage() {
                         title="Remove the drawing and restore the original photo (if the original is still stored)"
                       >
                         {removingDrawingId === cur.id ? "Restoring…" : "🧹 Remove drawing"}
+                      </button>
+                    ) : null}
+                    {(cur.url && /annotated|cropped/i.test(cur.url)) ||
+                    (cur.file_name && /annotated|cropped/i.test(cur.file_name)) ||
+                    cur.original_url ||
+                    cur.anno_base_url ? (
+                      <button
+                        type="button"
+                        style={{ ...styles.btnGhost, borderColor: "#1570EF", color: "#175CD3", fontWeight: 900, opacity: resolvingOriginal ? 0.6 : 1 }}
+                        onClick={() =>
+                          viewingOriginal
+                            ? setViewingOriginal(false)
+                            : openOriginalView(photoPreview.reportId, cur)
+                        }
+                        disabled={resolvingOriginal}
+                        title="See the original photo before the drawing"
+                      >
+                        {resolvingOriginal
+                          ? "Loading…"
+                          : viewingOriginal
+                          ? "↩ Show edited"
+                          : "🔍 View original"}
                       </button>
                     ) : null}
                     <button
@@ -4089,6 +4151,9 @@ type ReportPhotoRow = {
   url?: string | null;
   file_name?: string | null;
   include_in_export?: number | boolean | null;
+  // Untouched original image kept when a photo is drawn on / cropped.
+  original_url?: string | null;
+  anno_base_url?: string | null;
 };
 
 /** ✅ Modal to edit an existing report's core fields */

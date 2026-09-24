@@ -98,20 +98,31 @@ export async function GET(request: Request, context: Ctx) {
         const placeholders = ids.map(() => "?").join(",");
         let photoRows: Record<string, unknown>[] = [];
         try {
+          // Newest schema: also carry the untouched original so the UI can show
+          // / restore the photo before a drawing.
           const [pr] = await pool.query(
-            `SELECT id, report_id, url, file_name, include_in_export FROM report_photos
+            `SELECT id, report_id, url, file_name, include_in_export, original_url, anno_base_url FROM report_photos
              WHERE report_id IN (${placeholders}) ORDER BY created_at ASC`,
             ids
           );
           photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
         } catch {
-          // Legacy schema without the include_in_export column.
-          const [pr] = await pool.query(
-            `SELECT id, report_id, url, file_name FROM report_photos
-             WHERE report_id IN (${placeholders}) ORDER BY created_at ASC`,
-            ids
-          );
-          photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
+          try {
+            const [pr] = await pool.query(
+              `SELECT id, report_id, url, file_name, include_in_export FROM report_photos
+               WHERE report_id IN (${placeholders}) ORDER BY created_at ASC`,
+              ids
+            );
+            photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
+          } catch {
+            // Legacy schema without the include_in_export column.
+            const [pr] = await pool.query(
+              `SELECT id, report_id, url, file_name FROM report_photos
+               WHERE report_id IN (${placeholders}) ORDER BY created_at ASC`,
+              ids
+            );
+            photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
+          }
         }
         await signRowUrls("report_photos", photoRows);
         const byReport = new Map<string, Record<string, unknown>[]>();
