@@ -2746,6 +2746,27 @@ export default function ProjectReportsPage() {
             <button style={styles.btnPrimary} onClick={onClickExport} disabled={loading}>
               Export
             </button>
+
+            {/* Delete selected — moved up here to the top header so it's easy
+                to reach; shows only when at least one report is selected. */}
+            {stats.selectedCount > 0 && (
+              <button
+                style={{
+                  ...styles.btnGhost,
+                  borderColor: "#FDA29B",
+                  background: "#FEF3F2",
+                  color: "#B42318",
+                  fontWeight: 900,
+                  opacity: bulkDeleting ? 0.6 : 1,
+                  cursor: bulkDeleting ? "not-allowed" : "pointer",
+                }}
+                onClick={bulkDeleteSelected}
+                disabled={bulkDeleting}
+                title="Delete all selected reports"
+              >
+                {bulkDeleting ? "Deleting…" : `🗑 Delete selected (${stats.selectedCount})`}
+              </button>
+            )}
           </div>
         </div>
 
@@ -2866,25 +2887,6 @@ export default function ProjectReportsPage() {
                 ? "Creating..."
                 : `Create project from selected${stats.selectedCount ? ` (${stats.selectedCount})` : ""}`}
             </button>
-
-            {stats.selectedCount > 0 && (
-              <button
-                style={{
-                  ...styles.btnGhost,
-                  borderColor: "#FDA29B",
-                  background: "#FEF3F2",
-                  color: "#B42318",
-                  fontWeight: 900,
-                  opacity: bulkDeleting ? 0.6 : 1,
-                  cursor: bulkDeleting ? "not-allowed" : "pointer",
-                }}
-                onClick={bulkDeleteSelected}
-                disabled={bulkDeleting}
-                title="Delete all selected reports"
-              >
-                {bulkDeleting ? "Deleting…" : `🗑 Delete selected (${stats.selectedCount})`}
-              </button>
-            )}
           </div>
         </div>
 
