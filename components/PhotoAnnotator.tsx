@@ -662,6 +662,62 @@ export default function PhotoAnnotator({
     setRedoStack(redoStack.slice(0, -1));
   };
 
+  // ---- Remove the current drawing & start fresh ----
+  // Brings back the clean ORIGINAL photo (before any drawing) as the base and
+  // wipes every stroke, so you can draw a brand-new drawing on the clean photo.
+  // Works for new drawings (original kept) and older ones the server can still
+  // recover; if no clean original is found it just clears the strokes.
+  const [resetting, setResetting] = useState(false);
+  const removeAndRedraw = async () => {
+    if (saving || resetting) return;
+    setResetting(true);
+    let targetUrl = baseUrlRef.current || photoUrl;
+    try {
+      const res = await fetch(
+        `/api/reports/${encodeURIComponent(reportId)}/photos?resolveOriginal=${encodeURIComponent(photoId)}`,
+        { headers: annoAuthHeaders(), credentials: "include" }
+      );
+      if (res.ok) {
+        const d = (await res.json().catch(() => null)) as { originalUrl?: string } | null;
+        if (d?.originalUrl) targetUrl = String(d.originalUrl);
+      }
+    } catch {
+      /* offline / not found — fall back to the current base */
+    }
+    const finish = () => {
+      setStrokes([]);
+      setRedoStack([]);
+      setSelectedIdx(null);
+      setTextDraft(null);
+      setResetting(false);
+    };
+    try {
+      const loaded = await loadCanvasSafeImage(targetUrl);
+      const img = new Image();
+      img.onload = () => {
+        baseImgRef.current = img;
+        baseUrlRef.current = targetUrl;
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const w = img.naturalWidth || 1200;
+          const h = img.naturalHeight || 800;
+          canvas.width = w;
+          canvas.height = h;
+          const maxW = Math.min(window.innerWidth * 0.9, 1280);
+          const maxH = window.innerHeight * 0.72;
+          const scale = Math.min(maxW / w, maxH / h, 1);
+          canvas.style.width = `${Math.round(w * scale)}px`;
+          canvas.style.height = `${Math.round(h * scale)}px`;
+        }
+        finish(); // setStrokes([]) triggers the redraw effect with the new base
+      };
+      img.onerror = finish;
+      img.src = loaded.src;
+    } catch {
+      finish();
+    }
+  };
+
   // ---- Selected-shape editing: rotate, duplicate, layer order ----
   const rotateSelected = (deltaDeg: number) => {
     if (selectedIdx == null) return;
@@ -914,6 +970,14 @@ export default function PhotoAnnotator({
             disabled={!total}
           >
             Clear
+          </button>
+          <button
+            style={{ ...S.ghost, borderColor: "#F79009", color: "#B54708" }}
+            onClick={removeAndRedraw}
+            disabled={resetting}
+            title="Remove the current drawing and bring back the clean photo, so you can draw a new one"
+          >
+            {resetting ? "Removing…" : "🧹 Remove drawing & redraw"}
           </button>
           <button style={S.ghost} onClick={onClose}>Cancel</button>
           <button style={S.primary} onClick={saveAnnotated} disabled={saving || !total}>
