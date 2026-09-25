@@ -3110,52 +3110,20 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     if (key && !photosByReportId.has(key)) reportsFullyExcludedByUser.add(key);
   }
 
-  // ---- ONE REPORT BLOCK PER PHOTO ----
-  // The client wants every photo to appear as its OWN observation block —
-  // same table info (category / description / GPS / remarks), one photo each
-  // — so a report with 3 included photos renders as 3 blocks, not one block
-  // holding several photos. Expand the report list here: repeat each report
-  // once per included photo. The per-photo claim guard in the loop
-  // (usedPhotoKeys) then hands block #1 the report's 1st photo, block #2 the
-  // 2nd, and so on, because each duplicate re-reads the report's remaining
-  // UNCLAIMED photos. Repeat-POINT de-duplication (same coordinate/point_key
-  // as an earlier report) is applied HERE so a duplicate point is dropped
-  // once and its photo copies are never created. Reports with 0 or 1 photo
-  // expand to a single block, exactly as before. Duplicates are tracked in
-  // `splitDupRows` so the loop's own repeat-skip lets them through.
+  // ---- ONE BLOCK PER REPORT (multi-photo shown together) ----
+  // A survey point is ONE observation block (one table). When the point has
+  // several photos they are shown TOGETHER as a 2-per-row grid under that one
+  // table (built in the multi-photo grid injection below) — NOT split into a
+  // separate block per photo with the table repeated. Splitting a point into
+  // one-report-per-photo is a manual choice via the "Split photos" button, not
+  // something the export forces. Repeat-point de-duplication still happens in
+  // the main loop's repeat-skip below. `splitDupRows` stays empty (kept so the
+  // loop's isSplitDup check compiles as a no-op).
   const splitDupRows = new WeakSet<object>();
-  const expandedReports: Row[] = [];
-  {
-    const seenCoordExp = new Set<string>();
-    const seenPkExp = new Set<string>();
-    for (const r of reports) {
-      const latE = pickLat(r);
-      const lngE = pickLng(r);
-      const coordKeyE =
-        latE !== null && lngE !== null ? `${latE.toFixed(6)},${lngE.toFixed(6)}` : "";
-      const pkE = String(r.point_key || "").trim();
-      if ((coordKeyE && seenCoordExp.has(coordKeyE)) || (pkE && seenPkExp.has(pkE))) {
-        continue; // duplicate point — drop it (and all its photo copies)
-      }
-      if (coordKeyE) seenCoordExp.add(coordKeyE);
-      if (pkE) seenPkExp.add(pkE);
-      const ridE = String(r.id || "").trim();
-      const nPhotos = (photosByReportId.get(ridE) || []).length;
-      const blocks = Math.max(1, nPhotos);
-      for (let pi = 0; pi < blocks; pi += 1) {
-        if (pi === 0) {
-          expandedReports.push(r);
-        } else {
-          const dup: Row = { ...r };
-          splitDupRows.add(dup);
-          expandedReports.push(dup);
-        }
-      }
-    }
-  }
-  console.log("[DOCX PHOTO SPLIT EXPANSION]", {
-    originalReports: reports.length,
-    expandedBlocks: expandedReports.length,
+  const expandedReports: Row[] = reports;
+  console.log("[DOCX OBSERVATION BLOCKS]", {
+    reports: reports.length,
+    mode: "one block per report (multi-photo grid)",
   });
 
   // Spec-mandated point_key fallback. When a report has no row in
@@ -3567,13 +3535,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const phaseStartedAt = Date.now();
   let phaseDeadlineHit = false;
 
-  // Track which photo keys are side-by-side so the post-render pass can
-  // replace the single-image drawing with a 2-column borderless table.
-  const sideBySideKeys = new Set<string>();
-  // Right-image buffers for each side-by-side key. The LEFT image is stored
-  // in imageMap under the normal photoKey; the RIGHT image is stored here
-  // and injected into the DOCX zip during the post-render table pass.
-  const sideBySideRightBuffers = new Map<string, Buffer>();
+  // Track which photo keys hold MULTIPLE photos so the post-render pass can
+  // replace the single-image drawing with a 2-per-row borderless photo grid.
+  const multiPhotoKeys = new Set<string>();
+  // The EXTRA photos (index 1..N-1) for each multi-photo key. Photo 0 is stored
+  // in imageMap under the normal photoKey (the template renders it); the extras
+  // are stored here and injected into the DOCX zip during the grid pass.
+  const multiPhotoExtraBuffers = new Map<string, Buffer[]>();
 
   const observations: ObservationData[] = [];
   // Export-time point de-duplication (DB is left untouched). A report is a
@@ -3676,9 +3644,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           ? "point_key"
           : "none";
       const firstPhotoRow = reportPhotos[0] || null;
-      // Claim the chosen photo so no later report can reuse it.
-      if (firstPhotoRow) {
-        const idnt = photoIdentity(firstPhotoRow);
+      // Claim ALL of this report's photos so none can be reused by a later
+      // block (the whole point's set of photos belongs to this one block).
+      for (const p of reportPhotos) {
+        const idnt = photoIdentity(p);
         if (idnt) usedPhotoKeys.add(idnt);
       }
       const firstPhotoUrl = normalizeS3Url(firstPhotoRow?.url) || null;
@@ -3734,12 +3703,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         photoMissingReason = "no report_photos rows for report_id";
       }
 
-      // ONE photo per block: each observation block renders exactly the one
-      // photo it claimed above (firstPhotoRow). A report's other photos are
-      // rendered by its OTHER split blocks (see the per-photo expansion
-      // "ONE REPORT BLOCK PER PHOTO"), so we no longer pair two photos
-      // side-by-side in a single block.
-      const selectedPhotos = firstPhotoRow ? [firstPhotoRow] : [];
+      // ALL of this point's photos render TOGETHER as a grid under its one
+      // table. Cap at 8 so a point with an unusual number of photos stays sane.
+      const selectedPhotos = reportPhotos.slice(0, 8);
+      void firstPhotoRow; // (kept above for logging/claim; grid uses selectedPhotos)
       let fetchedAny = false;
       let lastFetchFailureReason: string | null = null;
       const fetchedBuffers: Array<{ buffer: Buffer; contentType: string }> = [];
@@ -3771,59 +3738,35 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         else lastFetchFailureReason = s.reason;
       }
 
-      // Assemble the final photo buffer(s). 2 photos → store each
-      // individually (left in imageMap, right in sideBySideRightBuffers)
-      // for post-render 2-column table injection. 1 photo → single
-      // centered image. 0 → no photo.
-      if (fetchedBuffers.length >= 2) {
+      // Assemble the photo buffers. Photo 0 goes into imageMap (the template
+      // renders it in place); photos 1..N-1 are kept as extras and, together
+      // with photo 0, laid out as a 2-per-row grid by the post-render pass.
+      // 0 fetched → no photo (placeholder).
+      if (fetchedBuffers.length >= 1) {
         photoKey = `photo_${i}`;
-        const leftOptimized = await optimizeDocxImage(
-          fetchedBuffers[0].buffer,
-          "observation",
-          `${photoKey}_L`
+        const optimizedAll = await Promise.all(
+          fetchedBuffers.map((b, bi) =>
+            optimizeDocxImage(b.buffer, "observation", `${photoKey}_${bi}`)
+          )
         );
-        const rightOptimized = await optimizeDocxImage(
-          fetchedBuffers[1].buffer,
-          "observation",
-          `${photoKey}_R`
-        );
-        // LEFT image goes into imageMap — the template renders this one.
+        // Photo 0 → imageMap (template renders it; the grid pass replaces it
+        // when there are 2+ photos).
         imageMap.set(photoKey, {
-          buffer: leftOptimized,
+          buffer: optimizedAll[0],
           contentType: "image/jpeg",
         });
-        // RIGHT image is stored separately for the post-render table pass.
-        sideBySideKeys.add(photoKey);
-        sideBySideRightBuffers.set(photoKey, rightOptimized);
+        if (optimizedAll.length >= 2) {
+          multiPhotoKeys.add(photoKey);
+          multiPhotoExtraBuffers.set(photoKey, optimizedAll.slice(1));
+        }
         fetchedAny = true;
         photoFetchSuccess += 1;
-        console.log("[DOCX SIDE-BY-SIDE PHOTOS STORED]", {
+        console.log("[DOCX PHOTO BUFFERS STORED]", {
           index: i,
           reportId: rid,
           photoKey,
-          leftSize: leftOptimized.length,
-          rightSize: rightOptimized.length,
+          photoCount: optimizedAll.length,
           totalCandidates: reportPhotos.length,
-          selectedCount: selectedPhotos.length,
-        });
-      } else if (fetchedBuffers.length === 1) {
-        photoKey = `photo_${i}`;
-        const optimized = await optimizeDocxImage(
-          fetchedBuffers[0].buffer,
-          "observation",
-          photoKey
-        );
-        imageMap.set(photoKey, {
-          buffer: optimized,
-          contentType: "image/jpeg",
-        });
-        fetchedAny = true;
-        photoFetchSuccess += 1;
-        console.log("[DOCX photo buffer loaded]", {
-          index: i,
-          reportId: rid,
-          photoKey,
-          bufferSize: optimized.length,
         });
       }
       if (!fetchedAny) photoFetchFailed += 1;
@@ -4333,11 +4276,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         key.startsWith("obsPhoto_") ||
         key.startsWith("photo-")
       ) {
-        // Single-photo reports: 7.5" × 5.3" (OBSERVATION_PHOTO_SIZE).
-        // Multi-photo reports: 7.2" × 5.0" (MULTI_PHOTO_SIZE) so both
-        // photos fit on the same page when stacked. The second photo is
-        // injected by the post-render pass at the same MULTI_PHOTO_SIZE.
-        if (sideBySideKeys.has(key)) {
+        // Single-photo reports: full OBSERVATION_PHOTO_SIZE. Multi-photo
+        // reports render photo 0 at MULTI_PHOTO_SIZE, but the post-render grid
+        // pass replaces it with a 2-per-row grid of ALL the point's photos.
+        if (multiPhotoKeys.has(key)) {
           return MULTI_PHOTO_SIZE;
         }
         return OBSERVATION_PHOTO_SIZE;
@@ -6322,20 +6264,17 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         // [CLIENT DOCX LAYOUT REBUILD] above.
       });
 
-      // ---- SECOND-IMAGE PARAGRAPH INJECTION ----
-      // Reports with 2 photos: the template rendered ONE full-size
-      // (7.5" × 5.3") image. This pass injects the SECOND photo as a
-      // separate full-size paragraph immediately after the first,
-      // centered, with small spacing between them. NO 2-column table,
-      // NO size-down — both images render at exactly OBSERVATION_PHOTO_SIZE.
-      let secondImagesInjected = 0;
-      if (sideBySideKeys.size > 0) {
-        // 1. Inject second-image media files + relationships.
+      // ---- MULTI-PHOTO GRID INJECTION ----
+      // A point with 2+ photos: the template rendered photo 0 in place. Replace
+      // that single-photo paragraph with a borderless 2-per-row grid that holds
+      // ALL of the point's photos, under the point's one table. Cell size
+      // shrinks as the photo count grows so the grid stays compact.
+      let multiPhotoGridsInjected = 0;
+      if (multiPhotoKeys.size > 0) {
         const docRelsFile = renderedZip.file("word/_rels/document.xml.rels");
         let docRelsXml = docRelsFile ? docRelsFile.asText() : "";
-        const rightImageRids = new Map<string, string>();
 
-        // Ensure [Content_Types].xml has JPEG extension.
+        // Ensure [Content_Types].xml declares the jpeg extension.
         const ctFile2 = renderedZip.file("[Content_Types].xml");
         if (ctFile2) {
           let ctXml2 = ctFile2.asText();
@@ -6348,45 +6287,61 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
 
-        let sideIdx = 0;
-        for (const photoKey of sideBySideKeys) {
-          const rightBuf = sideBySideRightBuffers.get(photoKey);
-          if (!rightBuf) continue;
-          const mediaName = `word/media/side_right_${sideIdx}.jpeg`;
-          renderedZip.file(mediaName, rightBuf);
-          const rId = `rIdSideR${sideIdx}`;
-          rightImageRids.set(photoKey, rId);
-          if (docRelsXml && !docRelsXml.includes(`Id="${rId}"`)) {
-            docRelsXml = docRelsXml.replace(
-              "</Relationships>",
-              `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/side_right_${sideIdx}.jpeg"/></Relationships>`
-            );
+        // Upload every EXTRA photo (index 1..N-1) and remember its rId per key.
+        const extraRIdsByKey = new Map<string, string[]>();
+        let mediaIdx = 0;
+        for (const photoKey of Array.from(multiPhotoKeys)) {
+          const extras = multiPhotoExtraBuffers.get(photoKey) || [];
+          const rIds: string[] = [];
+          for (const buf of extras) {
+            const mediaName = `word/media/grid_${mediaIdx}.jpeg`;
+            renderedZip.file(mediaName, buf);
+            const rId = `rIdGrid${mediaIdx}`;
+            rIds.push(rId);
+            if (docRelsXml && !docRelsXml.includes(`Id="${rId}"`)) {
+              docRelsXml = docRelsXml.replace(
+                "</Relationships>",
+                `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/grid_${mediaIdx}.jpeg"/></Relationships>`
+              );
+            }
+            mediaIdx += 1;
           }
-          sideIdx += 1;
+          extraRIdsByKey.set(photoKey, rIds);
         }
         if (docRelsXml) {
           renderedZip.file("word/_rels/document.xml.rels", docRelsXml);
         }
 
-        // 2. Build the side-by-side 2-column borderless table that holds
-        //    BOTH images. Replaces the first photo paragraph entirely.
-        //    - Table width: 100% (5000 pct), zero indent
-        //    - 50/50 percent cells, zero margins, no borders
-        //    - Each cell holds one inline drawing at MULTI_PHOTO_SIZE
-        //      (3.85" × 2.75"), centered
-        //    - <w:keepLines/> + <w:keepNext/> on cell paragraphs so the
-        //      table doesn't split across pages and stays with the
-        //      observation table above it.
-        const buildSideBySideTable = (
-          leftRId: string,
-          rightRId: string,
-          docPrBase: number
-        ): string => {
-          const drawing = (rId: string, dpId: number, name: string) =>
+        // Build a borderless 2-per-row grid of ALL the point's photos. Cell
+        // size shrinks with the photo count so 3-4 photos + the table stay on
+        // one page; more than that flows to the next page (table not repeated).
+        const IN_EMU = 914400;
+        const gridCellSize = (n: number): { cx: number; cy: number } => {
+          if (n <= 2) return { cx: Math.round(7.2 * IN_EMU), cy: Math.round(5.0 * IN_EMU) };
+          if (n <= 4) return { cx: Math.round(5.2 * IN_EMU), cy: Math.round(3.6 * IN_EMU) };
+          return { cx: Math.round(4.0 * IN_EMU), cy: Math.round(2.75 * IN_EMU) };
+        };
+        const NO_BORDER =
+          `<w:tcBorders>` +
+            `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+            `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+          `</w:tcBorders>`;
+        const ZERO_TC_MAR =
+          `<w:tcMar>` +
+            `<w:top w:w="0" w:type="dxa"/>` +
+            `<w:left w:w="60" w:type="dxa"/>` +
+            `<w:bottom w:w="0" w:type="dxa"/>` +
+            `<w:right w:w="60" w:type="dxa"/>` +
+          `</w:tcMar>`;
+        const buildPhotoGrid = (rIds: string[], docPrBase: number): string => {
+          const { cx, cy } = gridCellSize(rIds.length);
+          const drawing = (rId: string, dpId: number) =>
             `<w:drawing>` +
               `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
-                `<wp:extent cx="${MULTI_PHOTO_EMU_WIDTH}" cy="${MULTI_PHOTO_EMU_HEIGHT}"/>` +
-                `<wp:docPr id="${dpId}" name="${name}"/>` +
+                `<wp:extent cx="${cx}" cy="${cy}"/>` +
+                `<wp:docPr id="${dpId}" name="Photo ${dpId}"/>` +
                 `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
                   `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
                     `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
@@ -6396,7 +6351,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                         `<a:stretch><a:fillRect/></a:stretch>` +
                       `</pic:blipFill>` +
                       `<pic:spPr>` +
-                        `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${MULTI_PHOTO_EMU_WIDTH}" cy="${MULTI_PHOTO_EMU_HEIGHT}"/></a:xfrm>` +
+                        `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
                         `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
                       `</pic:spPr>` +
                     `</pic:pic>` +
@@ -6404,20 +6359,21 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                 `</a:graphic>` +
               `</wp:inline>` +
             `</w:drawing>`;
-          const NO_BORDER =
-            `<w:tcBorders>` +
-              `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-              `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-              `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-              `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-            `</w:tcBorders>`;
-          const ZERO_TC_MAR =
-            `<w:tcMar>` +
-              `<w:top w:w="0" w:type="dxa"/>` +
-              `<w:left w:w="0" w:type="dxa"/>` +
-              `<w:bottom w:w="0" w:type="dxa"/>` +
-              `<w:right w:w="0" w:type="dxa"/>` +
-            `</w:tcMar>`;
+          const cell = (rId: string, dpId: number) =>
+            `<w:tc>` +
+              `<w:tcPr><w:tcW w:w="2500" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+              `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="40" w:after="40"/><w:keepNext/><w:keepLines/></w:pPr>` +
+                (rId ? `<w:r>${drawing(rId, dpId)}</w:r>` : "") +
+              `</w:p>` +
+            `</w:tc>`;
+          let rowsXml = "";
+          for (let r = 0; r < rIds.length; r += 2) {
+            rowsXml +=
+              `<w:tr><w:trPr><w:cantSplit/></w:trPr>` +
+              cell(rIds[r], docPrBase + r) +
+              cell(rIds[r + 1] || "", docPrBase + r + 1) +
+              `</w:tr>`;
+          }
           return (
             `<w:tbl>` +
               `<w:tblPr>` +
@@ -6442,39 +6398,19 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                 `<w:gridCol w:w="4680"/>` +
                 `<w:gridCol w:w="4680"/>` +
               `</w:tblGrid>` +
-              `<w:tr>` +
-                `<w:trPr><w:cantSplit/></w:trPr>` +
-                `<w:tc>` +
-                  `<w:tcPr><w:tcW w:w="2500" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
-                  `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="0"/><w:keepNext/><w:keepLines/></w:pPr>` +
-                    `<w:r>${drawing(leftRId, docPrBase, "Left Photo")}</w:r>` +
-                  `</w:p>` +
-                `</w:tc>` +
-                `<w:tc>` +
-                  `<w:tcPr><w:tcW w:w="2500" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
-                  `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="0"/><w:keepNext/><w:keepLines/></w:pPr>` +
-                    `<w:r>${drawing(rightRId, docPrBase + 1, "Right Photo")}</w:r>` +
-                  `</w:p>` +
-                `</w:tc>` +
-              `</w:tr>` +
+              rowsXml +
             `</w:tbl>`
           );
         };
 
-        // 3. Walk through observations in order. For each side-by-side
-        //    observation, REPLACE its single first-photo paragraph with
-        //    the 2-column borderless table containing BOTH images.
+        // Walk observation photo paragraphs in order; for each multi-photo
+        // observation, REPLACE its single-photo paragraph with the full grid.
         const obsWithPhotos = observations.filter((o) => {
           const pkey = String((o as { photo?: unknown }).photo || "");
           return pkey !== "" && imageMap.has(pkey);
         });
         const photoParaRe = /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:drawing\b[\s\S]*?<\/w:drawing>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
-        type Hit = {
-          paraStart: number;
-          paraEnd: number;
-          leftRId: string;
-          rightRId: string;
-        };
+        type Hit = { paraStart: number; paraEnd: number; rIds: string[] };
         const replaceAt: Hit[] = [];
         let docPrCounter = 8000;
         let photoParaIdx = 0;
@@ -6488,51 +6424,30 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           photoParaIdx += 1;
           if (!obs) continue;
           const photoKey = String((obs as { photo?: unknown }).photo || "");
-          if (!sideBySideKeys.has(photoKey)) continue;
-          const rightRId = rightImageRids.get(photoKey);
-          if (!rightRId) continue;
-          // Extract the LEFT image's r:embed from the first photo paragraph.
+          if (!multiPhotoKeys.has(photoKey)) continue;
+          // Photo 0's r:embed is already in the rendered paragraph.
           const embedMatch = pm[0].match(/r:embed="([^"]+)"/);
           if (!embedMatch) continue;
           const leftRId = embedMatch[1];
-          replaceAt.push({
-            paraStart: pm.index,
-            paraEnd: pm.index + pm[0].length,
-            leftRId,
-            rightRId,
-          });
+          const rIds = [leftRId, ...(extraRIdsByKey.get(photoKey) || [])];
+          replaceAt.push({ paraStart: pm.index, paraEnd: pm.index + pm[0].length, rIds });
         }
 
         // Apply replacements from END to START so positions stay valid.
-        // KEEP the SPACER paragraph above the photo paragraph — it
-        // provides necessary breathing room between the observation
-        // table and the side-by-side image table. Stripping it caused
-        // the images to overlap / sit flush against the obs table.
         for (let i = replaceAt.length - 1; i >= 0; i -= 1) {
-          const { paraStart, paraEnd, leftRId, rightRId } = replaceAt[i];
-          const tableXml = buildSideBySideTable(leftRId, rightRId, docPrCounter);
-          docPrCounter += 2;
+          const { paraStart, paraEnd, rIds } = replaceAt[i];
+          const tableXml = buildPhotoGrid(rIds, docPrCounter);
+          docPrCounter += rIds.length + 2;
           xml = xml.slice(0, paraStart) + tableXml + xml.slice(paraEnd);
-          secondImagesInjected += 1;
+          multiPhotoGridsInjected += 1;
         }
 
-        console.log("[DOCX SIDE-BY-SIDE TABLE INJECTION]", {
-          sideBySideKeys: sideBySideKeys.size,
-          rightImagesAdded: sideIdx,
+        console.log("[DOCX MULTI-PHOTO GRID INJECTION]", {
+          multiPhotoKeys: multiPhotoKeys.size,
+          extraImagesAdded: mediaIdx,
           observationsWithPhotos: obsWithPhotos.length,
           photoParagraphsScanned: photoParaIdx,
-          tablesInjected: secondImagesInjected,
-          spacerKeptForBreathingRoom: true,
-        });
-        console.log("[DOCX TWO IMAGE LARGE FIX]", {
-          tableWidth: "100%",
-          columns: "50/50",
-          imageSize: "7.2in x 5.0in each",
-          matchesUserManualSize: true,
-          noBlankParagraphs: true,
-          noSideEmptySpace: true,
-          noBottomEmptySpace: true,
-          oldTwoImageRendererRemoved: true,
+          gridsInjected: multiPhotoGridsInjected,
         });
       }
 
