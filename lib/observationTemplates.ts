@@ -77,11 +77,25 @@ export function composeObservation(rawObservation: string, category: string): st
   const raw = String(rawObservation || "").trim();
   const template = DESCRIPTION_TEMPLATES[normKey(category)]?.[0] || "";
   if (!template) return raw;
+  if (!raw) return template; // blank -> the category's template sentence
   const core = template.trim().toLowerCase().slice(0, 20);
-  if (raw && core && raw.toLowerCase().startsWith(core)) return raw; // already full sentence
-  if (!raw) return template; // no metre -> sentence only
-  // Strip a leading label the template already implies (Height/Width/…) so we
-  // get "...height is 6m", not "...height is Height 6m".
+  if (core && raw.toLowerCase().startsWith(core)) return raw; // already the template sentence
+  // If the observation is ALREADY a descriptive sentence (has real words beyond
+  // a bare measurement) — e.g. an imported old report's "Side signboard, Height
+  // is 6.9m, Normal pass." — keep it as-is. Prepending the template here is what
+  // produced the doubled "Signboard crossing... Height is <full sentence>" text.
+  const leftoverWords = raw
+    .toLowerCase()
+    .replace(/[0-9.,;:()/×x*+-]+/g, " ")
+    .replace(
+      /\b(m|cm|mm|km|ft|mtr|mtrs|meter|metre|meters|metres|height|width|length|clearance|span|is|are|of|the|a|approx|approximately|about|no|nos|each)\b/g,
+      " "
+    )
+    .replace(/[^a-z]+/g, " ")
+    .trim();
+  if (leftoverWords.length > 0) return raw; // real sentence -> leave it alone
+  // Otherwise it's a bare measurement value ("6.9m", "Height 6m") -> fill the
+  // template slot. Strip a leading label the template already implies.
   const val = raw.replace(/^\s*(height|width|length|clearance|span)\s*(is\s*)?/i, "").trim();
   return val ? template + val : template;
 }
