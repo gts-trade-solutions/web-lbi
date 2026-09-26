@@ -784,7 +784,12 @@ export default function PhotoAnnotator({
     const val = d.value.trim();
     if (d.editIdx != null) {
       if (!val) return strokes.filter((_, i) => i !== d.editIdx);
-      return strokes.map((s, i) => (i === d.editIdx ? { ...s, text: val } : s));
+      // Apply the picker's current colour too — it was seeded from this text's
+      // colour when the edit started, so re-typing keeps the colour and picking
+      // a new colour recolours the text.
+      return strokes.map((s, i) =>
+        i === d.editIdx ? { ...s, text: val, color: drawColor } : s
+      );
     }
     return val
       ? [
@@ -930,13 +935,23 @@ export default function PhotoAnnotator({
           ] as const).map(([c, label]) => (
             <button
               key={c}
+              // Keep the text-edit input focused when a swatch is clicked, so it
+              // isn't committed/closed on blur before the colour is applied.
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => pickColor(c)}
               title={label}
               aria-label={label}
               style={{ ...S.swatch, background: c, outline: drawColor.toLowerCase() === c.toLowerCase() ? "2px solid #0f172a" : "2px solid transparent" }}
             />
           ))}
-          <input type="color" value={drawColor} onChange={(e) => pickColor(e.target.value)} style={S.colorInput} title="Custom colour" />
+          <input
+            type="color"
+            value={drawColor}
+            onMouseDown={(e) => e.preventDefault()}
+            onChange={(e) => pickColor(e.target.value)}
+            style={S.colorInput}
+            title="Custom colour"
+          />
           <select value={drawWidth} onChange={(e) => setDrawWidth(Number(e.target.value))} style={S.widthSelect} title="Line width">
             <option value={3}>Thin</option>
             <option value={6}>Medium</option>
