@@ -12,6 +12,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { replacePhotoImage } from "../lib/replacePhoto";
 import { loadCanvasSafeImage } from "../lib/authedImage";
+import { confirmDialog } from "./ConfirmDialog";
 
 type Stroke = {
   tool:
@@ -972,10 +973,22 @@ export default function PhotoAnnotator({
           <button style={S.ghost} onClick={redo} disabled={!redoStack.length}>↷ Redo</button>
           <button
             style={S.ghost}
-            onClick={() => { setStrokes([]); setRedoStack([]); setSelectedIdx(null); }}
+            onClick={async () => {
+              if (!total) return;
+              const ok = await confirmDialog(
+                "Clear the whole drawing? This removes every arrow and label on this photo.",
+                { confirmText: "Clear all", cancelText: "Keep it", danger: true }
+              );
+              if (!ok) return;
+              setStrokes([]);
+              setRedoStack([]);
+              setSelectedIdx(null);
+              setTextDraft(null);
+            }}
             disabled={!total}
+            title="Remove ALL arrows and labels from this photo"
           >
-            Clear
+            Clear all
           </button>
           <button
             style={{ ...S.ghost, borderColor: "#F79009", color: "#B54708" }}
