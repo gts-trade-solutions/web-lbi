@@ -397,7 +397,7 @@ export default function PhotoAnnotator({
     let cancelled = false;
     let revoke = () => {};
 
-    const loadBase = (url: string) => {
+    const loadBase = (url: string, parsedStrokes: Stroke[] | null) => {
       const img = new Image();
       img.onload = () => {
         if (cancelled) return;
@@ -414,7 +414,12 @@ export default function PhotoAnnotator({
           canvas.style.width = `${Math.round(w * scale)}px`;
           canvas.style.height = `${Math.round(h * scale)}px`;
         }
+        // Base image is ready. Draw it, THEN apply the saved strokes — so the
+        // strokes re-render happens with the image already loaded. Setting the
+        // strokes BEFORE the image finished loading raced with this onload and
+        // the base-only redraw here wiped the drawing (it "disappeared").
         redrawCanvas();
+        if (parsedStrokes && parsedStrokes.length) setStrokes(parsedStrokes);
       };
       img.onerror = () => {
         if (!cancelled) baseImgRef.current = null;
@@ -432,6 +437,7 @@ export default function PhotoAnnotator({
 
     (async () => {
       let baseUrl = photoUrl;
+      let parsedStrokes: Stroke[] | null = null;
       try {
         const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}/photos`, {
           headers: annoAuthHeaders(),
@@ -449,7 +455,7 @@ export default function PhotoAnnotator({
           if (rawAnno && typeof rawAnno === "string") {
             try {
               const parsed = JSON.parse(rawAnno);
-              if (Array.isArray(parsed) && !cancelled) setStrokes(parsed);
+              if (Array.isArray(parsed)) parsedStrokes = parsed;
             } catch {
               /* corrupt anno — ignore, start clean */
             }
@@ -460,7 +466,7 @@ export default function PhotoAnnotator({
       }
       if (cancelled) return;
       baseUrlRef.current = baseUrl;
-      loadBase(baseUrl);
+      loadBase(baseUrl, parsedStrokes);
     })();
 
     return () => {
