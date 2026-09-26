@@ -532,6 +532,21 @@ export default function PhotoAnnotator({
     setSelectedIdx(null);
   };
 
+  // Pick a colour: set it for new shapes AND recolour the shape currently being
+  // edited (a text being retyped) or selected (Move tool), so "change the
+  // colour of this arrow / text" works, not just the next one you draw.
+  const pickColor = (c: string) => {
+    setDrawColor(c);
+    const editIdx = textDraft?.editIdx ?? null;
+    const targetIdx =
+      editIdx != null ? editIdx : drawTool === "move" ? selectedIdx : null;
+    if (targetIdx != null) {
+      setStrokes((prev) =>
+        prev.map((s, i) => (i === targetIdx ? { ...s, color: c } : s))
+      );
+    }
+  };
+
   const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     if (textDraft) {
@@ -585,6 +600,9 @@ export default function PhotoAnnotator({
       if (hitStroke && hitStroke.tool === "text") {
         const nf = hitStroke.fontSize || 32;
         setSelectedIdx(hitIdx);
+        // Reflect the text's current colour in the picker so it shows the right
+        // colour while editing, and changing it recolours this text.
+        if (hitStroke.color) setDrawColor(hitStroke.color);
         setTextDraft({
           dispX: e.clientX - wrapRect.left,
           dispY: e.clientY - wrapRect.top,
@@ -912,13 +930,13 @@ export default function PhotoAnnotator({
           ] as const).map(([c, label]) => (
             <button
               key={c}
-              onClick={() => setDrawColor(c)}
+              onClick={() => pickColor(c)}
               title={label}
               aria-label={label}
               style={{ ...S.swatch, background: c, outline: drawColor.toLowerCase() === c.toLowerCase() ? "2px solid #0f172a" : "2px solid transparent" }}
             />
           ))}
-          <input type="color" value={drawColor} onChange={(e) => setDrawColor(e.target.value)} style={S.colorInput} title="Custom colour" />
+          <input type="color" value={drawColor} onChange={(e) => pickColor(e.target.value)} style={S.colorInput} title="Custom colour" />
           <select value={drawWidth} onChange={(e) => setDrawWidth(Number(e.target.value))} style={S.widthSelect} title="Line width">
             <option value={3}>Thin</option>
             <option value={6}>Medium</option>
