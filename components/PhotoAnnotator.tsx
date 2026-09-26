@@ -952,7 +952,15 @@ export default function PhotoAnnotator({
             style={S.colorInput}
             title="Custom colour"
           />
-          <select value={drawWidth} onChange={(e) => setDrawWidth(Number(e.target.value))} style={S.widthSelect} title="Line width">
+          <span style={{ fontSize: 11, fontWeight: 800, color: "#64748b", padding: "0 2px", whiteSpace: "nowrap" }}>
+            Symbols:
+          </span>
+          <select
+            value={drawWidth}
+            onChange={(e) => setDrawWidth(Number(e.target.value))}
+            style={S.widthSelect}
+            title="Symbol size — thickness of arrows / shapes / lines (does not affect text)"
+          >
             <option value={3}>Thin</option>
             <option value={6}>Medium</option>
             <option value={10}>Thick</option>
@@ -961,7 +969,7 @@ export default function PhotoAnnotator({
             value={drawDash}
             onChange={(e) => setDrawDash(e.target.value as "solid" | "dashed" | "dotted")}
             style={S.widthSelect}
-            title="Line style"
+            title="Symbol line style — for arrows / shapes / lines (not text)"
           >
             <option value="solid">Solid</option>
             <option value="dashed">Dashed</option>
