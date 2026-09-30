@@ -813,31 +813,15 @@ export function parsePptxReport(buffer: Buffer): DocxReport {
 }
 
 // Pick the right parser from the file name / bytes.
-// Old reports embed, alongside each observation's real camera PHOTO (a JPEG), a
-// satellite MAP with the route drawn on it in coloured lines/arrows (a PNG),
-// plus the odd logo/sketch. On import the client wants "just the photos" — the
-// maps/drawings/lines are not survey photos. Camera photos in these reports are
-// always JPEG, while maps/drawings/logos are PNG (or emf/wmf). So: if the report
-// contains ANY real JPEG photos, treat JPEG as the photo format and drop every
-// non-JPEG image from the observations. If the report has NO JPEGs at all (a
-// report that saved its photos as PNG), keep them so we never drop every image.
-// Front-matter images (route map, vehicle drawings) are collected separately
-// (frontImages) and are not affected by this.
-const REAL_PHOTO_RX = /\.jpe?g$/i;
-
+// Import EVERY image on each observation, including PNGs. An earlier version
+// dropped non-JPEGs to skip satellite route-maps, but those PNGs are ALSO the
+// drawn survey photos (a road photo with the height arrow + "H 6.5m" baked in),
+// so skipping them lost exactly the drawings the client needs. We keep them all
+// (de-duped); a stray route-map can be removed per-photo in the app.
 export function parseSurveyReport(buffer: Buffer, fileName: string): DocxReport {
   const report = /\.pptx$/i.test(fileName)
     ? parsePptxReport(buffer)
     : parseDocxReport(buffer);
-  const reportHasJpeg = report.points.some((p) =>
-    p.photoNames.some((n) => REAL_PHOTO_RX.test(n))
-  );
-  for (const p of report.points) {
-    let names = report.points.length && reportHasJpeg
-      ? p.photoNames.filter((n) => REAL_PHOTO_RX.test(n))
-      : p.photoNames;
-    names = Array.from(new Set(names)); // de-dup
-    p.photoNames = names;
-  }
+  for (const p of report.points) p.photoNames = Array.from(new Set(p.photoNames));
   return report;
 }
