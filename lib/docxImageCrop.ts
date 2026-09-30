@@ -133,10 +133,21 @@ export async function applyCrop(bytes: Buffer, crop: Crop): Promise<Buffer> {
     // A crop that removes everything is a malformed file, not a request.
     if (w < 1 || h < 1) return bytes;
 
-    return await sharp(upright.data)
-      .extract({ left, top, width: w, height: h })
-      .toFormat(upright.info.format as keyof sharp.FormatEnum)
-      .toBuffer();
+    // Re-encode at HIGH quality — a crop forces a re-encode, and sharp's JPEG
+    // default (q80, 4:2:0 chroma subsampling) visibly blurs thin arrows/lines
+    // and small text drawn on the photo (e.g. "H 9m"). Keep drawings crisp.
+    const out = sharp(upright.data).extract({ left, top, width: w, height: h });
+    const fmt = String(upright.info.format || "").toLowerCase();
+    if (fmt === "jpeg" || fmt === "jpg") {
+      return await out.jpeg({ quality: 95, chromaSubsampling: "4:4:4", mozjpeg: true }).toBuffer();
+    }
+    if (fmt === "png") {
+      return await out.png().toBuffer(); // lossless
+    }
+    if (fmt === "webp") {
+      return await out.webp({ quality: 95 }).toBuffer();
+    }
+    return await out.toFormat(upright.info.format as keyof sharp.FormatEnum).toBuffer();
   } catch (err) {
     console.warn("[import] could not apply picture crop, keeping original:", (err as Error).message);
     return bytes;

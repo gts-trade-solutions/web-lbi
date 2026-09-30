@@ -761,7 +761,7 @@ function renderRouteLocationsStepperPng(
 // Observation-photo target, adapted PER EXPORT by scale in generateReenaDocx.
 // Big reports use smaller photos so a several-thousand-photo file stays
 // openable in Word and the server's peak memory stays bounded.
-let OBS_PHOTO_TARGET = { width: 1120, height: 720, quality: 72 };
+let OBS_PHOTO_TARGET = { width: 1120, height: 720, quality: 82 };
 
 async function optimizeDocxImage(
   input: Buffer,
@@ -806,6 +806,10 @@ async function optimizeDocxImage(
         })
         .jpeg({
           quality: OBS_PHOTO_TARGET.quality,
+          // 4:4:4 keeps COLOURED drawings crisp — arrows/lines and small text
+          // (e.g. a yellow "H 9m") drawn on the photo. The default 4:2:0
+          // subsamples colour and makes those edges blur/bleed.
+          chromaSubsampling: "4:4:4",
           mozjpeg: true,
         })
         .toBuffer();
@@ -3521,10 +3525,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const approxPhotos = expandedReports.length * 2;
   OBS_PHOTO_TARGET =
     approxPhotos > 6000
-      ? { width: 820, height: 540, quality: 60 } // huge (~5000+ pts): ~45KB/photo
+      ? { width: 900, height: 600, quality: 70 } // huge reports: keep files openable
       : approxPhotos > 2500
-        ? { width: 1000, height: 640, quality: 66 }
-        : { width: 1120, height: 720, quality: 72 };
+        ? { width: 1000, height: 640, quality: 76 }
+        : { width: 1120, height: 720, quality: 82 }; // normal reports: crisp drawings
   console.log("[DOCX PHOTO TARGET]", { approxPhotos, target: OBS_PHOTO_TARGET });
 
   // Safety cap on the photo-fetch phase, scaled by report count (700ms/report),
