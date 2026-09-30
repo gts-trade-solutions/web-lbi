@@ -2943,10 +2943,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       // Pull image_key + point_key when those columns exist so the
       // diagnostic logs can show the master-file linkage. include_in_export
       // is the user's per-photo Word selection (photo picker checkboxes).
-      const sqlWithInclude = `SELECT id, report_id, url, file_name, image_key, point_key, path, created_at, include_in_export
+      const sqlWithInclude = `SELECT id, report_id, url, file_name, image_key, point_key, path, created_at, include_in_export, sort_order
          FROM report_photos
          WHERE report_id IN (${placeholders})
-         ORDER BY created_at ASC`;
+         ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC`;
       const sql = `SELECT id, report_id, url, file_name, image_key, point_key, path, created_at
          FROM report_photos
          WHERE report_id IN (${placeholders})

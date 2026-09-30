@@ -94,9 +94,38 @@ async function ensureAnnoColumns() {
       await pool.query("ALTER TABLE report_photos ADD COLUMN original_url VARCHAR(2048) NULL");
       console.log("[api/reports/:id/photos] added original_url column");
     }
+    // Manual photo ordering within a report (drag/move in the photo picker).
+    // NULL = fall back to created_at order. Added lazily.
+    if (!cols.has("sort_order")) {
+      await pool.query("ALTER TABLE report_photos ADD COLUMN sort_order INT NULL");
+      console.log("[api/reports/:id/photos] added sort_order column");
+    }
   } catch (err) {
     console.error("[api/reports/:id/photos] ensure anno columns failed:", err);
   }
+}
+
+// Order photos within a report: sort_order first (when set), then created_at.
+const PHOTO_ORDER_BY = "ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC";
+
+// Reorder a report's photos. body.order = [photoId, ...] in the desired order;
+// each photo's sort_order is set to its index so the new order sticks in the
+// app, the reports list, and the Word export.
+async function reorderPhotos(reportId: string, body: Record<string, unknown>) {
+  const order = Array.isArray(body?.order)
+    ? (body.order as unknown[]).map((x) => String(x || "").trim()).filter(Boolean)
+    : [];
+  if (!order.length) return Response.json({ error: "order[] is required" }, { status: 400 });
+  await ensureAnnoColumns(); // makes sure sort_order exists
+  let updated = 0;
+  for (let i = 0; i < order.length; i += 1) {
+    const [res] = await pool.query(
+      "UPDATE report_photos SET sort_order = ? WHERE id = ? AND report_id = ?",
+      [i, order[i], reportId]
+    );
+    updated += Number((res as { affectedRows?: number })?.affectedRows || 0);
+  }
+  return Response.json({ ok: true, reordered: updated });
 }
 
 export async function GET(request: Request, context: Ctx) {
@@ -124,7 +153,7 @@ export async function GET(request: Request, context: Ctx) {
     await ensureIncludeInExportColumn();
     await ensureAnnoColumns();
     const [rows] = await pool.query(
-      "SELECT * FROM report_photos WHERE report_id = ? ORDER BY created_at ASC",
+      `SELECT * FROM report_photos WHERE report_id = ? ${PHOTO_ORDER_BY}`,
       [reportId]
     );
     return Response.json({ photos: await signRowUrls("report_photos", Array.isArray(rows) ? rows : []) });
@@ -320,6 +349,7 @@ export async function PATCH(request: Request, context: Ctx) {
     if (!reportId) return Response.json({ error: "Report id is required" }, { status: 400 });
 
     const body = await request.json().catch(() => ({} as any));
+    if (Array.isArray(body?.order)) return await reorderPhotos(reportId, body);
     if (body?.restoreOriginal) return await restoreOriginalPhoto(reportId, body);
     if (typeof body?.url === "string") return await replacePhotoImage(reportId, body);
 

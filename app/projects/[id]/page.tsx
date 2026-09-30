@@ -4154,6 +4154,7 @@ type ReportPhotoRow = {
   // Untouched original image kept when a photo is drawn on / cropped.
   original_url?: string | null;
   anno_base_url?: string | null;
+  sort_order?: number | null;
 };
 
 /** ✅ Modal to edit an existing report's core fields */
@@ -4675,6 +4676,32 @@ function PhotoUploadModal({
     }
   };
 
+  // Move a photo earlier/later in the report. Reorders the visible (non-video)
+  // photos and saves the new order, so it sticks in the app and the Word export.
+  const [reordering, setReordering] = useState(false);
+  const movePhoto = async (idx: number, dir: -1 | 1) => {
+    if (reordering) return;
+    const visible = existing.filter((x) => !isVideoUrl(x.url));
+    const j = idx + dir;
+    if (j < 0 || j >= visible.length) return;
+    const newVisible = visible.slice();
+    [newVisible[idx], newVisible[j]] = [newVisible[j], newVisible[idx]];
+    const videos = existing.filter((x) => isVideoUrl(x.url));
+    setExisting([...newVisible, ...videos]); // optimistic
+    setReordering(true);
+    try {
+      await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}/photos`, {
+        method: "PATCH",
+        body: JSON.stringify({ order: newVisible.map((x) => x.id) }),
+      });
+    } catch (e: any) {
+      toast(e?.message || "Could not reorder photos");
+      await loadExisting(); // revert to server order
+    } finally {
+      setReordering(false);
+    }
+  };
+
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const addFiles = (list: FileList | null) => {
@@ -4787,7 +4814,7 @@ function PhotoUploadModal({
         <div style={styles.modalTitle}>Report Photos</div>
         <div style={styles.modalHint}>
           Tick the photos you want in the Word file — unticked photos stay saved but are left out of the
-          export. Each ticked photo becomes its own block in the report.
+          export. Use <b>◀ ▶</b> to change a photo&apos;s order (the number shows its position).
         </div>
 
         {!loadingExisting && downloadablePhotos().length > 0 && (
@@ -4864,6 +4891,29 @@ function PhotoUploadModal({
                     />
                   ) : (
                     <div style={{ width: "100%", height: 110, borderRadius: 8, background: "#F2F4F7" }} />
+                  )}
+                  {existing.filter((x) => !isVideoUrl(x.url)).length > 1 && (
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); movePhoto(idx, -1); }}
+                        disabled={idx === 0 || reordering}
+                        title="Move this photo earlier"
+                        style={{ border: "1px solid #D0D5DD", background: "#fff", borderRadius: 8, padding: "1px 10px", fontSize: 14, fontWeight: 900, cursor: idx === 0 ? "not-allowed" : "pointer", color: "#344054", opacity: idx === 0 ? 0.4 : 1 }}
+                      >
+                        ◀
+                      </button>
+                      <span style={{ fontSize: 11, fontWeight: 900, color: "#475467" }}>#{idx + 1}</span>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); movePhoto(idx, 1); }}
+                        disabled={reordering || idx === existing.filter((x) => !isVideoUrl(x.url)).length - 1}
+                        title="Move this photo later"
+                        style={{ border: "1px solid #D0D5DD", background: "#fff", borderRadius: 8, padding: "1px 10px", fontSize: 14, fontWeight: 900, cursor: "pointer", color: "#344054", opacity: idx === existing.filter((x) => !isVideoUrl(x.url)).length - 1 ? 0.4 : 1 }}
+                      >
+                        ▶
+                      </button>
+                    </div>
                   )}
                   <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                     <input

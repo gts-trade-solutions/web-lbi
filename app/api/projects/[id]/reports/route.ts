@@ -99,10 +99,10 @@ export async function GET(request: Request, context: Ctx) {
         let photoRows: Record<string, unknown>[] = [];
         try {
           // Newest schema: also carry the untouched original so the UI can show
-          // / restore the photo before a drawing.
+          // / restore the photo before a drawing, and honour manual photo order.
           const [pr] = await pool.query(
-            `SELECT id, report_id, url, file_name, include_in_export, original_url, anno_base_url FROM report_photos
-             WHERE report_id IN (${placeholders}) ORDER BY created_at ASC`,
+            `SELECT id, report_id, url, file_name, include_in_export, original_url, anno_base_url, sort_order FROM report_photos
+             WHERE report_id IN (${placeholders}) ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC`,
             ids
           );
           photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
