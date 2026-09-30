@@ -42,7 +42,6 @@ import {
   VerticalPositionAlign,
   VerticalPositionRelativeFrom,
 } from "docx";
-import { buildSegments, type GpxReport } from "./gpx-track";
 
 /** =========================
  * ✅ STYLE TOKENS (single source of truth)
@@ -406,80 +405,44 @@ function pointSortValue(raw: any, index: number) {
   return index + 1;
 }
 
-function toGpxXml(params: { name: string; creator?: string; points?: GPXPoint[]; segments?: GPXPoint[][] }) {
+function xmlEscape(s: unknown): string {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function toGpxXml(params: { name: string; creator?: string; points?: GPXPoint[]; labels?: string[] }) {
   const creator = params.creator || "Recorded in TSPL Web App";
   const name = (params.name || "Export").trim() || "Export";
 
-  // One <trkseg> per continuous line. A viewer draws a straight line between
-  // consecutive points *inside* a segment, so keeping each report's trace (and
-  // the chained observation route) in its own segment is what stops the long
-  // "spoke" lines that appeared when everything shared one segment.
-  // Fall back to a single segment from a flat `points` list for legacy callers.
-  const segments: GPXPoint[][] = (params.segments && params.segments.length
-    ? params.segments
-    : [params.points || []]
-  ).filter((s) => s && s.length);
+  // Waypoints only — one <wpt> pin per point, and NO <trk> lines. Joining the
+  // survey's observation points into a track drew a straight line from each
+  // point to the next in list order, which showed up as a web of "spoke" lines
+  // across the map. The surveys are discrete points, not a driven route, so we
+  // export the pins alone.
+  const pts = (params.points || []).filter((p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lon));
 
-  const flat: GPXPoint[] = segments.flat();
-  const now = new Date();
-
-  const startTime = flat[0]?.time || isoUtc(now);
-  const endTime = flat[flat.length - 1]?.time || startTime;
-
-  // Distance is summed *within* each line only, never across the gap between
-  // two separate lines — that gap is exactly the spoke we no longer draw.
-  let lengthKm = 0;
-  for (const seg of segments) {
-    for (let i = 1; i < seg.length; i++) {
-      lengthKm += haversineKm(seg[i - 1].lat, seg[i - 1].lon, seg[i].lat, seg[i].lon);
-    }
-  }
-
-  const durationMs = (() => {
-    try {
-      const a = Date.parse(startTime);
-      const b = Date.parse(endTime);
-      if (Number.isFinite(a) && Number.isFinite(b) && b >= a) return b - a;
-    } catch {}
-    return 0;
-  })();
-
-  const trksegXml = (segments.length ? segments : [[]])
-    .map((seg) => {
-      const trkptsXml = seg
-        .map((p) => {
-          const timeXml = p.time ? `\n        <time>${p.time}</time>` : "";
-          return `      <trkpt lat="${p.lat}" lon="${p.lon}">${timeXml}\n      </trkpt>`;
-        })
-        .join("\n");
-      return `    <trkseg>\n${trkptsXml}\n    </trkseg>`;
+  const wptsXml = pts
+    .map((p, i) => {
+      const label = params.labels?.[i]?.trim() || `Point ${i + 1}`;
+      const timeXml = p.time ? `<time>${p.time}</time>` : "";
+      return `  <wpt lat="${p.lat}" lon="${p.lon}"><name>${xmlEscape(label)}</name>${timeXml}</wpt>`;
     })
     .join("\n");
 
   return `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
 <gpx xmlns="http://www.topografix.com/GPX/1/1"
-     xmlns:geotracker="http://ilyabogdanovich.com/gpx/extensions/geotracker"
      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
      xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd"
      version="1.1"
      creator="${creator}">
   <metadata>
-    <name>${name}</name>
+    <name>${xmlEscape(name)}</name>
     <time>${isoUtc(new Date())}</time>
   </metadata>
-  <trk>
-    <name>${name}</name>
-    <src>${creator}</src>
-    <extensions>
-      <geotracker:meta>
-        <geotracker:length>${lengthKm.toFixed(2)}</geotracker:length>
-        <geotracker:duration>${durationMs}</geotracker:duration>
-        <geotracker:creationtime>${startTime}</geotracker:creationtime>
-        <geotracker:activity>0</geotracker:activity>
-      </geotracker:meta>
-    </extensions>
-${trksegXml}
-  </trk>
+${wptsXml}
 </gpx>`;
 }
 
@@ -4575,33 +4538,21 @@ export async function generateProjectGPXByReportIds(
   const { data: project } = await supabase.from("projects").select("*").eq("id", projectId).single();
   const baseName = opts.name || projectNameOf(project as any);
 
-  // Each report becomes its own group so buildSegments can keep every report's
-  // trace on its own line (and chain single-point observation reports into the
-  // route) instead of stitching the end of one report to the start of the next
-  // with a long straight spoke — the same rule the server GPX route uses.
-  const reportGroups: GpxReport[] = [];
-  let totalPoints = 0;
+  // Waypoints only — collect every report's points as pins. No track lines are
+  // drawn (see toGpxXml): the surveys are discrete observation points, and
+  // joining them made a web of straight "spoke" lines across the map.
+  const points: GPXPoint[] = [];
   for (const rid of reportIds) {
     const pts = await collectGpxPointsForReportId(supabase, rid);
-    totalPoints += pts.length;
-    reportGroups.push({
-      id: rid,
-      lat: null,
-      lon: null,
-      path: pts.map((p) => ({ lat: p.lat, lon: p.lon, time: p.time ?? null })),
-    });
+    points.push(...pts);
   }
 
-  if (!totalPoints) throw new Error("No valid NE coordinate points found to export GPX.");
-
-  const segments: GPXPoint[][] = buildSegments(reportGroups).map((seg) =>
-    seg.map((p) => ({ lat: p.lat, lon: p.lon, time: p.time ?? undefined }))
-  );
+  if (!points.length) throw new Error("No valid NE coordinate points found to export GPX.");
 
   const xml = toGpxXml({
     name: baseName,
     creator: "Recorded in TSPL Web App",
-    segments,
+    points,
   });
 
   const fileName = opts.fileName || `${String(baseName).slice(0, 80)}.gpx`;
