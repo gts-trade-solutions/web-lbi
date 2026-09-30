@@ -42,6 +42,7 @@ import {
   VerticalPositionAlign,
   VerticalPositionRelativeFrom,
 } from "docx";
+import { buildSegments, type GpxReport } from "./gpx-track";
 
 /** =========================
  * ✅ STYLE TOKENS (single source of truth)
@@ -405,19 +406,33 @@ function pointSortValue(raw: any, index: number) {
   return index + 1;
 }
 
-function toGpxXml(params: { name: string; creator?: string; points: GPXPoint[] }) {
+function toGpxXml(params: { name: string; creator?: string; points?: GPXPoint[]; segments?: GPXPoint[][] }) {
   const creator = params.creator || "Recorded in TSPL Web App";
   const name = (params.name || "Export").trim() || "Export";
 
-  const pts = params.points || [];
+  // One <trkseg> per continuous line. A viewer draws a straight line between
+  // consecutive points *inside* a segment, so keeping each report's trace (and
+  // the chained observation route) in its own segment is what stops the long
+  // "spoke" lines that appeared when everything shared one segment.
+  // Fall back to a single segment from a flat `points` list for legacy callers.
+  const segments: GPXPoint[][] = (params.segments && params.segments.length
+    ? params.segments
+    : [params.points || []]
+  ).filter((s) => s && s.length);
+
+  const flat: GPXPoint[] = segments.flat();
   const now = new Date();
 
-  const startTime = pts[0]?.time || isoUtc(now);
-  const endTime = pts[pts.length - 1]?.time || startTime;
+  const startTime = flat[0]?.time || isoUtc(now);
+  const endTime = flat[flat.length - 1]?.time || startTime;
 
+  // Distance is summed *within* each line only, never across the gap between
+  // two separate lines — that gap is exactly the spoke we no longer draw.
   let lengthKm = 0;
-  for (let i = 1; i < pts.length; i++) {
-    lengthKm += haversineKm(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
+  for (const seg of segments) {
+    for (let i = 1; i < seg.length; i++) {
+      lengthKm += haversineKm(seg[i - 1].lat, seg[i - 1].lon, seg[i].lat, seg[i].lon);
+    }
   }
 
   const durationMs = (() => {
@@ -429,10 +444,15 @@ function toGpxXml(params: { name: string; creator?: string; points: GPXPoint[] }
     return 0;
   })();
 
-  const trkptsXml = pts
-    .map((p) => {
-      const timeXml = p.time ? `\n        <time>${p.time}</time>` : "";
-      return `      <trkpt lat="${p.lat}" lon="${p.lon}">${timeXml}\n      </trkpt>`;
+  const trksegXml = (segments.length ? segments : [[]])
+    .map((seg) => {
+      const trkptsXml = seg
+        .map((p) => {
+          const timeXml = p.time ? `\n        <time>${p.time}</time>` : "";
+          return `      <trkpt lat="${p.lat}" lon="${p.lon}">${timeXml}\n      </trkpt>`;
+        })
+        .join("\n");
+      return `    <trkseg>\n${trkptsXml}\n    </trkseg>`;
     })
     .join("\n");
 
@@ -458,9 +478,7 @@ function toGpxXml(params: { name: string; creator?: string; points: GPXPoint[] }
         <geotracker:activity>0</geotracker:activity>
       </geotracker:meta>
     </extensions>
-    <trkseg>
-${trkptsXml}
-    </trkseg>
+${trksegXml}
   </trk>
 </gpx>`;
 }
@@ -4557,18 +4575,33 @@ export async function generateProjectGPXByReportIds(
   const { data: project } = await supabase.from("projects").select("*").eq("id", projectId).single();
   const baseName = opts.name || projectNameOf(project as any);
 
-  const points: GPXPoint[] = [];
+  // Each report becomes its own group so buildSegments can keep every report's
+  // trace on its own line (and chain single-point observation reports into the
+  // route) instead of stitching the end of one report to the start of the next
+  // with a long straight spoke — the same rule the server GPX route uses.
+  const reportGroups: GpxReport[] = [];
+  let totalPoints = 0;
   for (const rid of reportIds) {
     const pts = await collectGpxPointsForReportId(supabase, rid);
-    points.push(...pts);
+    totalPoints += pts.length;
+    reportGroups.push({
+      id: rid,
+      lat: null,
+      lon: null,
+      path: pts.map((p) => ({ lat: p.lat, lon: p.lon, time: p.time ?? null })),
+    });
   }
 
-  if (!points.length) throw new Error("No valid NE coordinate points found to export GPX.");
+  if (!totalPoints) throw new Error("No valid NE coordinate points found to export GPX.");
+
+  const segments: GPXPoint[][] = buildSegments(reportGroups).map((seg) =>
+    seg.map((p) => ({ lat: p.lat, lon: p.lon, time: p.time ?? undefined }))
+  );
 
   const xml = toGpxXml({
     name: baseName,
     creator: "Recorded in TSPL Web App",
-    points,
+    segments,
   });
 
   const fileName = opts.fileName || `${String(baseName).slice(0, 80)}.gpx`;
