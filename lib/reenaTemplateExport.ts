@@ -3525,10 +3525,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const approxPhotos = expandedReports.length * 2;
   OBS_PHOTO_TARGET =
     approxPhotos > 6000
-      ? { width: 900, height: 600, quality: 70 } // huge reports: keep files openable
+      ? { width: 1000, height: 660, quality: 78 } // huge reports: still keep files openable
       : approxPhotos > 2500
-        ? { width: 1000, height: 640, quality: 76 }
-        : { width: 1120, height: 720, quality: 82 }; // normal reports: crisp drawings
+        ? { width: 1100, height: 720, quality: 84 }
+        : { width: 1280, height: 860, quality: 88 }; // normal reports: max clarity for drawings
   console.log("[DOCX PHOTO TARGET]", { approxPhotos, target: OBS_PHOTO_TARGET });
 
   // Safety cap on the photo-fetch phase, scaled by report count (700ms/report),
