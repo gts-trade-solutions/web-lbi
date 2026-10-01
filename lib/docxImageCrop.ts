@@ -19,6 +19,7 @@
 // the file, which is why a compressed document already imported correctly.)
 
 import sharp from "sharp";
+import { applyOverlay, type OverlayShape } from "./docxOverlay";
 
 /** Fraction of each edge to remove, 0–1. */
 export interface Crop {
@@ -155,17 +156,23 @@ export async function applyCrop(bytes: Buffer, crop: Crop): Promise<Buffer> {
 }
 
 /**
- * The importer's photo reader, cropping as it goes. Shared by the Word and
- * PowerPoint parsers so all three read pictures the same way.
+ * The importer's photo reader, cropping as it goes, then painting back on any
+ * drawings that were made over the photo in Word (arrows, boxes, labels). The
+ * crop runs first because the shapes were positioned on the *displayed*
+ * (cropped) picture, so the overlay fractions line up with the cropped image.
+ * Shared by the Word and PowerPoint parsers so all read pictures the same way.
  */
 export function makePhotoGetter(
   read: (zipPath: string) => Buffer | null,
-  crops: Map<string, Crop>
+  crops: Map<string, Crop>,
+  overlays?: Map<string, OverlayShape[]>
 ): (zipPath: string) => Promise<Buffer | null> {
   return async (zipPath) => {
     const bytes = read(zipPath);
     if (!bytes) return null;
     const crop = crops.get(zipPath);
-    return crop ? applyCrop(bytes, crop) : bytes;
+    const cropped = crop ? await applyCrop(bytes, crop) : bytes;
+    const overlay = overlays?.get(zipPath);
+    return overlay && overlay.length ? applyOverlay(cropped, overlay) : cropped;
   };
 }

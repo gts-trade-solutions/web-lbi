@@ -11,6 +11,7 @@
 // "N12 59.312E80 10.350" (lat and lon run together) and DMS.
 import PizZip from "pizzip";
 import { collectCrops, makePhotoGetter, type Crop } from "./docxImageCrop";
+import { collectOverlays } from "./docxOverlay";
 
 export type DocxPoint = {
   point_key: string;
@@ -462,12 +463,14 @@ function parseGpsBlockReport(buffer: Buffer): DocxReport {
     } as DocxPoint);
   });
 
+  const resolveMedia = (id: string) => {
+    const t = relMap[id];
+    return t && /media\//.test(t) ? "word/" + t.replace(/^\/*/, "") : null;
+  };
   const getPhoto = makePhotoGetter(
     readZip(zip),
-    collectCrops(xml, (id) => {
-      const t = relMap[id];
-      return t && /media\//.test(t) ? "word/" + t.replace(/^\/*/, "") : null;
-    })
+    collectCrops(xml, resolveMedia),
+    collectOverlays(xml, resolveMedia) // paint Word-drawn arrows/boxes/labels back on
   );
 
   return { points, frontImages: [], objective: "", getPhoto };
@@ -672,12 +675,14 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
   const frontImages = extractFrontImages(frontXml, relMap);
   const objective = extractObjective(frontXml);
 
+  const resolveMedia = (id: string) => {
+    const t = relMap[id];
+    return t && /media\//.test(t) ? "word/" + t.replace(/^\/*/, "") : null;
+  };
   const getPhoto = makePhotoGetter(
     readZip(zip),
-    collectCrops(xml, (id) => {
-      const t = relMap[id];
-      return t && /media\//.test(t) ? "word/" + t.replace(/^\/*/, "") : null;
-    })
+    collectCrops(xml, resolveMedia),
+    collectOverlays(xml, resolveMedia) // paint Word-drawn arrows/boxes/labels back on
   );
 
   return { points, frontImages, objective, getPhoto };
