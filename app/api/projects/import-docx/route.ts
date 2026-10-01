@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from "uuid";
 import pool from "../../../../lib/db";
 import { requireAuth } from "../../../../lib/auth";
 import { parseSurveyReport } from "../../../../lib/docxReportImport";
+import { renderAnnotatedPhotos } from "../../../../lib/docxRenderAnnotated";
 import { uploadBufferToS3 } from "../../../../lib/s3";
 import { logActivity } from "../../../../lib/activityLog";
 
@@ -116,6 +117,29 @@ export async function POST(request: Request) {
       );
     }
 
+    // Render photos that have drawings EXACTLY as Word shows them (every line,
+    // freehand included), using LibreOffice when it's available on the server.
+    // Any photo not rendered here falls back to getPhoto (clean photo + the
+    // vector-drawn overlay). Never fatal to the import.
+    let renderedPhotos = new Map<string, Buffer>();
+    if (/\.docx$/i.test(file.name)) {
+      try {
+        renderedPhotos = await renderAnnotatedPhotos(buffer);
+        if (renderedPhotos.size) {
+          console.log(`[import-docx] LibreOffice rendered ${renderedPhotos.size} annotated photo(s) exactly.`);
+        }
+      } catch (err) {
+        console.warn("[import-docx] annotated-photo render unavailable, using fallback:", err);
+      }
+    }
+    // A photo's bytes: the exact LibreOffice render if we have it, else the
+    // extracted photo with the vector overlay drawn on.
+    const photoBytes = async (zipPath: string): Promise<Buffer | null> => {
+      const r = renderedPhotos.get(zipPath);
+      if (r) return r;
+      return getPhoto(zipPath);
+    };
+
     const projectCols = await columnsOf("projects");
     const reportCols = await columnsOf("reports");
     const photoCols = await columnsOf("report_photos");
@@ -177,13 +201,18 @@ export async function POST(request: Request) {
       // Upload this point's photos.
       let photoIdx = 0;
       for (const zipPath of p.photoNames) {
-        const bytes = await getPhoto(zipPath);
+        const bytes = await photoBytes(zipPath);
         if (!bytes || bytes.length < 1000) continue; // skip empties/icons that slipped through
         photoIdx += 1;
-        const base = zipPath.split("/").pop() || `photo_${photoIdx}`;
+        const rendered = renderedPhotos.has(zipPath);
+        // A LibreOffice-rendered photo is always PNG, so store it as .png with
+        // the right content type regardless of the original file's extension.
+        const rawBase = zipPath.split("/").pop() || `photo_${photoIdx}`;
+        const base = rendered ? rawBase.replace(/\.[a-z0-9]+$/i, "") + ".png" : rawBase;
+        const contentType = rendered ? "image/png" : contentTypeFor(base);
         const key = `reports/photos/imported/${projectId}/${reportId}/${p.point_key}_${photoIdx}_${base}`;
         try {
-          const { url, local } = await storePhoto(key, bytes, contentTypeFor(base));
+          const { url, local } = await storePhoto(key, bytes, contentType);
           await insertRow(
             "report_photos",
             {
