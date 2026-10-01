@@ -725,6 +725,9 @@ export default function ProjectReportsPage() {
   const [creatingFromSel, setCreatingFromSel] = useState(false);
   const [fromSelOpen, setFromSelOpen] = useState(false);
 
+  // Reorder-points modal (move any survey point to any position).
+  const [reorderOpen, setReorderOpen] = useState(false);
+
   const projectName = projectNameOf(project);
 
   useEffect(() => {
@@ -2558,6 +2561,19 @@ export default function ProjectReportsPage() {
           />
         )}
 
+        {/* ✅ REORDER SURVEY POINTS MODAL */}
+        {reorderOpen && projectId && (
+          <ReorderReportsModal
+            projectId={projectId}
+            onClose={() => setReorderOpen(false)}
+            onSaved={async () => {
+              setReorderOpen(false);
+              await fetchReports(q, sortDir, vmFilter);
+              toast("Point order saved.");
+            }}
+          />
+        )}
+
         {/* ✅ NEW PROJECT FROM SELECTED REPORTS MODAL */}
         {fromSelOpen && (
           <CreateProjectFromSelectedModal
@@ -2994,6 +3010,16 @@ export default function ProjectReportsPage() {
               {dlSelBusy
                 ? "Zipping photos…"
                 : `⬇ Photos${stats.selectedCount ? ` (${stats.selectedCount})` : ""}`}
+            </button>
+
+            {/* Reorder the survey points (e.g. move the 10th point to the top). */}
+            <button
+              style={styles.btnGhost}
+              onClick={() => setReorderOpen(true)}
+              disabled={loading}
+              title="Change the order of the survey points (move any point up, down, or to any position)"
+            >
+              ↕ Reorder points
             </button>
 
             {/* ✅ only change: Export button now uses gate */}
@@ -4157,6 +4183,195 @@ type ReportPhotoRow = {
   sort_order?: number | null;
 };
 
+/**
+ * ✅ Reorder the survey points (reports) of a project.
+ *
+ * Works on the FULL list in ascending order, independent of whatever search /
+ * filter / sort the table currently shows, so the saved order is always the
+ * true project order. Each row can be nudged up/down, or sent to any position
+ * by typing the target number — so "move the 10th point to the top" is one step.
+ */
+type ReorderRow = { id: string; point_key?: string | null; category?: string | null; description?: string | null };
+
+function ReorderReportsModal({
+  projectId,
+  onClose,
+  onSaved,
+}: {
+  projectId: string;
+  onClose: () => void;
+  onSaved: () => void | Promise<void>;
+}) {
+  const [rows, setRows] = useState<ReorderRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoading(true);
+      try {
+        const data = await apiRequestJson(
+          `/api/projects/${encodeURIComponent(projectId)}/reports?sort=asc`,
+          { method: "GET" }
+        );
+        const list = ((data?.reports || data || []) as ReportRow[]).map((r) => ({
+          id: r.id,
+          point_key: (r as any).point_key ?? null,
+          category: r.category ?? null,
+          description: r.description ?? null,
+        }));
+        if (alive) setRows(list);
+      } catch (e: any) {
+        toast(e?.message || "Could not load the points.");
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [projectId]);
+
+  const moveTo = (from: number, to: number) => {
+    setRows((prev) => {
+      const n = prev.length;
+      const dest = Math.max(0, Math.min(n - 1, to));
+      if (from === dest || from < 0 || from >= n) return prev;
+      const next = prev.slice();
+      const [item] = next.splice(from, 1);
+      next.splice(dest, 0, item);
+      return next;
+    });
+    setDirty(true);
+  };
+
+  const save = async () => {
+    if (!rows.length) return;
+    setSaving(true);
+    try {
+      await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}/reports`, {
+        method: "PATCH",
+        body: JSON.stringify({ order: rows.map((r) => r.id) }),
+      });
+      await onSaved();
+    } catch (e: any) {
+      toast(e?.message || "Could not save the new order.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const label = (r: ReorderRow) => {
+    const parts = [r.point_key ? String(r.point_key) : "", r.category || "Report"].filter(Boolean);
+    const head = parts.join(" · ");
+    const desc = displayDescription((r.description || "").trim());
+    return desc ? `${head} — ${desc}` : head;
+  };
+
+  return (
+    <div style={styles.modalOverlay} onMouseDown={onClose}>
+      <div
+        style={{ ...styles.modalCard, width: "min(640px, 96vw)", maxHeight: "90vh", display: "flex", flexDirection: "column" }}
+        onMouseDown={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Reorder survey points"
+      >
+        <div style={styles.modalTitle}>Reorder survey points</div>
+        <div style={styles.modalHint}>
+          Use <b>▲ ▼</b> to move a point up or down. To move it a long way (for example the 10th
+          point to the top), type the new position number in the box and press <b>Enter</b>.
+        </div>
+
+        {loading ? (
+          <div style={{ padding: 16, fontWeight: 800, color: "#667085" }}>Loading points…</div>
+        ) : !rows.length ? (
+          <div style={{ padding: 16, fontWeight: 800, color: "#667085" }}>No points to reorder.</div>
+        ) : (
+          <div style={{ overflowY: "auto", marginTop: 8, border: "1px solid #EAECF0", borderRadius: 12 }}>
+            {rows.map((r, i) => (
+              <div
+                key={r.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 10px",
+                  borderBottom: i === rows.length - 1 ? "none" : "1px solid #F2F4F7",
+                  background: i % 2 ? "#FCFCFD" : "#fff",
+                }}
+              >
+                <input
+                  type="number"
+                  min={1}
+                  max={rows.length}
+                  defaultValue={i + 1}
+                  key={`${r.id}-${i}`}
+                  title="Type a position and press Enter to move this point there"
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    const v = Number((e.target as HTMLInputElement).value);
+                    // moveTo re-keys the rows, so this input remounts with the
+                    // new position — no separate blur handler (that double-moved).
+                    if (Number.isFinite(v)) moveTo(i, v - 1);
+                  }}
+                  style={{
+                    width: 54,
+                    height: 34,
+                    borderRadius: 10,
+                    border: "1px solid #D0D5DD",
+                    textAlign: "center",
+                    fontWeight: 900,
+                    color: "#344054",
+                  }}
+                />
+                <div style={{ flex: 1, minWidth: 0, fontWeight: 800, color: "#101828", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {label(r)}
+                </div>
+                <button
+                  type="button"
+                  title="Move up"
+                  disabled={i === 0}
+                  onClick={() => moveTo(i, i - 1)}
+                  style={{ width: 34, height: 34, borderRadius: 8, border: "1px solid #D0D5DD", background: "#fff", cursor: i === 0 ? "not-allowed" : "pointer", opacity: i === 0 ? 0.4 : 1, fontWeight: 900 }}
+                >
+                  ▲
+                </button>
+                <button
+                  type="button"
+                  title="Move down"
+                  disabled={i === rows.length - 1}
+                  onClick={() => moveTo(i, i + 1)}
+                  style={{ width: 34, height: 34, borderRadius: 8, border: "1px solid #D0D5DD", background: "#fff", cursor: i === rows.length - 1 ? "not-allowed" : "pointer", opacity: i === rows.length - 1 ? 0.4 : 1, fontWeight: 900 }}
+                >
+                  ▼
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ ...styles.modalActions, marginTop: 12 }}>
+          <button style={styles.btnGhost} onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button
+            style={{ ...styles.btnPrimary, opacity: saving || !dirty || !rows.length ? 0.6 : 1 }}
+            onClick={save}
+            disabled={saving || !dirty || !rows.length}
+            title={dirty ? "Save the new order" : "Move a point first"}
+          >
+            {saving ? "Saving…" : "Save order"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** ✅ Modal to edit an existing report's core fields */
 function EditReportModal({
   report,
@@ -4246,6 +4461,35 @@ function EditReportModal({
       toast(e?.message || String(e));
     } finally {
       setRemovingId("");
+    }
+  };
+
+  // Move a photo earlier/later within the report and save the new order, so it
+  // sticks in the app and the Word export. Only the still images are reordered
+  // (videos keep to the end), mirroring the Report Photos modal.
+  const [reorderingPhoto, setReorderingPhoto] = useState(false);
+  const movePhoto = async (photoId: string, dir: -1 | 1) => {
+    if (reorderingPhoto) return;
+    const visible = photos.filter((x) => !isVideoUrl(x.url));
+    const idx = visible.findIndex((x) => x.id === photoId);
+    if (idx === -1) return;
+    const j = idx + dir;
+    if (j < 0 || j >= visible.length) return;
+    const newVisible = visible.slice();
+    [newVisible[idx], newVisible[j]] = [newVisible[j], newVisible[idx]];
+    const videos = photos.filter((x) => isVideoUrl(x.url));
+    setPhotos([...newVisible, ...videos]); // optimistic
+    setReorderingPhoto(true);
+    try {
+      await apiRequestJson(`/api/reports/${encodeURIComponent(report.id)}/photos`, {
+        method: "PATCH",
+        body: JSON.stringify({ order: newVisible.map((x) => x.id) }),
+      });
+    } catch (e: any) {
+      toast(e?.message || "Could not reorder photos");
+      await loadPhotos(); // revert to server order
+    } finally {
+      setReorderingPhoto(false);
     }
   };
 
@@ -4460,6 +4704,11 @@ function EditReportModal({
         {/* ---- Photos ---- */}
         <div style={{ display: "grid", gap: 8 }}>
           <div style={styles.routeLabel}>Photos</div>
+          {photos.filter((x) => !isVideoUrl(x.url)).length > 1 && (
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#667085" }}>
+              Use <b>◀ ▶</b> on a photo to change its order (the number shows its position).
+            </div>
+          )}
 
           <input
             ref={photoInputRef}
@@ -4501,7 +4750,12 @@ function EditReportModal({
                 gap: 10,
               }}
             >
-              {photos.map((p) => (
+              {photos.map((p) => {
+                const stills = photos.filter((x) => !isVideoUrl(x.url));
+                const isStill = !isVideoUrl(p.url);
+                const vIdx = isStill ? stills.findIndex((x) => x.id === p.id) : -1;
+                const canReorder = isStill && stills.length > 1;
+                return (
                 <div
                   key={p.id}
                   style={{
@@ -4591,8 +4845,46 @@ function EditReportModal({
                   >
                     {removingId === p.id ? "…" : "✕"}
                   </button>
+
+                  {canReorder && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 8,
+                        padding: "3px 0",
+                        background: "rgba(16,24,40,0.60)",
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => movePhoto(p.id, -1)}
+                        disabled={vIdx === 0 || reorderingPhoto}
+                        title="Move this photo earlier"
+                        style={{ border: "none", background: "transparent", color: "#fff", fontSize: 15, fontWeight: 900, cursor: vIdx === 0 ? "not-allowed" : "pointer", opacity: vIdx === 0 ? 0.4 : 1, lineHeight: 1 }}
+                      >
+                        ◀
+                      </button>
+                      <span style={{ color: "#fff", fontSize: 11, fontWeight: 900 }}>#{vIdx + 1}</span>
+                      <button
+                        type="button"
+                        onClick={() => movePhoto(p.id, 1)}
+                        disabled={vIdx === stills.length - 1 || reorderingPhoto}
+                        title="Move this photo later"
+                        style={{ border: "none", background: "transparent", color: "#fff", fontSize: 15, fontWeight: 900, cursor: vIdx === stills.length - 1 ? "not-allowed" : "pointer", opacity: vIdx === stills.length - 1 ? 0.4 : 1, lineHeight: 1 }}
+                      >
+                        ▶
+                      </button>
+                    </div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

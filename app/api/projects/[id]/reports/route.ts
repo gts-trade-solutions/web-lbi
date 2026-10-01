@@ -465,3 +465,87 @@ export async function POST(request: Request, context: Ctx) {
     );
   }
 }
+
+// Reorder the reports (survey points) of a project in one shot. The client
+// sends the full list of report ids in the order it wants; we write
+// sort_order = 10, 20, 30 ... so the gaps stay wide enough for later inserts
+// (insertReportAfter puts a new report at the midpoint of a gap).
+//
+// Body: { order: string[] }  (report ids, desired top-to-bottom order)
+export async function PATCH(request: Request, context: Ctx) {
+  try {
+    requireAuth(request);
+    const projectId = String(context.params?.id || "").trim();
+    if (!projectId) {
+      return Response.json({ error: "Project id is required" }, { status: 400 });
+    }
+
+    const cols = await getColumns("reports");
+    if (!has(cols, "sort_order")) {
+      return Response.json(
+        { error: "This install has no sort_order column, so reports cannot be reordered." },
+        { status: 400 }
+      );
+    }
+
+    const body = await request.json().catch(() => null);
+    const order: unknown = body?.order;
+    if (!Array.isArray(order) || !order.length) {
+      return Response.json({ error: "Body must be { order: [reportId, ...] }." }, { status: 400 });
+    }
+    const ids = order.map((x) => String(x || "").trim()).filter(Boolean);
+    if (!ids.length) {
+      return Response.json({ error: "No report ids given." }, { status: 400 });
+    }
+
+    // Only touch rows that really belong to this project — never let a stray id
+    // reorder (or renumber) a report in another project.
+    const placeholders = ids.map(() => "?").join(",");
+    const [ownRows] = await pool.query(
+      `SELECT id FROM reports WHERE project_id = ? AND id IN (${placeholders})`,
+      [projectId, ...ids]
+    );
+    const ownIds = new Set(
+      (Array.isArray(ownRows) ? ownRows : []).map((r) => String((r as { id: unknown }).id))
+    );
+
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      let position = 0;
+      for (const id of ids) {
+        if (!ownIds.has(id)) continue; // skip ids not in this project
+        position += 1;
+        await conn.query(
+          "UPDATE reports SET sort_order = ? WHERE id = ? AND project_id = ?",
+          [position * 10, id, projectId]
+        );
+      }
+      await conn.commit();
+      return Response.json({ ok: true, count: position }, { status: 200 });
+    } catch (txErr) {
+      try {
+        await conn.rollback();
+      } catch {
+        /* ignore rollback failure */
+      }
+      throw txErr;
+    } finally {
+      conn.release();
+    }
+  } catch (error) {
+    if (unauthorized(error)) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const e = error as { message?: string; sqlMessage?: string };
+    console.error("[REORDER REPORTS FAILED]", {
+      projectId: context.params?.id,
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+    });
+    return Response.json(
+      { error: "Failed to reorder reports", detail: e?.sqlMessage || e?.message || String(error) },
+      { status: 500 }
+    );
+  }
+}
