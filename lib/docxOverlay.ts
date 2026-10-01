@@ -83,19 +83,52 @@ function contentWidthEmu(xml: string): number | null {
   return twips > 0 ? twips * EMU_PER_TWIP : null;
 }
 
-/** A floating drawing's anchor offset (EMU), or null for an inline drawing. */
-function anchorOffset(drawing: string): { h: number; v: number } | null {
-  const h = drawing.match(/<wp:positionH\b[^>]*>\s*<wp:posOffset>(-?\d+)<\/wp:posOffset>/);
-  const v = drawing.match(/<wp:positionV\b[^>]*>\s*<wp:posOffset>(-?\d+)<\/wp:posOffset>/);
-  if (!h || !v) return null;
-  return { h: num(h[1]), v: num(v[1]) };
-}
-
 /** A drawing's displayed size (EMU). */
 function extentEmu(drawing: string): { cx: number; cy: number } | null {
   const m = drawing.match(/<wp:extent\b[^>]*\bcx="(\d+)"\s+cy="(\d+)"/);
   if (!m) return null;
   return { cx: num(m[1]), cy: num(m[2]) };
+}
+
+/**
+ * A floating drawing's top-left offset (EMU) and size, resolving BOTH ways Word
+ * places a shape: an explicit <wp:posOffset>, or a <wp:align> (left/center/
+ * right) which we turn into an offset using the container width / shape size.
+ * Returns null if the shape can't be placed (e.g. a vertical align we can't
+ * resolve without the container height).
+ */
+function shapeBox(
+  drawing: string,
+  containerWidth: number | null
+): { h: number; v: number; cx: number; cy: number } | null {
+  const ext = extentEmu(drawing);
+  if (!ext) return null;
+
+  const hOff = drawing.match(/<wp:positionH\b[^>]*>\s*<wp:posOffset>(-?\d+)<\/wp:posOffset>/);
+  let h: number | null;
+  if (hOff) {
+    h = num(hOff[1]);
+  } else {
+    const hAlign = drawing.match(/<wp:positionH\b[^>]*>\s*<wp:align>(\w+)<\/wp:align>/)?.[1];
+    const cw = containerWidth;
+    if (hAlign && cw != null) {
+      h = hAlign === "center" ? (cw - ext.cx) / 2 : hAlign === "right" || hAlign === "outside" ? cw - ext.cx : 0;
+    } else h = null;
+  }
+
+  const vOff = drawing.match(/<wp:positionV\b[^>]*>\s*<wp:posOffset>(-?\d+)<\/wp:posOffset>/);
+  let v: number | null;
+  if (vOff) {
+    v = num(vOff[1]);
+  } else {
+    // A vertical align needs the paragraph/container height we don't have;
+    // only "top" is safe to resolve (0).
+    const vAlign = drawing.match(/<wp:positionV\b[^>]*>\s*<wp:align>(\w+)<\/wp:align>/)?.[1];
+    v = vAlign === "top" ? 0 : null;
+  }
+
+  if (h == null || v == null) return null;
+  return { h, v, cx: ext.cx, cy: ext.cy };
 }
 
 /** First srgbClr inside a given block, as "#RRGGBB". */
@@ -119,15 +152,20 @@ function cellWidthEmu(tc: string): number | null {
  * from being reprocessed by the broader body scope.
  */
 function processScope(
-  scopeXml: string,
+  scopeMasked: string,
+  allDrawings: string[],
   containerWidth: number | null,
   resolve: (relId: string) => string | null,
   handled: Set<string>,
   out: Map<string, OverlayShape[]>
 ): void {
-  const paragraphs = scopeXml.match(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g) || [];
+  // scopeMasked has every <w:drawing> replaced by a \x00D<i>\x00 placeholder, so
+  // the <w:p> inside a drawing's text box can't corrupt the paragraph split.
+  const paragraphs = scopeMasked.match(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g) || [];
   for (const para of paragraphs) {
-    const drawings = para.match(/<w:drawing>[\s\S]*?<\/w:drawing>/g) || [];
+    const drawings = Array.from(para.matchAll(/\u0000D(\d+)\u0000/g))
+      .map((m) => allDrawings[Number(m[1])])
+      .filter(Boolean);
     if (drawings.length < 2) continue; // need a photo plus at least one mark
 
     const picDraws = drawings.filter((d) => d.includes("<pic:pic"));
@@ -142,7 +180,7 @@ function processScope(
     handled.add(zipPath);
 
     // Photo origin (EMU) in the column/paragraph coordinate system.
-    const picAnchor = anchorOffset(picDraw);
+    const picAnchor = picDraw.includes("<wp:anchor") ? shapeBox(picDraw, containerWidth) : null;
     let picLeft: number;
     let picTop: number;
     if (picAnchor) {
@@ -161,9 +199,10 @@ function processScope(
       const shapes: OverlayShape[] = [];
       for (const dr of drawings) {
         if (dr === picDraw || dr.includes("<pic:pic")) continue;
-        const off = anchorOffset(dr);
-        const ext = extentEmu(dr);
-        if (!off || !ext) continue;
+        const box = shapeBox(dr, containerWidth);
+        if (!box) continue;
+        const off = { h: box.h, v: box.v };
+        const ext = { cx: box.cx, cy: box.cy };
 
         // Fractions of the photo.
         const fx = (off.h - picLeft) / picExt.cx;
@@ -249,11 +288,21 @@ export function collectOverlays(
 ): Map<string, OverlayShape[]> {
   const out = new Map<string, OverlayShape[]>();
   try {
+    // Pull every drawing out and leave a placeholder behind, so paragraph (and
+    // cell) splitting never trips over the <w:p> that lives inside a text box.
+    const drawings: string[] = [];
+    const masked = xml.replace(/<w:drawing>[\s\S]*?<\/w:drawing>/g, (m) => {
+      const i = drawings.length;
+      drawings.push(m);
+      return `\u0000D${i}\u0000`;
+    });
+
     const contentW = contentWidthEmu(xml);
     const handled = new Set<string>();
-    const cells = xml.match(/<w:tc(?:\s[^>]*)?>[\s\S]*?<\/w:tc>/g) || [];
-    for (const tc of cells) processScope(tc, cellWidthEmu(tc) ?? contentW, resolve, handled, out);
-    processScope(xml, contentW, resolve, handled, out);
+    // Table cells first (their own width is the container), then the page body.
+    const cells = masked.match(/<w:tc(?:\s[^>]*)?>[\s\S]*?<\/w:tc>/g) || [];
+    for (const tc of cells) processScope(tc, drawings, cellWidthEmu(tc) ?? contentW, resolve, handled, out);
+    processScope(masked, drawings, contentW, resolve, handled, out);
   } catch (err) {
     console.warn("[import] collectOverlays failed, skipping overlays:", (err as Error).message);
   }
