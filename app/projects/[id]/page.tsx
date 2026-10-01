@@ -2221,6 +2221,42 @@ export default function ProjectReportsPage() {
               setPhotoPreview((p) =>
                 p ? { ...p, index: (idx + dir + list.length) % list.length } : p
               );
+
+            // Reorder the photos straight from this preview. Only the still
+            // images are reordered (videos keep to the end), matching the Edit
+            // modal and Report Photos modal. The preview stays on the SAME photo
+            // as it moves, so "make the 4th photo the 2nd" is just two taps of
+            // "◀ Move earlier".
+            const stills = list.filter((p) => !isVideoUrl(p.url));
+            const curStillIdx =
+              cur.url && !isVideoUrl(cur.url) ? stills.findIndex((p) => p.id === cur.id) : -1;
+            const canMoveEarlier = curStillIdx > 0;
+            const canMoveLater = curStillIdx >= 0 && curStillIdx < stills.length - 1;
+            const moveCur = async (dir: -1 | 1) => {
+              if (curStillIdx < 0) return;
+              const j = curStillIdx + dir;
+              if (j < 0 || j >= stills.length) return;
+              const newStills = stills.slice();
+              [newStills[curStillIdx], newStills[j]] = [newStills[j], newStills[curStillIdx]];
+              const videos = list.filter((p) => isVideoUrl(p.url));
+              const newAll = [...newStills, ...videos];
+              // optimistic: update the report's photos and keep the preview on
+              // the moved photo
+              setReports((prev) =>
+                prev.map((r) => (r.id === photoPreview.reportId ? { ...r, photos: newAll } : r))
+              );
+              const newIndex = newAll.findIndex((p) => p.id === cur.id);
+              setPhotoPreview((p) => (p ? { ...p, index: newIndex >= 0 ? newIndex : idx } : p));
+              try {
+                await apiRequestJson(
+                  `/api/reports/${encodeURIComponent(photoPreview.reportId)}/photos`,
+                  { method: "PATCH", body: JSON.stringify({ order: newStills.map((p) => p.id) }) }
+                );
+              } catch (e: any) {
+                toast(e?.message || "Could not move the photo");
+                await fetchReports(q, sortDir, vmFilter); // revert to server order
+              }
+            };
             return (
               <div
                 style={{ ...styles.modalOverlay, zIndex: 1200 }}
@@ -2420,6 +2456,28 @@ export default function ProjectReportsPage() {
                         <span style={{ fontSize: 12, fontWeight: 900, color: "#475467" }}>
                           Photo {idx + 1} / {list.length}
                         </span>
+                      </>
+                    )}
+                    {stills.length > 1 && curStillIdx >= 0 && (
+                      <>
+                        <button
+                          type="button"
+                          style={{ ...styles.btnGhost, borderColor: "#B2DDFF", color: "#175CD3", fontWeight: 900, opacity: canMoveEarlier ? 1 : 0.4, cursor: canMoveEarlier ? "pointer" : "not-allowed" }}
+                          onClick={() => moveCur(-1)}
+                          disabled={!canMoveEarlier}
+                          title="Move this photo one place earlier (changes its order in the report & Word file)"
+                        >
+                          ◀ Move earlier
+                        </button>
+                        <button
+                          type="button"
+                          style={{ ...styles.btnGhost, borderColor: "#B2DDFF", color: "#175CD3", fontWeight: 900, opacity: canMoveLater ? 1 : 0.4, cursor: canMoveLater ? "pointer" : "not-allowed" }}
+                          onClick={() => moveCur(1)}
+                          disabled={!canMoveLater}
+                          title="Move this photo one place later (changes its order in the report & Word file)"
+                        >
+                          Move later ▶
+                        </button>
                       </>
                     )}
                     <label
