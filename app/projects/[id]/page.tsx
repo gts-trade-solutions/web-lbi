@@ -4206,6 +4206,12 @@ function ReorderReportsModal({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+
+  // Live element refs so a drag can tell which row the finger/mouse is over,
+  // and the scroll box so a drag near the edge of a long list auto-scrolls.
+  const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const listRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -4247,6 +4253,59 @@ function ReorderReportsModal({
     setDirty(true);
   };
 
+  // ---- Drag and drop (pointer events: one code path for mouse AND touch) ----
+  const startDrag = (e: React.PointerEvent, index: number) => {
+    e.preventDefault();
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      /* capture is best-effort */
+    }
+    setDragIndex(index);
+  };
+
+  const onDragMove = (e: React.PointerEvent) => {
+    if (dragIndex == null) return;
+    e.preventDefault();
+    const y = e.clientY;
+
+    // Auto-scroll when the pointer is near the top/bottom of the scroll box so
+    // a point can be dragged across a long list.
+    const lc = listRef.current;
+    if (lc) {
+      const lr = lc.getBoundingClientRect();
+      if (y < lr.top + 44) lc.scrollTop -= 16;
+      else if (y > lr.bottom - 44) lc.scrollTop += 16;
+    }
+
+    // Which row is the pointer over now?
+    let target = dragIndex;
+    for (let k = 0; k < rows.length; k++) {
+      const el = rowRefs.current[rows[k].id];
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      if (y < rect.top) {
+        target = k;
+        break;
+      }
+      target = k; // pointer is at or below this row so far
+      if (y <= rect.bottom) break;
+    }
+    if (target !== dragIndex) {
+      moveTo(dragIndex, target);
+      setDragIndex(target);
+    }
+  };
+
+  const endDrag = (e: React.PointerEvent) => {
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    setDragIndex(null);
+  };
+
   const save = async () => {
     if (!rows.length) return;
     setSaving(true);
@@ -4281,8 +4340,8 @@ function ReorderReportsModal({
       >
         <div style={styles.modalTitle}>Reorder survey points</div>
         <div style={styles.modalHint}>
-          Use <b>▲ ▼</b> to move a point up or down. To move it a long way (for example the 10th
-          point to the top), type the new position number in the box and press <b>Enter</b>.
+          <b>Drag</b> a point by the <b>⠿</b> handle to move it anywhere — drop it where you want it.
+          You can also use the <b>▲ ▼</b> buttons for small moves.
         </div>
 
         {loading ? (
@@ -4290,67 +4349,100 @@ function ReorderReportsModal({
         ) : !rows.length ? (
           <div style={{ padding: 16, fontWeight: 800, color: "#667085" }}>No points to reorder.</div>
         ) : (
-          <div style={{ overflowY: "auto", marginTop: 8, border: "1px solid #EAECF0", borderRadius: 12 }}>
-            {rows.map((r, i) => (
-              <div
-                key={r.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "8px 10px",
-                  borderBottom: i === rows.length - 1 ? "none" : "1px solid #F2F4F7",
-                  background: i % 2 ? "#FCFCFD" : "#fff",
-                }}
-              >
-                <input
-                  type="number"
-                  min={1}
-                  max={rows.length}
-                  defaultValue={i + 1}
-                  key={`${r.id}-${i}`}
-                  title="Type a position and press Enter to move this point there"
-                  onKeyDown={(e) => {
-                    if (e.key !== "Enter") return;
-                    e.preventDefault();
-                    const v = Number((e.target as HTMLInputElement).value);
-                    // moveTo re-keys the rows, so this input remounts with the
-                    // new position — no separate blur handler (that double-moved).
-                    if (Number.isFinite(v)) moveTo(i, v - 1);
+          <div ref={listRef} style={{ overflowY: "auto", marginTop: 8, border: "1px solid #EAECF0", borderRadius: 12 }}>
+            {rows.map((r, i) => {
+              const dragging = dragIndex === i;
+              return (
+                <div
+                  key={r.id}
+                  ref={(el) => {
+                    rowRefs.current[r.id] = el;
                   }}
                   style={{
-                    width: 54,
-                    height: 34,
-                    borderRadius: 10,
-                    border: "1px solid #D0D5DD",
-                    textAlign: "center",
-                    fontWeight: 900,
-                    color: "#344054",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "8px 10px",
+                    borderBottom: i === rows.length - 1 ? "none" : "1px solid #F2F4F7",
+                    background: dragging ? "#EFF8FF" : i % 2 ? "#FCFCFD" : "#fff",
+                    boxShadow: dragging ? "0 8px 20px rgba(16,24,40,0.18)" : "none",
+                    position: "relative",
+                    zIndex: dragging ? 2 : 1,
+                    userSelect: "none",
                   }}
-                />
-                <div style={{ flex: 1, minWidth: 0, fontWeight: 800, color: "#101828", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {label(r)}
+                >
+                  {/* Drag handle — the only part that grabs the pointer, so the
+                      list still scrolls normally everywhere else on touch. */}
+                  <div
+                    onPointerDown={(e) => startDrag(e, i)}
+                    onPointerMove={onDragMove}
+                    onPointerUp={endDrag}
+                    onPointerCancel={endDrag}
+                    title="Drag to move this point"
+                    style={{
+                      flexShrink: 0,
+                      width: 40,
+                      height: 40,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      borderRadius: 8,
+                      border: "1px solid #EAECF0",
+                      background: dragging ? "#D1E9FF" : "#F9FAFB",
+                      color: "#475467",
+                      fontSize: 20,
+                      fontWeight: 900,
+                      cursor: dragging ? "grabbing" : "grab",
+                      touchAction: "none", // stop the page from scrolling while dragging on touch
+                      lineHeight: 1,
+                    }}
+                  >
+                    ⠿
+                  </div>
+
+                  <div
+                    style={{
+                      flexShrink: 0,
+                      minWidth: 34,
+                      height: 34,
+                      padding: "0 8px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      borderRadius: 999,
+                      background: "#F2F4F7",
+                      fontWeight: 900,
+                      color: "#344054",
+                      fontSize: 13,
+                    }}
+                  >
+                    {i + 1}
+                  </div>
+
+                  <div style={{ flex: 1, minWidth: 0, fontWeight: 800, color: "#101828", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {label(r)}
+                  </div>
+                  <button
+                    type="button"
+                    title="Move up"
+                    disabled={i === 0}
+                    onClick={() => moveTo(i, i - 1)}
+                    style={{ width: 34, height: 34, flexShrink: 0, borderRadius: 8, border: "1px solid #D0D5DD", background: "#fff", cursor: i === 0 ? "not-allowed" : "pointer", opacity: i === 0 ? 0.4 : 1, fontWeight: 900 }}
+                  >
+                    ▲
+                  </button>
+                  <button
+                    type="button"
+                    title="Move down"
+                    disabled={i === rows.length - 1}
+                    onClick={() => moveTo(i, i + 1)}
+                    style={{ width: 34, height: 34, flexShrink: 0, borderRadius: 8, border: "1px solid #D0D5DD", background: "#fff", cursor: i === rows.length - 1 ? "not-allowed" : "pointer", opacity: i === rows.length - 1 ? 0.4 : 1, fontWeight: 900 }}
+                  >
+                    ▼
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  title="Move up"
-                  disabled={i === 0}
-                  onClick={() => moveTo(i, i - 1)}
-                  style={{ width: 34, height: 34, borderRadius: 8, border: "1px solid #D0D5DD", background: "#fff", cursor: i === 0 ? "not-allowed" : "pointer", opacity: i === 0 ? 0.4 : 1, fontWeight: 900 }}
-                >
-                  ▲
-                </button>
-                <button
-                  type="button"
-                  title="Move down"
-                  disabled={i === rows.length - 1}
-                  onClick={() => moveTo(i, i + 1)}
-                  style={{ width: 34, height: 34, borderRadius: 8, border: "1px solid #D0D5DD", background: "#fff", cursor: i === rows.length - 1 ? "not-allowed" : "pointer", opacity: i === rows.length - 1 ? 0.4 : 1, fontWeight: 900 }}
-                >
-                  ▼
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
