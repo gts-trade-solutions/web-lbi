@@ -16,7 +16,7 @@ import { confirmDialog } from "./ConfirmDialog";
 
 type Stroke = {
   tool:
-    | "arrow" | "darrow" | "line" | "pen"
+    | "arrow" | "darrow" | "carrow" | "line" | "pen"
     | "rect" | "rrect" | "ellipse" | "triangle" | "diamond" | "star"
     | "pentagon" | "hexagon" | "callout" | "uparrow" | "downarrow"
     | "left" | "right" | "uturn" | "x" | "text";
@@ -145,7 +145,7 @@ export default function PhotoAnnotator({
   onSaved?: (newUrl: string) => void;
 }) {
   const [drawTool, setDrawTool] = useState<Stroke["tool"] | "move">("arrow");
-  const [drawColor, setDrawColor] = useState("#FFD400");
+  const [drawColor, setDrawColor] = useState("#FFFF00"); // Word's standard yellow
   const [drawWidth, setDrawWidth] = useState(6);
   const [drawFill, setDrawFill] = useState(false);
   const [drawDash, setDrawDash] = useState<"solid" | "dashed" | "dotted">("solid");
@@ -270,11 +270,12 @@ export default function PhotoAnnotator({
       ctx.fillText(s.text || "", pts[0].x, pts[0].y);
       return;
     }
-    if (s.tool === "pen") {
+    if (s.tool === "pen" || s.tool === "carrow") {
       // Smooth free-hand: draw a quadratic curve that passes through the
       // midpoint of each pair of points, using the points themselves as control
       // points. This turns the jagged raw polyline into a clean flowing line
-      // (both on screen and in the exported image).
+      // (both on screen and in the exported image). "carrow" is the same, with a
+      // filled arrowhead at the end — a Word-style curved arrow.
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       if (pts.length < 3) {
@@ -294,6 +295,27 @@ export default function PhotoAnnotator({
         );
       }
       ctx.stroke();
+      if (s.tool === "carrow" && pts.length >= 2) {
+        // Arrowhead pointing along the final direction of the curve.
+        const tip = pts[pts.length - 1];
+        let back = pts[pts.length - 2];
+        const minBack = s.width * 2 + 6;
+        for (let i = pts.length - 2; i >= 0; i--) {
+          if (Math.hypot(tip.x - pts[i].x, tip.y - pts[i].y) >= minBack) {
+            back = pts[i];
+            break;
+          }
+        }
+        const ang = Math.atan2(tip.y - back.y, tip.x - back.x);
+        const head = Math.max(14, s.width * 3.5);
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(tip.x, tip.y);
+        ctx.lineTo(tip.x - head * Math.cos(ang - Math.PI / 7), tip.y - head * Math.sin(ang - Math.PI / 7));
+        ctx.lineTo(tip.x - head * Math.cos(ang + Math.PI / 7), tip.y - head * Math.sin(ang + Math.PI / 7));
+        ctx.closePath();
+        ctx.fill();
+      }
       return;
     }
     const a = pts[0], b = pts[pts.length - 1];
@@ -414,7 +436,7 @@ export default function PhotoAnnotator({
         ctx.restore();
         // Draggable endpoint handles for reshaping (2-point shapes only, and
         // only when not rotated — after rotating, resize with − / +).
-        if (sel.tool !== "pen" && sel.tool !== "text" && !sel.rot) {
+        if (sel.tool !== "pen" && sel.tool !== "carrow" && sel.tool !== "text" && !sel.rot) {
           const hs = Math.max(6, 9 / dispScale);
           const hpts = [sel.points[0], sel.points[sel.points.length - 1]];
           ctx.save();
@@ -606,7 +628,7 @@ export default function PhotoAnnotator({
       // handles reshapes it (drag the corner) instead of moving the whole shape.
       if (selectedIdx != null) {
         const sel = strokes[selectedIdx];
-        if (sel && sel.tool !== "pen" && sel.tool !== "text" && !sel.rot) {
+        if (sel && sel.tool !== "pen" && sel.tool !== "carrow" && sel.tool !== "text" && !sel.rot) {
           const canvas = canvasRef.current!;
           const rect = canvas.getBoundingClientRect();
           const scale = rect.width / canvas.width || 1;
@@ -705,9 +727,9 @@ export default function PhotoAnnotator({
       return;
     }
     if (!drawingRef.current) return;
-    if (drawTool === "pen") {
-      // Ignore tiny jitter between samples so the smoothed curve stays clean
-      // (also keeps the point list from ballooning on slow strokes).
+    if (drawTool === "pen" || drawTool === "carrow") {
+      // Free-hand (plain line, or a curved arrow): collect the path. Ignore tiny
+      // jitter between samples so the smoothed curve stays clean.
       const last = drawingRef.current.points[drawingRef.current.points.length - 1];
       if (!last || Math.hypot(p.x - last.x, p.y - last.y) >= 2.5) {
         drawingRef.current.points.push(p);
@@ -957,6 +979,7 @@ export default function PhotoAnnotator({
           {([
             ["move", "✥", "Move"],
             ["arrow", "➔", "Arrow"],
+            ["carrow", "⤷", "Curve arrow"],
             ["darrow", "↔", "Measure"],
             ["line", "—", "Line"],
             ["pen", "✎", "Draw"],
@@ -999,10 +1022,10 @@ export default function PhotoAnnotator({
               </button>
             ))}
           {([
-            ["#FFD400", "Yellow"],
-            ["#FF7A00", "Orange"],
-            ["#1E3A8A", "Navy blue"],
-            ["#E11D2E", "Red"],
+            ["#FFFF00", "Yellow"],
+            ["#FF0000", "Red"],
+            ["#00B050", "Green"],
+            ["#0070C0", "Blue"],
           ] as const).map(([c, label]) => (
             <button
               key={c}
