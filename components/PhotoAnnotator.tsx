@@ -168,6 +168,36 @@ export default function PhotoAnnotator({
   // (point index in stroke.points), or null when moving/idle.
   const resizeHandleRef = useRef<number | null>(null);
 
+  // Advanced shapes (rectangles, stars, turn arrows…) are hidden behind "More"
+  // so the everyday toolbar stays simple — the #1 "too many buttons" complaint.
+  const [showMore, setShowMore] = useState(false);
+
+  // Size the photo as large as the window allows (minus room for the toolbar),
+  // so there is a big area to draw on — and keep it right on window resize /
+  // device rotation. Never upscales past 1:1 (keeps small photos crisp).
+  const fitCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    const img = baseImgRef.current;
+    if (!canvas) return;
+    const w = img?.naturalWidth || canvas.width || 1200;
+    const h = img?.naturalHeight || canvas.height || 800;
+    const maxW = Math.max(260, window.innerWidth - 20);
+    const maxH = Math.max(260, window.innerHeight - 210); // leave room for toolbar + buttons
+    const scale = Math.min(maxW / w, maxH / h, 1);
+    canvas.style.width = `${Math.round(w * scale)}px`;
+    canvas.style.height = `${Math.round(h * scale)}px`;
+  }, []);
+
+  useEffect(() => {
+    const onResize = () => fitCanvas();
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
+    };
+  }, [fitCanvas]);
+
   // ---- Drawing primitives (copied from the Route Map annotator) ----
   const drawTurnArrow = (
     ctx: CanvasRenderingContext2D,
@@ -409,11 +439,7 @@ export default function PhotoAnnotator({
         if (canvas) {
           canvas.width = w;
           canvas.height = h;
-          const maxW = Math.min(window.innerWidth * 0.9, 1280);
-          const maxH = window.innerHeight * 0.72;
-          const scale = Math.min(maxW / w, maxH / h, 1);
-          canvas.style.width = `${Math.round(w * scale)}px`;
-          canvas.style.height = `${Math.round(h * scale)}px`;
+          fitCanvas();
         }
         // Base image is ready. Draw it, THEN apply the saved strokes — so the
         // strokes re-render happens with the image already loaded. Setting the
@@ -900,33 +926,51 @@ export default function PhotoAnnotator({
         </div>
 
         <div style={S.tools}>
+          {/* Everyday tools — the few surveyors actually use, named like Word. */}
           {([
-            ["move", "✥", "Move / select"],
+            ["move", "✥", "Move"],
             ["arrow", "➔", "Arrow"],
-            ["darrow", "↔", "Double arrow (measure H / W)"],
-            ["line", "—", "Straight line"],
-            ["pen", "✎", "Free draw (scribble anything)"],
-            ["rect", "▭", "Rectangle"],
-            ["rrect", "▢", "Rounded rectangle"],
-            ["ellipse", "◯", "Ellipse / circle"],
-            ["triangle", "△", "Triangle"],
-            ["diamond", "◇", "Diamond"],
-            ["star", "★", "Star"],
-            ["pentagon", "⬠", "Pentagon"],
-            ["hexagon", "⬡", "Hexagon"],
-            ["callout", "💬", "Callout / speech bubble"],
-            ["uparrow", "⬆", "Up block arrow"],
-            ["downarrow", "⬇", "Down block arrow"],
-            ["left", "↰", "Left turn"],
-            ["right", "↱", "Right turn"],
-            ["uturn", "↩", "U-turn"],
-            ["x", "✕", "X mark"],
+            ["darrow", "↔", "Measure"],
+            ["line", "—", "Line"],
+            ["pen", "✎", "Draw"],
             ["text", "T", "Text"],
           ] as const).map(([t, icon, label]) => (
             <button key={t} onClick={() => setDrawTool(t)} title={label} style={{ ...S.toolBtn, ...(drawTool === t ? S.toolBtnActive : {}) }}>
-              {icon}
+              <span style={{ fontSize: 19, lineHeight: 1 }}>{icon}</span>
+              <span style={S.toolLabel}>{label}</span>
             </button>
           ))}
+          <button
+            onClick={() => setShowMore((v) => !v)}
+            title="More shapes"
+            style={{ ...S.toolBtn, ...(showMore ? S.toolBtnActive : {}) }}
+          >
+            <span style={{ fontSize: 19, lineHeight: 1 }}>⋯</span>
+            <span style={S.toolLabel}>{showMore ? "Less" : "More"}</span>
+          </button>
+          {showMore &&
+            ([
+              ["rect", "▭", "Box"],
+              ["rrect", "▢", "Round box"],
+              ["ellipse", "◯", "Circle"],
+              ["triangle", "△", "Triangle"],
+              ["diamond", "◇", "Diamond"],
+              ["star", "★", "Star"],
+              ["pentagon", "⬠", "Pentagon"],
+              ["hexagon", "⬡", "Hexagon"],
+              ["callout", "💬", "Callout"],
+              ["uparrow", "⬆", "Up arrow"],
+              ["downarrow", "⬇", "Down arrow"],
+              ["left", "↰", "Left turn"],
+              ["right", "↱", "Right turn"],
+              ["uturn", "↩", "U-turn"],
+              ["x", "✕", "X mark"],
+            ] as const).map(([t, icon, label]) => (
+              <button key={t} onClick={() => setDrawTool(t)} title={label} style={{ ...S.toolBtn, ...(drawTool === t ? S.toolBtnActive : {}) }}>
+                <span style={{ fontSize: 19, lineHeight: 1 }}>{icon}</span>
+                <span style={S.toolLabel}>{label}</span>
+              </button>
+            ))}
           {([
             ["#FFD400", "Yellow"],
             ["#FF7A00", "Orange"],
@@ -952,36 +996,37 @@ export default function PhotoAnnotator({
             style={S.colorInput}
             title="Custom colour"
           />
-          <span style={{ fontSize: 11, fontWeight: 800, color: "#64748b", padding: "0 2px", whiteSpace: "nowrap" }}>
-            Symbols:
-          </span>
           <select
             value={drawWidth}
             onChange={(e) => setDrawWidth(Number(e.target.value))}
             style={S.widthSelect}
-            title="Symbol size — thickness of arrows / shapes / lines (does not affect text)"
+            title="Thickness of arrows / shapes / lines"
           >
             <option value={3}>Thin</option>
             <option value={6}>Medium</option>
             <option value={10}>Thick</option>
           </select>
-          <select
-            value={drawDash}
-            onChange={(e) => setDrawDash(e.target.value as "solid" | "dashed" | "dotted")}
-            style={S.widthSelect}
-            title="Symbol line style — for arrows / shapes / lines (not text)"
-          >
-            <option value="solid">Solid</option>
-            <option value="dashed">Dashed</option>
-            <option value="dotted">Dotted</option>
-          </select>
-          <label
-            style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 800, color: "#0f172a", cursor: "pointer", padding: "0 4px" }}
-            title="Fill closed shapes (translucent, so the photo stays visible)"
-          >
-            <input type="checkbox" checked={drawFill} onChange={(e) => setDrawFill(e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />
-            Fill
-          </label>
+          {showMore && (
+            <>
+              <select
+                value={drawDash}
+                onChange={(e) => setDrawDash(e.target.value as "solid" | "dashed" | "dotted")}
+                style={S.widthSelect}
+                title="Line style — for arrows / shapes / lines (not text)"
+              >
+                <option value="solid">Solid</option>
+                <option value="dashed">Dashed</option>
+                <option value="dotted">Dotted</option>
+              </select>
+              <label
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 800, color: "#0f172a", cursor: "pointer", padding: "0 4px" }}
+                title="Fill closed shapes (translucent, so the photo stays visible)"
+              >
+                <input type="checkbox" checked={drawFill} onChange={(e) => setDrawFill(e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />
+                Fill
+              </label>
+            </>
+          )}
         </div>
 
         {drawTool === "move" ? (
@@ -1050,19 +1095,20 @@ export default function PhotoAnnotator({
 }
 
 const S: Record<string, React.CSSProperties> = {
-  overlay: { position: "fixed", inset: 0, background: "rgba(2,6,23,0.72)", zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 },
-  card: { background: "#fff", borderRadius: 14, padding: 14, maxWidth: "min(96vw, 1360px)", maxHeight: "94vh", overflow: "auto", display: "flex", flexDirection: "column", gap: 10, boxShadow: "0 24px 60px rgba(0,0,0,0.4)" },
-  head: { display: "flex", alignItems: "center", justifyContent: "space-between", color: "#0f172a" },
-  close: { width: 34, height: 34, borderRadius: 8, border: "1px solid #e2e8f0", background: "#f8fafc", cursor: "pointer", fontSize: 15, color: "#0f172a" },
-  imgWrap: { position: "relative", alignSelf: "center", lineHeight: 0 },
+  overlay: { position: "fixed", inset: 0, background: "rgba(2,6,23,0.82)", zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 },
+  card: { background: "#fff", borderRadius: 0, padding: 10, width: "100vw", height: "100dvh", maxWidth: "100vw", maxHeight: "100dvh", overflow: "hidden", display: "flex", flexDirection: "column", gap: 8, boxShadow: "none" },
+  head: { display: "flex", alignItems: "center", justifyContent: "space-between", color: "#0f172a", flexShrink: 0 },
+  close: { width: 38, height: 38, borderRadius: 8, border: "1px solid #e2e8f0", background: "#f8fafc", cursor: "pointer", fontSize: 16, color: "#0f172a" },
+  imgWrap: { position: "relative", alignSelf: "center", lineHeight: 0, flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 0, overflow: "hidden" },
   canvas: { touchAction: "none", cursor: "crosshair", borderRadius: 8, display: "block", background: "#0b1220" },
-  tools: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" },
-  toolBtn: { width: 38, height: 38, borderRadius: 8, border: "1px solid #d7dbe0", background: "#fff", fontSize: 18, cursor: "pointer", color: "#0f172a" },
+  tools: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", flexShrink: 0, maxHeight: "30vh", overflowY: "auto" },
+  toolBtn: { minWidth: 48, height: 48, padding: "2px 6px", borderRadius: 10, border: "1px solid #d7dbe0", background: "#fff", cursor: "pointer", color: "#0f172a", display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1 },
+  toolLabel: { fontSize: 9, fontWeight: 800, lineHeight: 1, color: "inherit" },
   toolBtnActive: { background: "#0f172a", color: "#fff", borderColor: "#0f172a" },
   colorInput: { width: 38, height: 38, border: "1px solid #d7dbe0", borderRadius: 8, cursor: "pointer", padding: 2, background: "#fff" },
   swatch: { width: 30, height: 30, borderRadius: "50%", border: "1px solid rgba(0,0,0,0.15)", cursor: "pointer", outlineOffset: 2, flexShrink: 0 },
   widthSelect: { height: 38, borderRadius: 8, border: "1px solid #d7dbe0", padding: "0 8px", fontSize: 14, cursor: "pointer" },
-  actions: { display: "flex", gap: 6, flexWrap: "wrap" },
+  actions: { display: "flex", gap: 6, flexWrap: "wrap", flexShrink: 0 },
   ghost: { flex: 1, padding: "9px 10px", borderRadius: 8, border: "1px solid #d7dbe0", background: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer", color: "#0f172a" },
   primary: { flex: 1, padding: "9px 10px", borderRadius: 8, border: "none", background: "#16a34a", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" },
 };

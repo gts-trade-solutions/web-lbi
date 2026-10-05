@@ -3425,6 +3425,36 @@ export default function ProjectReportsPage() {
                                       ) : (
                                         <div style={{ width: "100%", height: "100%", background: "#F2F4F7" }} />
                                       )}
+                                      {p.url && !isVideoUrl(p.url) && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setAnnotatePhoto({ url: p.url as string, reportId: r.id, photoId: p.id });
+                                          }}
+                                          title="Draw on this photo (arrows, lines, labels)"
+                                          style={{
+                                            position: "absolute",
+                                            bottom: 2,
+                                            right: 2,
+                                            width: 22,
+                                            height: 22,
+                                            borderRadius: 6,
+                                            border: "none",
+                                            background: "rgba(109,40,217,0.94)",
+                                            color: "#fff",
+                                            fontSize: 12,
+                                            lineHeight: 1,
+                                            cursor: "pointer",
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "center",
+                                            padding: 0,
+                                          }}
+                                        >
+                                          ✏️
+                                        </button>
+                                      )}
                                       <input
                                         type="checkbox"
                                         checked={included}
