@@ -112,6 +112,43 @@ function blockArrowPath(ctx: CanvasRenderingContext2D, dir: "up" | "down", L: nu
   ctx.closePath();
 }
 
+type Pt = { x: number; y: number };
+
+// Perpendicular distance from p to the line through a–b.
+function perpDist(p: Pt, a: Pt, b: Pt): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+  const cx = a.x + t * dx;
+  const cy = a.y + t * dy;
+  return Math.hypot(p.x - cx, p.y - cy);
+}
+
+// Ramer–Douglas–Peucker: drop points that don't change the shape, which removes
+// the hand's jitter and leaves only the real turns of the gesture.
+function simplifyRDP(pts: Pt[], tol: number): Pt[] {
+  if (pts.length < 3) return pts.slice();
+  const a = pts[0];
+  const b = pts[pts.length - 1];
+  let maxD = 0;
+  let idx = 0;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = perpDist(pts[i], a, b);
+    if (d > maxD) {
+      maxD = d;
+      idx = i;
+    }
+  }
+  if (maxD > tol) {
+    const left = simplifyRDP(pts.slice(0, idx + 1), tol);
+    const right = simplifyRDP(pts.slice(idx), tol);
+    return left.slice(0, -1).concat(right);
+  }
+  return [a, b];
+}
+
 // Clean up a shaky free-hand path so it reads like a Word vector line rather
 // than a pencil scribble. Chaikin corner-cutting rounds every corner a few
 // times; the endpoints are kept so the line still starts/ends where drawn.
@@ -295,7 +332,10 @@ export default function PhotoAnnotator({
       // then draw a quadratic curve through it. Used on screen AND in the
       // exported image, so saved drawings are clean too. "carrow" adds a filled
       // arrowhead at the end — a Word-style curved arrow.
-      const sm = chaikinSmooth(pts, 3);
+      // Remove the hand's jitter (RDP) first, then round what's left (Chaikin):
+      // a shaky stroke becomes a clean, flowing curve that follows the gesture.
+      const simp = simplifyRDP(pts, Math.max(5, s.width * 1.2));
+      const sm = chaikinSmooth(simp, 4);
       ctx.beginPath();
       ctx.moveTo(sm[0].x, sm[0].y);
       if (sm.length < 3) {
