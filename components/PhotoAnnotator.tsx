@@ -271,9 +271,28 @@ export default function PhotoAnnotator({
       return;
     }
     if (s.tool === "pen") {
+      // Smooth free-hand: draw a quadratic curve that passes through the
+      // midpoint of each pair of points, using the points themselves as control
+      // points. This turns the jagged raw polyline into a clean flowing line
+      // (both on screen and in the exported image).
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      if (pts.length < 3) {
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      } else {
+        for (let i = 1; i < pts.length - 1; i++) {
+          const mx = (pts[i].x + pts[i + 1].x) / 2;
+          const my = (pts[i].y + pts[i + 1].y) / 2;
+          ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+        }
+        // Finish into the last point.
+        ctx.quadraticCurveTo(
+          pts[pts.length - 2].x,
+          pts[pts.length - 2].y,
+          pts[pts.length - 1].x,
+          pts[pts.length - 1].y
+        );
+      }
       ctx.stroke();
       return;
     }
@@ -686,8 +705,16 @@ export default function PhotoAnnotator({
       return;
     }
     if (!drawingRef.current) return;
-    if (drawTool === "pen") drawingRef.current.points.push(p);
-    else drawingRef.current.points[1] = p;
+    if (drawTool === "pen") {
+      // Ignore tiny jitter between samples so the smoothed curve stays clean
+      // (also keeps the point list from ballooning on slow strokes).
+      const last = drawingRef.current.points[drawingRef.current.points.length - 1];
+      if (!last || Math.hypot(p.x - last.x, p.y - last.y) >= 2.5) {
+        drawingRef.current.points.push(p);
+      }
+    } else {
+      drawingRef.current.points[1] = p;
+    }
     redrawCanvas(drawingRef.current);
   };
   const onDrawUp = () => {
