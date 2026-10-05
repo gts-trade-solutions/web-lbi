@@ -112,6 +112,26 @@ function blockArrowPath(ctx: CanvasRenderingContext2D, dir: "up" | "down", L: nu
   ctx.closePath();
 }
 
+// Clean up a shaky free-hand path so it reads like a Word vector line rather
+// than a pencil scribble. Chaikin corner-cutting rounds every corner a few
+// times; the endpoints are kept so the line still starts/ends where drawn.
+function chaikinSmooth(pts: { x: number; y: number }[], iterations = 2): { x: number; y: number }[] {
+  let out = pts;
+  for (let it = 0; it < iterations; it++) {
+    if (out.length < 3) break;
+    const next: { x: number; y: number }[] = [out[0]];
+    for (let i = 0; i < out.length - 1; i++) {
+      const p0 = out[i];
+      const p1 = out[i + 1];
+      next.push({ x: p0.x * 0.75 + p1.x * 0.25, y: p0.y * 0.75 + p1.y * 0.25 });
+      next.push({ x: p0.x * 0.25 + p1.x * 0.75, y: p0.y * 0.25 + p1.y * 0.75 });
+    }
+    next.push(out[out.length - 1]);
+    out = next;
+  }
+  return out;
+}
+
 type TextDraft = {
   dispX: number;
   dispY: number;
@@ -271,38 +291,37 @@ export default function PhotoAnnotator({
       return;
     }
     if (s.tool === "pen" || s.tool === "carrow") {
-      // Smooth free-hand: draw a quadratic curve that passes through the
-      // midpoint of each pair of points, using the points themselves as control
-      // points. This turns the jagged raw polyline into a clean flowing line
-      // (both on screen and in the exported image). "carrow" is the same, with a
-      // filled arrowhead at the end — a Word-style curved arrow.
+      // Clean, Word-like free-hand: strongly smooth the shaky path (Chaikin),
+      // then draw a quadratic curve through it. Used on screen AND in the
+      // exported image, so saved drawings are clean too. "carrow" adds a filled
+      // arrowhead at the end — a Word-style curved arrow.
+      const sm = chaikinSmooth(pts, 3);
       ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      if (pts.length < 3) {
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.moveTo(sm[0].x, sm[0].y);
+      if (sm.length < 3) {
+        for (let i = 1; i < sm.length; i++) ctx.lineTo(sm[i].x, sm[i].y);
       } else {
-        for (let i = 1; i < pts.length - 1; i++) {
-          const mx = (pts[i].x + pts[i + 1].x) / 2;
-          const my = (pts[i].y + pts[i + 1].y) / 2;
-          ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+        for (let i = 1; i < sm.length - 1; i++) {
+          const mx = (sm[i].x + sm[i + 1].x) / 2;
+          const my = (sm[i].y + sm[i + 1].y) / 2;
+          ctx.quadraticCurveTo(sm[i].x, sm[i].y, mx, my);
         }
-        // Finish into the last point.
         ctx.quadraticCurveTo(
-          pts[pts.length - 2].x,
-          pts[pts.length - 2].y,
-          pts[pts.length - 1].x,
-          pts[pts.length - 1].y
+          sm[sm.length - 2].x,
+          sm[sm.length - 2].y,
+          sm[sm.length - 1].x,
+          sm[sm.length - 1].y
         );
       }
       ctx.stroke();
-      if (s.tool === "carrow" && pts.length >= 2) {
+      if (s.tool === "carrow" && sm.length >= 2) {
         // Arrowhead pointing along the final direction of the curve.
-        const tip = pts[pts.length - 1];
-        let back = pts[pts.length - 2];
+        const tip = sm[sm.length - 1];
+        let back = sm[sm.length - 2];
         const minBack = s.width * 2 + 6;
-        for (let i = pts.length - 2; i >= 0; i--) {
-          if (Math.hypot(tip.x - pts[i].x, tip.y - pts[i].y) >= minBack) {
-            back = pts[i];
+        for (let i = sm.length - 2; i >= 0; i--) {
+          if (Math.hypot(tip.x - sm[i].x, tip.y - sm[i].y) >= minBack) {
+            back = sm[i];
             break;
           }
         }
