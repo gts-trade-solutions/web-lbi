@@ -868,6 +868,51 @@ const TEMPLATE_PATH = path.join(process.cwd(), "templates", "reena-all-template.
 // proportionally while preserving aspect ratio.
 const ROUTE_MAP_SIZE: [number, number] = [1248, 672];
 const GA_DRAWING_SIZE: [number, number] = [1344, 912];
+
+// The GA drawing slot in the template holds ONE image. When several GA images
+// were uploaded, lay them out in a grid on a single canvas that matches the GA
+// slot's aspect ratio, so all of them show (not just the first) and nothing is
+// distorted when the slot stretches the image to fit.
+async function compositeImagesGrid(
+  buffers: Buffer[],
+  boxW: number,
+  boxH: number
+): Promise<Buffer | null> {
+  const sharpLib = getSharp();
+  if (!sharpLib || buffers.length === 0) return null;
+  try {
+    const n = buffers.length;
+    const scale = 2; // render at 2x for crispness
+    const W = boxW * scale;
+    const H = boxH * scale;
+    const cols = n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4;
+    const rows = Math.ceil(n / cols);
+    const pad = Math.max(6, Math.round(W * 0.008));
+    const cellW = Math.floor((W - pad * (cols + 1)) / cols);
+    const cellH = Math.floor((H - pad * (rows + 1)) / rows);
+    if (cellW < 10 || cellH < 10) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parts: any[] = [];
+    for (let i = 0; i < n; i += 1) {
+      const rr = Math.floor(i / cols);
+      const cc = i % cols;
+      const cell = await sharpLib(buffers[i])
+        .rotate()
+        .resize(cellW, cellH, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 1 } })
+        .toBuffer();
+      parts.push({ input: cell, left: pad + cc * (cellW + pad), top: pad + rr * (cellH + pad) });
+    }
+    return await sharpLib({
+      create: { width: W, height: H, channels: 3, background: { r: 255, g: 255, b: 255 } },
+    })
+      .composite(parts)
+      .jpeg({ quality: 88, chromaSubsampling: "4:4:4", mozjpeg: true })
+      .toBuffer();
+  } catch (e) {
+    console.warn("[export] GA image grid composite failed:", (e as Error).message);
+    return null;
+  }
+}
 // Per spec: observation photo size depends on how many photos the report
 // has. Single photo: 9.4" × 6.6" (900 × 636 px) — big, but short enough to
 // sit UNDER the observation table on the SAME landscape-A3 page (the table +
@@ -3364,6 +3409,29 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.error("[export actual] route page query failed - continuing without:", err);
   }
   const routeMapUrl = String(routePageRow?.map_file_url || "").trim();
+
+  // ALL GA drawing images (not just the first). They live in
+  // project_route_page_images keyed to the route page; the single-row
+  // project_ga_drawings table only ever keeps the first one.
+  let gaImageUrls: string[] = [];
+  if (includeGa) {
+    const gaPageId = String(routePageRow?.id || "").trim();
+    if (gaPageId) {
+      try {
+        const imgRows = await safeQuery(
+          "SELECT file_url FROM project_route_page_images WHERE project_id = ? AND project_page_id = ? ORDER BY created_at ASC",
+          [projectId, gaPageId]
+        );
+        gaImageUrls = imgRows
+          .map((x) => String((x as Row).file_url || "").trim())
+          .filter(Boolean);
+      } catch (err) {
+        console.error("[export actual] ga images query failed - using single:", err);
+      }
+    }
+    if (!gaImageUrls.length && gaImageUrl) gaImageUrls = [gaImageUrl];
+  }
+  console.log("[export actual] GA images:", gaImageUrls.length);
   console.log("[export actual] routeMapUrl:", routeMapUrl || "(none)");
 
   // ----- Step 6b: Route locations (the "Locations" stepper from the UI).
@@ -3407,19 +3475,27 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // from disk, no url) and S3-fetched entries (no path) share a single shape.
   const imageMap = new Map<string, ImageEntry>();
   try {
-    const gaDrawingFetched = gaImageUrl
-      ? await fetchImageBuffer(gaImageUrl, "gaDrawing")
-      : null;
-    if (gaDrawingFetched && Buffer.isBuffer(gaDrawingFetched.buffer)) {
-      const optimized = await optimizeDocxImage(
-        gaDrawingFetched.buffer,
-        "gaDrawing",
-        "gaDrawing"
-      );
+    // Fetch every GA image, then: 1 image → use as-is; 2+ → lay them out in a
+    // grid on one canvas so all of them appear in the single GA slot.
+    const gaBuffers: Buffer[] = [];
+    for (const u of gaImageUrls) {
+      const f = await fetchImageBuffer(u, "gaDrawing");
+      if (f && Buffer.isBuffer(f.buffer)) gaBuffers.push(f.buffer);
+    }
+    if (gaBuffers.length) {
+      let finalBuf: Buffer;
+      if (gaBuffers.length === 1) {
+        finalBuf = await optimizeDocxImage(gaBuffers[0], "gaDrawing", "gaDrawing");
+      } else {
+        const grid = await compositeImagesGrid(gaBuffers, GA_DRAWING_SIZE[0], GA_DRAWING_SIZE[1]);
+        finalBuf = grid
+          ? await optimizeDocxImage(grid, "gaDrawing", "gaDrawing")
+          : await optimizeDocxImage(gaBuffers[0], "gaDrawing", "gaDrawing");
+      }
       imageMap.set("gaDrawing", {
-        ...gaDrawingFetched,
-        buffer: optimized,
+        buffer: finalBuf,
         contentType: "image/jpeg",
+        url: gaImageUrls[0] || gaImageUrl,
       });
     }
   } catch (err) {
