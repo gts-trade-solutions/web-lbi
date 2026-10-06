@@ -966,7 +966,10 @@ export default function PhotoAnnotator({
         });
         return;
       }
-      const naturalFont = textSize;
+      // Size the text relative to the PHOTO (≈4.5% of its width) so it looks
+      // right on any resolution — not a fixed size that's huge on a small photo.
+      const naturalFont = Math.max(16, Math.min(90, Math.round((canvas.width || 1000) * 0.045)));
+      setTextSize(naturalFont);
       setTextDraft({
         dispX: e.clientX - wrapRect.left,
         dispY: e.clientY - wrapRect.top,
@@ -1341,8 +1344,11 @@ export default function PhotoAnnotator({
             <input
               autoFocus
               value={textDraft.value}
-              placeholder="Short label…"
+              placeholder="Label…"
               maxLength={40}
+              // Box only as wide as the text (short when empty) so it can't run
+              // off a narrow photo.
+              size={Math.max(5, (textDraft.value.length || 6) + 1)}
               onChange={(e) => setTextDraft((d) => (d ? { ...d, value: e.target.value } : d))}
               onKeyDown={(e) => {
                 if (e.key === "Enter") { e.preventDefault(); commitText(); }
@@ -1353,7 +1359,7 @@ export default function PhotoAnnotator({
                 position: "absolute",
                 left: textDraft.dispX,
                 top: textDraft.dispY,
-                font: `bold ${Math.max(12, textDraft.font)}px system-ui, Segoe UI, Arial, sans-serif`,
+                font: `bold ${Math.min(60, Math.max(12, textDraft.font))}px system-ui, Segoe UI, Arial, sans-serif`,
                 color: drawColor,
                 background: "rgba(0,0,0,0.35)",
                 border: "1px dashed rgba(255,255,255,0.85)",
@@ -1361,8 +1367,8 @@ export default function PhotoAnnotator({
                 padding: "0 2px",
                 margin: 0,
                 lineHeight: 1.1,
-                minWidth: 60,
-                maxWidth: "90%",
+                width: "auto",
+                maxWidth: canvasRef.current?.style.width || "80%",
                 caretColor: drawColor,
                 zIndex: 5,
               }}
