@@ -273,6 +273,10 @@ export default function PhotoAnnotator({
   const textDragRef = useRef<
     { sx: number; sy: number; dX: number; dY: number; cx: number; cy: number; scale: number } | null
   >(null);
+  // While the user is using the text controls (grip / A− / A+), the input blurs;
+  // this stops that blur from committing (clearing) the label being typed.
+  const suppressCommitRef = useRef(false);
+  const textInputRef = useRef<HTMLInputElement | null>(null);
 
   // Advanced shapes (rectangles, stars, turn arrows…) are hidden behind "More"
   // so the everyday toolbar stays simple — the #1 "too many buttons" complaint.
@@ -1274,6 +1278,12 @@ export default function PhotoAnnotator({
   };
 
   const commitText = () => {
+    // Touching the move/size controls blurs the input — don't let that clear the
+    // label being typed.
+    if (suppressCommitRef.current) {
+      suppressCommitRef.current = false;
+      return;
+    }
     setStrokes(strokesWithDraft(textDraft));
     setTextDraft(null);
   };
@@ -1342,6 +1352,7 @@ export default function PhotoAnnotator({
           />
           {textDraft ? (
             <input
+              ref={textInputRef}
               autoFocus
               value={textDraft.value}
               placeholder="Label…"
@@ -1379,6 +1390,14 @@ export default function PhotoAnnotator({
             // resize — no need to click a button or switch tools.
             <div
               onMouseDown={(e) => e.preventDefault()}
+              onPointerDown={() => {
+                suppressCommitRef.current = true;
+              }}
+              onPointerUp={() => {
+                suppressCommitRef.current = false;
+                // keep the keyboard/caret in the label after using a control
+                setTimeout(() => textInputRef.current?.focus(), 0);
+              }}
               style={{
                 position: "absolute",
                 left: Math.max(2, textDraft.dispX),
