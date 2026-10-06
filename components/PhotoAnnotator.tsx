@@ -283,13 +283,16 @@ export default function PhotoAnnotator({
   // device rotation. Never upscales past 1:1 (keeps small photos crisp).
   const fitCanvas = useCallback(() => {
     const canvas = canvasRef.current;
+    const wrap = imgWrapRef.current;
     const img = baseImgRef.current;
-    if (!canvas) return;
+    if (!canvas || !wrap) return;
     const w = img?.naturalWidth || canvas.width || 1200;
     const h = img?.naturalHeight || canvas.height || 800;
-    const maxW = Math.max(260, window.innerWidth - 20);
-    const maxH = Math.max(260, window.innerHeight - 210); // leave room for toolbar + buttons
-    const scale = Math.min(maxW / w, maxH / h, 1);
+    // Fit to the ACTUAL available area (so the photo keeps its real shape and
+    // never gets squished by flex when the toolbar grows/shrinks).
+    const availW = Math.max(80, wrap.clientWidth - 4);
+    const availH = Math.max(80, wrap.clientHeight - 4);
+    const scale = Math.min(availW / w, availH / h, 1);
     canvas.style.width = `${Math.round(w * scale)}px`;
     canvas.style.height = `${Math.round(h * scale)}px`;
   }, []);
@@ -298,9 +301,19 @@ export default function PhotoAnnotator({
     const onResize = () => fitCanvas();
     window.addEventListener("resize", onResize);
     window.addEventListener("orientationchange", onResize);
+    // Re-fit whenever the image area itself changes size (e.g. the toolbar grew
+    // when you pick the Text tool), so the photo always fills the space with its
+    // correct shape instead of being squished.
+    let ro: ResizeObserver | null = null;
+    const wrap = imgWrapRef.current;
+    if (wrap && typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(() => fitCanvas());
+      ro.observe(wrap);
+    }
     return () => {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("orientationchange", onResize);
+      if (ro) ro.disconnect();
     };
   }, [fitCanvas]);
 
@@ -1532,30 +1545,13 @@ export default function PhotoAnnotator({
           )}
         </div>
 
-        {/* Text size — shown while using the Text tool or when a text label is
-            selected. A− / A+ make the text smaller / bigger. */}
-        {drawTool === "text" ||
-        (drawTool === "move" && selectedIdx != null && strokes[selectedIdx]?.tool === "text") ? (
+        {/* Text size for a SELECTED text label (while typing, use the floating
+            A− / A+ over the label instead). */}
+        {drawTool === "move" && selectedIdx != null && strokes[selectedIdx]?.tool === "text" ? (
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             <span style={{ fontSize: 12, fontWeight: 800, color: "#0f172a" }}>Text size</span>
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => changeTextSize(1 / 1.2)}
-              title="Smaller text"
-              style={{ minWidth: 44, height: 40, borderRadius: 8, border: "1px solid #d7dbe0", background: "#fff", fontWeight: 900, fontSize: 15, cursor: "pointer", color: "#0f172a" }}
-            >
-              A−
-            </button>
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => changeTextSize(1.2)}
-              title="Bigger text"
-              style={{ minWidth: 44, height: 40, borderRadius: 8, border: "1px solid #d7dbe0", background: "#fff", fontWeight: 900, fontSize: 19, cursor: "pointer", color: "#0f172a" }}
-            >
-              A+
-            </button>
+            <button type="button" onClick={() => changeTextSize(1 / 1.2)} title="Smaller text" style={{ minWidth: 44, height: 40, borderRadius: 8, border: "1px solid #d7dbe0", background: "#fff", fontWeight: 900, fontSize: 15, cursor: "pointer", color: "#0f172a" }}>A−</button>
+            <button type="button" onClick={() => changeTextSize(1.2)} title="Bigger text" style={{ minWidth: 44, height: 40, borderRadius: 8, border: "1px solid #d7dbe0", background: "#fff", fontWeight: 900, fontSize: 19, cursor: "pointer", color: "#0f172a" }}>A+</button>
           </div>
         ) : null}
 
@@ -1641,7 +1637,7 @@ const S: Record<string, React.CSSProperties> = {
   head: { display: "flex", alignItems: "center", justifyContent: "space-between", color: "#0f172a", flexShrink: 0 },
   close: { width: 38, height: 38, borderRadius: 8, border: "1px solid #e2e8f0", background: "#f8fafc", cursor: "pointer", fontSize: 16, color: "#0f172a" },
   imgWrap: { position: "relative", alignSelf: "center", lineHeight: 0, flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 0, overflow: "hidden" },
-  canvas: { touchAction: "none", cursor: "crosshair", borderRadius: 8, display: "block", background: "#0b1220" },
+  canvas: { touchAction: "none", cursor: "crosshair", borderRadius: 8, display: "block", background: "#0b1220", flexShrink: 0, maxWidth: "100%", maxHeight: "100%" },
   tools: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", flexShrink: 0, maxHeight: "30vh", overflowY: "auto" },
   toolBtn: { minWidth: 48, height: 48, padding: "2px 6px", borderRadius: 10, border: "1px solid #d7dbe0", background: "#fff", cursor: "pointer", color: "#0f172a", display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1 },
   toolLabel: { fontSize: 9, fontWeight: 800, lineHeight: 1, color: "inherit" },
