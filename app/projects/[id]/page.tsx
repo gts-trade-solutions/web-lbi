@@ -3650,7 +3650,7 @@ export default function ProjectReportsPage() {
                                   }}
                                   title="Move the drawing images out into a new separate report (right after this one)"
                                 >
-                                  {extractingDrawings[r.id] ? "Extracting…" : "Extract drawings"}
+                                  {extractingDrawings[r.id] ? "Extracting…" : "Extract photos"}
                                 </button>
                               )}
 
