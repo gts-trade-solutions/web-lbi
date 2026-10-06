@@ -2198,15 +2198,32 @@ export default function ProjectReportsPage() {
             reportId={annotatePhoto.reportId}
             photoId={annotatePhoto.photoId}
             onClose={() => setAnnotatePhoto(null)}
-            onSaved={async () => {
+            onSaved={async (newUrl) => {
+              const rid = annotatePhoto.reportId;
+              const pid = annotatePhoto.photoId;
               setAnnotatePhoto(null);
-              // The same photo now shows the drawing, in the same place — so
-              // the viewer stays where it is rather than jumping to the end.
               try {
                 await fetchReports(q, sortDir, vmFilter);
               } catch {
                 /* ignore refresh error — the photo saved regardless */
               }
+              // The drawing replaces the photo in place, so its URL can be the
+              // same and the browser would show the cached (old) image. Force a
+              // reload of just this photo with a cache-buster, so the grid and
+              // the open preview update immediately — no page refresh needed.
+              const bust = (u: string) => (u ? `${u}${u.includes("?") ? "&" : "?"}e=${Date.now()}` : u);
+              setReports((prev) =>
+                prev.map((r) =>
+                  r.id === rid
+                    ? {
+                        ...r,
+                        photos: (r.photos || []).map((p) =>
+                          p.id === pid ? { ...p, url: bust(newUrl || (p.url as string) || "") } : p
+                        ),
+                      }
+                    : r
+                )
+              );
             }}
           />
         )}
