@@ -245,6 +245,7 @@ export default function PhotoAnnotator({
   const [drawWidth, setDrawWidth] = useState(6);
   const [drawFill, setDrawFill] = useState(false);
   const [drawDash, setDrawDash] = useState<"solid" | "dashed" | "dotted">("solid");
+  const [textSize, setTextSize] = useState(40); // font size (px) for new text labels
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [redoStack, setRedoStack] = useState<Stroke[]>([]);
   const [saving, setSaving] = useState(false);
@@ -770,6 +771,32 @@ export default function PhotoAnnotator({
     }
   };
 
+  // Make text bigger / smaller. Applies to the label being typed, the selected
+  // text label, and the default size for the next new label.
+  const changeTextSize = (factor: number) => {
+    const clamp = (v: number) => Math.max(10, Math.min(240, Math.round(v * factor)));
+    const canvas = canvasRef.current;
+    const scale = canvas && canvas.width ? (parseFloat(canvas.style.width || "0") / canvas.width) || 1 : 1;
+    if (textDraft) {
+      const newNat = clamp(textDraft.naturalFont);
+      setTextDraft((d) => (d ? { ...d, naturalFont: newNat, font: newNat * scale } : d));
+      setTextSize(newNat);
+      if (textDraft.editIdx != null) {
+        const ei = textDraft.editIdx;
+        setStrokes((prev) => prev.map((s, i) => (i === ei ? { ...s, fontSize: newNat } : s)));
+      }
+      return;
+    }
+    if (drawTool === "move" && selectedIdx != null && strokes[selectedIdx]?.tool === "text") {
+      setStrokes((prev) =>
+        prev.map((s, i) => (i === selectedIdx ? { ...s, fontSize: clamp(s.fontSize || textSize) } : s))
+      );
+      setTextSize((v) => clamp(v));
+      return;
+    }
+    setTextSize((v) => clamp(v));
+  };
+
   const onDrawDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     if (textDraft) {
@@ -885,7 +912,7 @@ export default function PhotoAnnotator({
         });
         return;
       }
-      const naturalFont = Math.max(28, drawWidth * 7);
+      const naturalFont = textSize;
       setTextDraft({
         dispX: e.clientX - wrapRect.left,
         dispY: e.clientY - wrapRect.top,
@@ -1393,6 +1420,33 @@ export default function PhotoAnnotator({
             </>
           )}
         </div>
+
+        {/* Text size — shown while using the Text tool or when a text label is
+            selected. A− / A+ make the text smaller / bigger. */}
+        {drawTool === "text" ||
+        (drawTool === "move" && selectedIdx != null && strokes[selectedIdx]?.tool === "text") ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            <span style={{ fontSize: 12, fontWeight: 800, color: "#0f172a" }}>Text size</span>
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => changeTextSize(1 / 1.2)}
+              title="Smaller text"
+              style={{ minWidth: 44, height: 40, borderRadius: 8, border: "1px solid #d7dbe0", background: "#fff", fontWeight: 900, fontSize: 15, cursor: "pointer", color: "#0f172a" }}
+            >
+              A−
+            </button>
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => changeTextSize(1.2)}
+              title="Bigger text"
+              style={{ minWidth: 44, height: 40, borderRadius: 8, border: "1px solid #d7dbe0", background: "#fff", fontWeight: 900, fontSize: 19, cursor: "pointer", color: "#0f172a" }}
+            >
+              A+
+            </button>
+          </div>
+        ) : null}
 
         {drawTool === "move" ? (
           <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b" }}>
