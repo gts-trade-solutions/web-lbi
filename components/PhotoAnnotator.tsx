@@ -169,6 +169,30 @@ function chaikinSmooth(pts: { x: number; y: number }[], iterations = 2): { x: nu
   return out;
 }
 
+// Rotate point p by `ang` radians around centre c.
+function rotateAround(p: Pt, ang: number, c: Pt): Pt {
+  const cos = Math.cos(ang);
+  const sin = Math.sin(ang);
+  const dx = p.x - c.x;
+  const dy = p.y - c.y;
+  return { x: c.x + dx * cos - dy * sin, y: c.y + dx * sin + dy * cos };
+}
+
+// What a drag of the selection box is doing (Word-style move / resize / rotate).
+type BoxDrag =
+  | { kind: "move" }
+  | { kind: "rotate"; c: Pt; startAngle: number; startRot: number }
+  | {
+      kind: "resize";
+      handle: number; // 0..7, clockwise from top-left
+      pts0: Pt[];
+      fontSize0: number;
+      rot: number;
+      c0: Pt;
+      anchorLocal: Pt; // opposite handle, fixed during the drag
+      draggedLocal: Pt; // the handle being dragged
+    };
+
 type TextDraft = {
   dispX: number;
   dispY: number;
@@ -224,6 +248,8 @@ export default function PhotoAnnotator({
   // Which endpoint of the selected shape is being dragged to reshape it
   // (point index in stroke.points), or null when moving/idle.
   const resizeHandleRef = useRef<number | null>(null);
+  // Active Word-style selection-box drag (move / resize via a handle / rotate).
+  const boxDragRef = useRef<BoxDrag | null>(null);
 
   // Advanced shapes (rectangles, stars, turn arrows…) are hidden behind "More"
   // so the everyday toolbar stays simple — the #1 "too many buttons" complaint.
@@ -466,6 +492,43 @@ export default function PhotoAnnotator({
     return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) };
   };
 
+  // Word-style selection geometry: the 8 resize handles (clockwise from
+  // top-left), the rotation handle above the shape, the box corners and the
+  // centre — all in canvas coords with the shape's rotation applied.
+  const handleGeom = (s: Stroke) => {
+    const b = strokeBBox(s);
+    const pad = 6;
+    const minX = b.minX - pad;
+    const minY = b.minY - pad;
+    const maxX = b.maxX + pad;
+    const maxY = b.maxY + pad;
+    const c = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+    const rot = s.rot || 0;
+    // local (un-rotated) positions
+    const local = [
+      { x: minX, y: minY }, // 0 TL
+      { x: c.x, y: minY }, // 1 T
+      { x: maxX, y: minY }, // 2 TR
+      { x: maxX, y: c.y }, // 3 R
+      { x: maxX, y: maxY }, // 4 BR
+      { x: c.x, y: maxY }, // 5 B
+      { x: minX, y: maxY }, // 6 BL
+      { x: minX, y: c.y }, // 7 L
+    ];
+    const handles = local.map((h) => rotateAround(h, rot, c));
+    const corners = [handles[0], handles[2], handles[4], handles[6]];
+    const rotLocal = { x: c.x, y: minY - Math.max(26, (maxY - minY) * 0.14) };
+    const rotHandle = rotateAround(rotLocal, rot, c);
+    return { b: { minX, minY, maxX, maxY }, c, rot, local, handles, corners, rotHandle };
+  };
+
+  // Is canvas point p inside the selected shape's (rotated) box?
+  const insideBox = (s: Stroke, p: Pt) => {
+    const g = handleGeom(s);
+    const lp = rotateAround(p, -g.rot, g.c);
+    return lp.x >= g.b.minX && lp.x <= g.b.maxX && lp.y >= g.b.minY && lp.y <= g.b.maxY;
+  };
+
   const redrawCanvas = useCallback(
     (extra?: Stroke | null) => {
       const canvas = canvasRef.current;
@@ -485,32 +548,51 @@ export default function PhotoAnnotator({
       if (extra) drawOneStroke(ctx, extra);
       if (drawTool === "move" && selectedIdx != null && strokes[selectedIdx]) {
         const sel = strokes[selectedIdx];
-        const b = strokeBBox(sel);
+        const g = handleGeom(sel);
         const dispScale = canvas.width ? (parseFloat(canvas.style.width || "0") / canvas.width) || 1 : 1;
+        const lw = Math.max(1.5, 1.5 / dispScale);
         ctx.save();
-        ctx.setLineDash([10 / dispScale, 7 / dispScale]);
-        ctx.strokeStyle = "#22D3EE";
-        ctx.lineWidth = Math.max(2, 2 / dispScale);
-        ctx.strokeRect(b.minX - 8, b.minY - 8, b.maxX - b.minX + 16, b.maxY - b.minY + 16);
-        ctx.restore();
-        // Draggable endpoint handles for reshaping (2-point shapes only, and
-        // only when not rotated — after rotating, resize with − / +).
-        if (sel.tool !== "pen" && sel.tool !== "carrow" && sel.tool !== "text" && !sel.rot) {
-          const hs = Math.max(6, 9 / dispScale);
-          const hpts = [sel.points[0], sel.points[sel.points.length - 1]];
-          ctx.save();
-          ctx.setLineDash([]);
+        // Selection box (follows rotation).
+        ctx.setLineDash([]);
+        ctx.strokeStyle = "#2b6cff";
+        ctx.lineWidth = lw;
+        ctx.beginPath();
+        ctx.moveTo(g.corners[0].x, g.corners[0].y);
+        for (let k = 1; k < g.corners.length; k++) ctx.lineTo(g.corners[k].x, g.corners[k].y);
+        ctx.closePath();
+        ctx.stroke();
+        // Line up to the rotation handle.
+        ctx.beginPath();
+        ctx.moveTo(g.handles[1].x, g.handles[1].y);
+        ctx.lineTo(g.rotHandle.x, g.rotHandle.y);
+        ctx.stroke();
+        // Handles — white circles with a blue ring, like Word.
+        const hr = Math.max(5, 7 / dispScale);
+        const drawHandle = (pt: Pt, r: number) => {
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
           ctx.fillStyle = "#ffffff";
-          ctx.strokeStyle = "#0f172a";
-          ctx.lineWidth = Math.max(2, 2 / dispScale);
-          for (const hp of hpts) {
-            ctx.beginPath();
-            ctx.rect(hp.x - hs, hp.y - hs, hs * 2, hs * 2);
-            ctx.fill();
-            ctx.stroke();
-          }
-          ctx.restore();
+          ctx.fill();
+          ctx.lineWidth = lw;
+          ctx.strokeStyle = "#2b6cff";
+          ctx.stroke();
+        };
+        // Line/arrow-type shapes (2 points) only need the two end handles;
+        // closed shapes & text get the full 8-handle box.
+        const twoPoint =
+          sel.tool === "arrow" ||
+          sel.tool === "darrow" ||
+          sel.tool === "line";
+        if (twoPoint) {
+          drawHandle(rotateAround(sel.points[0], g.rot, g.c), hr);
+          drawHandle(rotateAround(sel.points[sel.points.length - 1], g.rot, g.c), hr);
+        } else if (sel.tool === "pen" || sel.tool === "carrow") {
+          // free-hand: just the box (dragging handles would distort it oddly)
+        } else {
+          for (const h of g.handles) drawHandle(h, hr);
         }
+        drawHandle(g.rotHandle, hr * 1.1);
+        ctx.restore();
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -683,32 +765,79 @@ export default function PhotoAnnotator({
     const p = canvasPoint(e);
     if (drawTool === "move") {
       (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
-      // If a shape is already selected, grabbing one of its white endpoint
-      // handles reshapes it (drag the corner) instead of moving the whole shape.
-      if (selectedIdx != null) {
+      boxDragRef.current = null;
+      resizeHandleRef.current = null;
+      moveDragRef.current = null;
+      // If a shape is already selected, a tap on one of its handles / the
+      // rotation handle / inside the box drives resize / rotate / move — exactly
+      // like grabbing a shape in Word.
+      if (selectedIdx != null && strokes[selectedIdx]) {
         const sel = strokes[selectedIdx];
-        if (sel && sel.tool !== "pen" && sel.tool !== "carrow" && sel.tool !== "text" && !sel.rot) {
-          const canvas = canvasRef.current!;
-          const rect = canvas.getBoundingClientRect();
-          const scale = rect.width / canvas.width || 1;
-          const tol = 18 / scale;
-          const iLast = sel.points.length - 1;
-          if (Math.hypot(p.x - sel.points[0].x, p.y - sel.points[0].y) <= tol) {
-            resizeHandleRef.current = 0;
-            moveDragRef.current = null;
-            return;
+        const canvas = canvasRef.current!;
+        const rect = canvas.getBoundingClientRect();
+        const scale = rect.width / canvas.width || 1;
+        const tol = 16 / scale; // finger/mouse hit radius for a handle
+        const g = handleGeom(sel);
+
+        // Rotation handle.
+        if (Math.hypot(p.x - g.rotHandle.x, p.y - g.rotHandle.y) <= tol) {
+          boxDragRef.current = {
+            kind: "rotate",
+            c: g.c,
+            startAngle: Math.atan2(p.y - g.c.y, p.x - g.c.x),
+            startRot: g.rot,
+          };
+          return;
+        }
+
+        const twoPoint = sel.tool === "arrow" || sel.tool === "darrow" || sel.tool === "line";
+        const freeHand = sel.tool === "pen" || sel.tool === "carrow";
+
+        if (twoPoint) {
+          // Line/arrow: the two handles ARE the endpoints — drag to re-aim.
+          const ends = [
+            { i: 0, pt: rotateAround(sel.points[0], g.rot, g.c) },
+            { i: sel.points.length - 1, pt: rotateAround(sel.points[sel.points.length - 1], g.rot, g.c) },
+          ];
+          for (const en of ends) {
+            if (Math.hypot(p.x - en.pt.x, p.y - en.pt.y) <= tol) {
+              resizeHandleRef.current = en.i;
+              return;
+            }
           }
-          if (Math.hypot(p.x - sel.points[iLast].x, p.y - sel.points[iLast].y) <= tol) {
-            resizeHandleRef.current = iLast;
-            moveDragRef.current = null;
-            return;
+        } else if (!freeHand) {
+          // Closed shapes & text: 8-handle box resize.
+          for (let hi = 0; hi < 8; hi++) {
+            if (Math.hypot(p.x - g.handles[hi].x, p.y - g.handles[hi].y) <= tol) {
+              const anchorIdx = (hi + 4) % 8;
+              boxDragRef.current = {
+                kind: "resize",
+                handle: hi,
+                pts0: sel.points.map((pt) => ({ ...pt })),
+                fontSize0: sel.fontSize || 32,
+                rot: g.rot,
+                c0: g.c,
+                anchorLocal: g.local[anchorIdx],
+                draggedLocal: g.local[hi],
+              };
+              return;
+            }
           }
         }
+
+        // Inside the (rotated) box → move the whole shape.
+        if (insideBox(sel, p)) {
+          boxDragRef.current = { kind: "move" };
+          moveDragRef.current = { x: p.x, y: p.y };
+          return;
+        }
       }
+
+      // Otherwise pick whatever is under the pointer (or clear the selection).
       const idx = hitTest(p);
       setSelectedIdx(idx);
+      boxDragRef.current = idx != null ? { kind: "move" } : null;
       moveDragRef.current = idx != null ? { x: p.x, y: p.y } : null;
-      resizeHandleRef.current = null;
       redrawCanvas();
       return;
     }
@@ -768,8 +897,52 @@ export default function PhotoAnnotator({
   const onDrawMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const p = canvasPoint(e);
     if (drawTool === "move") {
-      // Reshaping: drag one endpoint handle.
-      if (resizeHandleRef.current != null && selectedIdx != null) {
+      if (selectedIdx == null) return;
+      const drag = boxDragRef.current;
+
+      // Rotate via the rotation handle.
+      if (drag?.kind === "rotate") {
+        const ang = Math.atan2(p.y - drag.c.y, p.x - drag.c.x);
+        const newRot = drag.startRot + (ang - drag.startAngle);
+        setStrokes((prev) => prev.map((s, i) => (i === selectedIdx ? { ...s, rot: newRot } : s)));
+        return;
+      }
+
+      // Resize via a box handle (keeps the opposite handle fixed).
+      if (drag?.kind === "resize") {
+        const lp = rotateAround(p, -drag.rot, drag.c0); // pointer in the shape's local frame
+        const corner = drag.handle % 2 === 0;
+        const affectsX = corner || drag.handle === 3 || drag.handle === 7;
+        const affectsY = corner || drag.handle === 1 || drag.handle === 5;
+        let sx = 1;
+        let sy = 1;
+        if (affectsX) {
+          const denom = drag.draggedLocal.x - drag.anchorLocal.x;
+          if (Math.abs(denom) > 0.5) sx = (lp.x - drag.anchorLocal.x) / denom;
+        }
+        if (affectsY) {
+          const denom = drag.draggedLocal.y - drag.anchorLocal.y;
+          if (Math.abs(denom) > 0.5) sy = (lp.y - drag.anchorLocal.y) / denom;
+        }
+        const clamp = (v: number) => (v >= 0 ? Math.max(0.05, v) : Math.min(-0.05, v));
+        sx = clamp(sx);
+        sy = clamp(sy);
+        const a = drag.anchorLocal;
+        if (strokes[selectedIdx]?.tool === "text") {
+          const f = corner ? Math.max(Math.abs(sx), Math.abs(sy)) : affectsX ? Math.abs(sx) : Math.abs(sy);
+          const newFont = Math.max(10, Math.round(drag.fontSize0 * f));
+          const p0 = drag.pts0[0];
+          const np0 = { x: a.x + (p0.x - a.x) * sx, y: a.y + (p0.y - a.y) * sy };
+          setStrokes((prev) => prev.map((s, i) => (i === selectedIdx ? { ...s, fontSize: newFont, points: [np0] } : s)));
+        } else {
+          const np = drag.pts0.map((pt) => ({ x: a.x + (pt.x - a.x) * sx, y: a.y + (pt.y - a.y) * sy }));
+          setStrokes((prev) => prev.map((s, i) => (i === selectedIdx ? { ...s, points: np } : s)));
+        }
+        return;
+      }
+
+      // Reshaping a line/arrow by dragging one endpoint.
+      if (resizeHandleRef.current != null) {
         const hi = resizeHandleRef.current;
         setStrokes((prev) =>
           prev.map((s, i) =>
@@ -778,7 +951,9 @@ export default function PhotoAnnotator({
         );
         return;
       }
-      if (selectedIdx == null || !moveDragRef.current) return;
+
+      // Move the whole shape.
+      if (!moveDragRef.current) return;
       const dx = p.x - moveDragRef.current.x;
       const dy = p.y - moveDragRef.current.y;
       moveDragRef.current = { x: p.x, y: p.y };
@@ -801,6 +976,7 @@ export default function PhotoAnnotator({
   const onDrawUp = () => {
     moveDragRef.current = null;
     resizeHandleRef.current = null;
+    boxDragRef.current = null;
     if (!drawingRef.current) return;
     const s = drawingRef.current;
     drawingRef.current = null;
@@ -1142,7 +1318,7 @@ export default function PhotoAnnotator({
           <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b" }}>
             {selectedIdx == null
               ? "Tap any drawing or text to select it."
-              : "Drag inside to move · drag a white corner to reshape · − / + to resize · Delete to remove."}
+              : "Drag inside to move · drag a corner/edge handle to resize · drag the top handle to rotate · Delete to remove."}
           </div>
         ) : null}
         {drawTool === "text" ? (
