@@ -900,6 +900,27 @@ export default function ProjectReportsPage() {
   const [annotatePhoto, setAnnotatePhoto] = useState<{ url: string; reportId: string; photoId: string } | null>(null);
   const [cropPhoto, setCropPhoto] = useState<{ url: string; reportId: string; photoId: string } | null>(null);
 
+  // Add a photo to a report straight from the photo preview.
+  const addPhotoInputRef = useRef<HTMLInputElement | null>(null);
+  const [addingPhoto, setAddingPhoto] = useState(false);
+  const addPhotoToReport = async (reportId: string, files: FileList | null) => {
+    const list = Array.from(files || []);
+    if (!list.length || !projectId) return;
+    setAddingPhoto(true);
+    try {
+      await uploadReportPhotos(projectId, reportId, list);
+      await fetchReports(q, sortDir, vmFilter);
+      // Jump the preview to the newly added (last) photo — the lightbox clamps
+      // a too-big index to the last photo.
+      setPhotoPreview((p) => (p && p.reportId === reportId ? { ...p, index: 9999 } : p));
+      toast("Photo added.");
+    } catch (e: any) {
+      toast(e?.message || "Could not add the photo.");
+    } finally {
+      setAddingPhoto(false);
+    }
+  };
+
   // Tick/untick one photo of a report for the Word export, straight from the
   // table row. Optimistic update; reverts if the server rejects the change.
   const [photoToggling, setPhotoToggling] = useState<Record<string, boolean>>({});
@@ -2369,6 +2390,26 @@ export default function ProjectReportsPage() {
                         ✏️ Draw / edit
                       </button>
                     ) : null}
+                    <input
+                      ref={addPhotoInputRef}
+                      type="file"
+                      accept="image/*,video/*,.pdf,application/pdf"
+                      multiple
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        addPhotoToReport(photoPreview.reportId, e.target.files);
+                        e.currentTarget.value = "";
+                      }}
+                    />
+                    <button
+                      type="button"
+                      style={{ ...styles.btnGhost, borderColor: "#12B76A", color: "#027A48", fontWeight: 900, opacity: addingPhoto ? 0.6 : 1 }}
+                      onClick={() => addPhotoInputRef.current?.click()}
+                      disabled={addingPhoto}
+                      title="Add another photo to this report"
+                    >
+                      {addingPhoto ? "Adding…" : "➕ Add photo"}
+                    </button>
                     {cur.url && !isVideoUrl(cur.url) ? (
                       <button
                         type="button"

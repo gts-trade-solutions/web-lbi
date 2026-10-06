@@ -269,6 +269,10 @@ export default function PhotoAnnotator({
   const resizeHandleRef = useRef<number | null>(null);
   // Active Word-style selection-box drag (move / resize via a handle / rotate).
   const boxDragRef = useRef<BoxDrag | null>(null);
+  // Dragging the text label while it's being typed (via its move grip).
+  const textDragRef = useRef<
+    { sx: number; sy: number; dX: number; dY: number; cx: number; cy: number; scale: number } | null
+  >(null);
 
   // Advanced shapes (rectangles, stars, turn arrows…) are hidden behind "More"
   // so the everyday toolbar stays simple — the #1 "too many buttons" complaint.
@@ -774,6 +778,49 @@ export default function PhotoAnnotator({
       setStrokes((prev) =>
         prev.map((s, i) => (i === targetIdx ? { ...s, color: c } : s))
       );
+    }
+  };
+
+  const canvasDispScale = () => {
+    const c = canvasRef.current;
+    return c && c.width ? (parseFloat(c.style.width || "0") / c.width) || 1 : 1;
+  };
+
+  // Drag the text label (by its grip) while it's being typed — move it without
+  // leaving the keyboard / clicking a separate tool.
+  const startTextDrag = (e: React.PointerEvent) => {
+    if (!textDraft) return;
+    e.preventDefault();
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      /* best effort */
+    }
+    textDragRef.current = {
+      sx: e.clientX,
+      sy: e.clientY,
+      dX: textDraft.dispX,
+      dY: textDraft.dispY,
+      cx: textDraft.cx,
+      cy: textDraft.cy,
+      scale: canvasDispScale(),
+    };
+  };
+  const onTextDragMove = (e: React.PointerEvent) => {
+    const d = textDragRef.current;
+    if (!d) return;
+    const ddx = e.clientX - d.sx;
+    const ddy = e.clientY - d.sy;
+    setTextDraft((t) =>
+      t ? { ...t, dispX: d.dX + ddx, dispY: d.dY + ddy, cx: d.cx + ddx / d.scale, cy: d.cy + ddy / d.scale } : t
+    );
+  };
+  const endTextDrag = (e: React.PointerEvent) => {
+    textDragRef.current = null;
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
     }
   };
 
@@ -1319,6 +1366,64 @@ export default function PhotoAnnotator({
                 zIndex: 5,
               }}
             />
+          ) : null}
+          {textDraft ? (
+            // Inline controls over the label being typed: drag to move, A−/A+ to
+            // resize — no need to click a button or switch tools.
+            <div
+              onMouseDown={(e) => e.preventDefault()}
+              style={{
+                position: "absolute",
+                left: Math.max(2, textDraft.dispX),
+                top: Math.max(2, textDraft.dispY - 40),
+                display: "flex",
+                gap: 4,
+                alignItems: "center",
+                zIndex: 6,
+              }}
+            >
+              <div
+                onPointerDown={startTextDrag}
+                onPointerMove={onTextDragMove}
+                onPointerUp={endTextDrag}
+                onPointerCancel={endTextDrag}
+                title="Drag to move the text"
+                style={{
+                  width: 36,
+                  height: 32,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  background: "#0f172a",
+                  color: "#fff",
+                  borderRadius: 6,
+                  cursor: "grab",
+                  touchAction: "none",
+                  fontWeight: 900,
+                  fontSize: 15,
+                }}
+              >
+                ✥
+              </div>
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => changeTextSize(1 / 1.2)}
+                title="Smaller text"
+                style={{ height: 32, minWidth: 34, borderRadius: 6, border: "none", background: "#0f172a", color: "#fff", fontWeight: 900, fontSize: 13, cursor: "pointer" }}
+              >
+                A−
+              </button>
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => changeTextSize(1.2)}
+                title="Bigger text"
+                style={{ height: 32, minWidth: 34, borderRadius: 6, border: "none", background: "#0f172a", color: "#fff", fontWeight: 900, fontSize: 17, cursor: "pointer" }}
+              >
+                A+
+              </button>
+            </div>
           ) : null}
         </div>
 
