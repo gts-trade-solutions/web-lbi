@@ -169,6 +169,21 @@ function chaikinSmooth(pts: { x: number; y: number }[], iterations = 2): { x: nu
   return out;
 }
 
+// Word's Shift-constrain while drawing: straight lines snap to 0/45/90°, and
+// boxes/circles become square. `a` is the start point, `b` the current point.
+function constrainEnd(a: Pt, b: Pt, tool: string): Pt {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  if (tool === "line" || tool === "arrow" || tool === "darrow") {
+    const step = Math.PI / 4;
+    const snap = Math.round(Math.atan2(dy, dx) / step) * step;
+    const len = Math.hypot(dx, dy);
+    return { x: a.x + len * Math.cos(snap), y: a.y + len * Math.sin(snap) };
+  }
+  const s = Math.max(Math.abs(dx), Math.abs(dy));
+  return { x: a.x + (dx < 0 ? -s : s), y: a.y + (dy < 0 ? -s : s) };
+}
+
 // Rotate point p by `ang` radians around centre c.
 function rotateAround(p: Pt, ang: number, c: Pt): Pt {
   const cos = Math.cos(ang);
@@ -903,7 +918,12 @@ export default function PhotoAnnotator({
       // Rotate via the rotation handle.
       if (drag?.kind === "rotate") {
         const ang = Math.atan2(p.y - drag.c.y, p.x - drag.c.x);
-        const newRot = drag.startRot + (ang - drag.startAngle);
+        let newRot = drag.startRot + (ang - drag.startAngle);
+        // Hold Shift to snap rotation to 15° steps, like Word.
+        if (e.shiftKey) {
+          const step = Math.PI / 12;
+          newRot = Math.round(newRot / step) * step;
+        }
         setStrokes((prev) => prev.map((s, i) => (i === selectedIdx ? { ...s, rot: newRot } : s)));
         return;
       }
@@ -969,7 +989,11 @@ export default function PhotoAnnotator({
         drawingRef.current.points.push(p);
       }
     } else {
-      drawingRef.current.points[1] = p;
+      // Hold Shift to constrain: straight lines snap to 45°, boxes/circles
+      // become square — exactly like Word.
+      drawingRef.current.points[1] = e.shiftKey
+        ? constrainEnd(drawingRef.current.points[0], p, drawTool)
+        : p;
     }
     redrawCanvas(drawingRef.current);
   };
@@ -1086,6 +1110,62 @@ export default function PhotoAnnotator({
     });
     setSelectedIdx(0);
   };
+
+  // Word-style keyboard shortcuts for the selected shape: Delete removes it,
+  // arrow keys nudge it (Shift = bigger steps), Esc deselects, Ctrl/Cmd+Z / +Y
+  // undo/redo, Ctrl/Cmd+D duplicates. Ignored while typing a text label.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (textDraft) return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if (mod && (e.key === "y" || e.key === "Y")) {
+        e.preventDefault();
+        redo();
+        return;
+      }
+      if (mod && (e.key === "d" || e.key === "D")) {
+        e.preventDefault();
+        duplicateSelected();
+        return;
+      }
+      if (e.key === "Escape") {
+        setSelectedIdx(null);
+        return;
+      }
+      if (selectedIdx == null) return;
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        deleteSelected();
+        return;
+      }
+      const step = e.shiftKey ? 10 : 1;
+      let dx = 0;
+      let dy = 0;
+      if (e.key === "ArrowUp") dy = -step;
+      else if (e.key === "ArrowDown") dy = step;
+      else if (e.key === "ArrowLeft") dx = -step;
+      else if (e.key === "ArrowRight") dx = step;
+      if (dx || dy) {
+        e.preventDefault();
+        setStrokes((prev) =>
+          prev.map((s, i) =>
+            i === selectedIdx ? { ...s, points: s.points.map((pt) => ({ x: pt.x + dx, y: pt.y + dy })) } : s
+          )
+        );
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIdx, strokes, redoStack, textDraft]);
 
   // Apply a text draft to the strokes: EDIT the existing stroke in place when
   // editIdx is set (empty text removes it), otherwise append a new text stroke.
@@ -1324,6 +1404,11 @@ export default function PhotoAnnotator({
         {drawTool === "text" ? (
           <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b" }}>
             Tap to place a label · tap an existing label to re-edit it · Enter to confirm.
+          </div>
+        ) : null}
+        {drawTool !== "move" && drawTool !== "text" && drawTool !== "pen" && drawTool !== "carrow" ? (
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b" }}>
+            Hold <b>Shift</b> for a straight line / perfect square or circle (like Word).
           </div>
         ) : null}
         {drawTool === "move" && selectedIdx != null ? (
