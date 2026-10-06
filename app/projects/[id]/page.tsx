@@ -15,7 +15,8 @@ import {
   generateProjectGPXByReportIds,
 } from "../../../lib/download";
 import { descriptionForCategory } from "../../../lib/observationTemplates";
-import { fetchPhotoBlob } from "../../../lib/authedImage";
+import { fetchPhotoBlob, loadCanvasSafeImage } from "../../../lib/authedImage";
+import { replacePhotoImage } from "../../../lib/replacePhoto";
 import PizZip from "pizzip";
 
 type VehicleMovement = "green" | "yellow" | "red" | "";
@@ -4731,6 +4732,52 @@ function EditReportModal({
     }
   };
 
+  // Rotate / straighten a photo (90° left or right). Re-encodes via canvas and
+  // replaces the photo in place, so the straightened version flows to the grid
+  // and the Word export.
+  const [rotatingId, setRotatingId] = useState<string>("");
+  const rotatePhoto = async (p: ReportPhotoRow, dir: 1 | -1) => {
+    if (!p.url || isVideoUrl(p.url) || rotatingId) return;
+    setRotatingId(p.id);
+    let revoke = () => {};
+    try {
+      const safe = await loadCanvasSafeImage(p.url as string);
+      revoke = safe.revoke;
+      const img = new Image();
+      await new Promise<void>((res, rej) => {
+        img.onload = () => res();
+        img.onerror = () => rej(new Error("Could not load the photo to rotate."));
+        img.src = safe.src;
+      });
+      const w = img.naturalWidth || 1;
+      const h = img.naturalHeight || 1;
+      const canvas = document.createElement("canvas");
+      canvas.width = h; // 90° swaps dimensions
+      canvas.height = w;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas not available.");
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(((dir * 90) * Math.PI) / 180);
+      ctx.drawImage(img, -w / 2, -h / 2);
+      const blob: Blob | null = await new Promise((res) => canvas.toBlob((b) => res(b), "image/jpeg", 0.92));
+      if (!blob) throw new Error("Couldn't rotate — the photo host blocked canvas export.");
+      await replacePhotoImage({
+        reportId: report.id,
+        photoId: p.id,
+        blob,
+        fileName: `rotated_${Date.now()}.jpg`,
+        width: canvas.width,
+        height: canvas.height,
+      });
+      await loadPhotos();
+    } catch (e: any) {
+      toast(e?.message || "Could not rotate the photo");
+    } finally {
+      revoke();
+      setRotatingId("");
+    }
+  };
+
   // Drag-and-drop reorder of the photos (grab the ⠿ grip and drop onto another
   // photo). Pointer events so it works on desktop AND touch.
   const photoCellRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -5178,7 +5225,7 @@ function EditReportModal({
                     {removingId === p.id ? "…" : "✕"}
                   </button>
 
-                  {canReorder && (
+                  {isStill && (
                     <div
                       style={{
                         position: "absolute",
@@ -5195,22 +5242,44 @@ function EditReportModal({
                     >
                       <button
                         type="button"
-                        onClick={() => movePhoto(p.id, -1)}
-                        disabled={vIdx === 0 || reorderingPhoto}
-                        title="Move this photo earlier"
-                        style={{ border: "none", background: "transparent", color: "#fff", fontSize: 15, fontWeight: 900, cursor: vIdx === 0 ? "not-allowed" : "pointer", opacity: vIdx === 0 ? 0.4 : 1, lineHeight: 1 }}
+                        onClick={() => rotatePhoto(p, -1)}
+                        disabled={rotatingId === p.id}
+                        title="Rotate left (straighten)"
+                        style={{ border: "none", background: "transparent", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", opacity: rotatingId === p.id ? 0.4 : 1, lineHeight: 1 }}
                       >
-                        ◀
+                        ↺
                       </button>
-                      <span style={{ color: "#fff", fontSize: 11, fontWeight: 900 }}>#{vIdx + 1}</span>
+                      {canReorder && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => movePhoto(p.id, -1)}
+                            disabled={vIdx === 0 || reorderingPhoto}
+                            title="Move this photo earlier"
+                            style={{ border: "none", background: "transparent", color: "#fff", fontSize: 15, fontWeight: 900, cursor: vIdx === 0 ? "not-allowed" : "pointer", opacity: vIdx === 0 ? 0.4 : 1, lineHeight: 1 }}
+                          >
+                            ◀
+                          </button>
+                          <span style={{ color: "#fff", fontSize: 11, fontWeight: 900 }}>#{vIdx + 1}</span>
+                          <button
+                            type="button"
+                            onClick={() => movePhoto(p.id, 1)}
+                            disabled={vIdx === stills.length - 1 || reorderingPhoto}
+                            title="Move this photo later"
+                            style={{ border: "none", background: "transparent", color: "#fff", fontSize: 15, fontWeight: 900, cursor: vIdx === stills.length - 1 ? "not-allowed" : "pointer", opacity: vIdx === stills.length - 1 ? 0.4 : 1, lineHeight: 1 }}
+                          >
+                            ▶
+                          </button>
+                        </>
+                      )}
                       <button
                         type="button"
-                        onClick={() => movePhoto(p.id, 1)}
-                        disabled={vIdx === stills.length - 1 || reorderingPhoto}
-                        title="Move this photo later"
-                        style={{ border: "none", background: "transparent", color: "#fff", fontSize: 15, fontWeight: 900, cursor: vIdx === stills.length - 1 ? "not-allowed" : "pointer", opacity: vIdx === stills.length - 1 ? 0.4 : 1, lineHeight: 1 }}
+                        onClick={() => rotatePhoto(p, 1)}
+                        disabled={rotatingId === p.id}
+                        title="Rotate right (straighten)"
+                        style={{ border: "none", background: "transparent", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", opacity: rotatingId === p.id ? 0.4 : 1, lineHeight: 1 }}
                       >
-                        ▶
+                        ↻
                       </button>
                     </div>
                   )}
