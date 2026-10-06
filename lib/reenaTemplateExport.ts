@@ -6319,12 +6319,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         // Build a borderless 2-per-row grid of ALL the point's photos. Cell
         // size shrinks with the photo count so 3-4 photos + the table stay on
         // one page; more than that flows to the next page (table not repeated).
-        const IN_EMU = 914400;
-        const gridCellSize = (n: number): { cx: number; cy: number } => {
-          if (n <= 2) return { cx: Math.round(7.2 * IN_EMU), cy: Math.round(5.0 * IN_EMU) };
-          if (n <= 4) return { cx: Math.round(5.2 * IN_EMU), cy: Math.round(3.6 * IN_EMU) };
-          return { cx: Math.round(4.0 * IN_EMU), cy: Math.round(2.75 * IN_EMU) };
-        };
+        // Every photo renders at the SAME full size as a single-photo report
+        // (7.2" × 5.0"), one per row — so adding more photos never shrinks them.
+        // More photos simply flow onto more pages (each photo kept whole).
+        const gridCellSize = (_n: number): { cx: number; cy: number } => ({
+          cx: MULTI_PHOTO_EMU_WIDTH,
+          cy: MULTI_PHOTO_EMU_HEIGHT,
+        });
         const NO_BORDER =
           `<w:tcBorders>` +
             `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
@@ -6365,17 +6366,17 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             `</w:drawing>`;
           const cell = (rId: string, dpId: number) =>
             `<w:tc>` +
-              `<w:tcPr><w:tcW w:w="2500" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+              `<w:tcPr><w:tcW w:w="5000" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
               `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="40" w:after="40"/><w:keepNext/><w:keepLines/></w:pPr>` +
                 (rId ? `<w:r>${drawing(rId, dpId)}</w:r>` : "") +
               `</w:p>` +
             `</w:tc>`;
+          // One photo per row at full size (no shrinking as the count grows).
           let rowsXml = "";
-          for (let r = 0; r < rIds.length; r += 2) {
+          for (let r = 0; r < rIds.length; r += 1) {
             rowsXml +=
               `<w:tr><w:trPr><w:cantSplit/></w:trPr>` +
               cell(rIds[r], docPrBase + r) +
-              cell(rIds[r + 1] || "", docPrBase + r + 1) +
               `</w:tr>`;
           }
           return (
@@ -6399,8 +6400,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                 `</w:tblCellMar>` +
               `</w:tblPr>` +
               `<w:tblGrid>` +
-                `<w:gridCol w:w="4680"/>` +
-                `<w:gridCol w:w="4680"/>` +
+                `<w:gridCol w:w="9360"/>` +
               `</w:tblGrid>` +
               rowsXml +
             `</w:tbl>`
