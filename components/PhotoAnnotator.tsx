@@ -247,6 +247,9 @@ export default function PhotoAnnotator({
   const [drawDash, setDrawDash] = useState<"solid" | "dashed" | "dotted">("solid");
   const [textSize, setTextSize] = useState(40); // font size (px) for new text labels
   const [strokes, setStrokes] = useState<Stroke[]>([]);
+  // True once this photo loaded with a SAVED drawing — so after "Clear all" the
+  // Save button stays enabled and saving removes the drawing (clean photo).
+  const [hadDrawing, setHadDrawing] = useState(false);
   const [redoStack, setRedoStack] = useState<Stroke[]>([]);
   const [saving, setSaving] = useState(false);
   const [textDraft, setTextDraft] = useState<TextDraft | null>(null);
@@ -644,7 +647,10 @@ export default function PhotoAnnotator({
         // strokes BEFORE the image finished loading raced with this onload and
         // the base-only redraw here wiped the drawing (it "disappeared").
         redrawCanvas();
-        if (parsedStrokes && parsedStrokes.length) setStrokes(parsedStrokes);
+        if (parsedStrokes && parsedStrokes.length) {
+          setStrokes(parsedStrokes);
+          setHadDrawing(true);
+        }
       };
       img.onerror = () => {
         if (!cancelled) baseImgRef.current = null;
@@ -1509,7 +1515,13 @@ export default function PhotoAnnotator({
             {resetting ? "Removing…" : "🧹 Remove drawing & redraw"}
           </button>
           <button style={S.ghost} onClick={onClose}>Cancel</button>
-          <button style={S.primary} onClick={saveAnnotated} disabled={saving || !total}>
+          <button
+            style={S.primary}
+            onClick={saveAnnotated}
+            // Enabled when there's something to save OR the photo had a drawing
+            // that was cleared (so Save writes the clean photo back).
+            disabled={saving || (total === 0 && !hadDrawing && !textDraft)}
+          >
             {saving ? "Saving…" : "Save"}
           </button>
         </div>
