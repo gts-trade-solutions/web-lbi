@@ -98,31 +98,40 @@ export async function GET(request: Request, context: Ctx) {
         const placeholders = ids.map(() => "?").join(",");
         let photoRows: Record<string, unknown>[] = [];
         try {
-          // Newest schema: also carry the untouched original so the UI can show
-          // / restore the photo before a drawing, and honour manual photo order.
+          // Column-aware query so the MANUAL photo order (sort_order) is ALWAYS
+          // honoured when that column exists — regardless of whether the other
+          // optional columns (include_in_export / anno_*) are present. (The old
+          // code selected all optional columns in one query, so a single missing
+          // column dropped it to a created_at-only fallback and the saved reorder
+          // was silently ignored on reload.)
+          const pcols = await getColumns("report_photos");
+          const wanted = [
+            "id",
+            "report_id",
+            "url",
+            "file_name",
+            "include_in_export",
+            "original_url",
+            "anno_base_url",
+            "sort_order",
+            "created_at",
+          ].filter((c) => has(pcols, c));
+          const selectCols = wanted.length ? wanted.join(", ") : "*";
+          const orderParts2: string[] = [];
+          if (has(pcols, "sort_order")) orderParts2.push("(sort_order IS NULL)", "sort_order ASC");
+          if (has(pcols, "created_at")) orderParts2.push("created_at ASC");
+          const orderBy2 = orderParts2.length ? `ORDER BY ${orderParts2.join(", ")}` : "";
           const [pr] = await pool.query(
-            `SELECT id, report_id, url, file_name, include_in_export, original_url, anno_base_url, sort_order FROM report_photos
-             WHERE report_id IN (${placeholders}) ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC`,
+            `SELECT ${selectCols} FROM report_photos WHERE report_id IN (${placeholders}) ${orderBy2}`,
             ids
           );
           photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
         } catch {
-          try {
-            const [pr] = await pool.query(
-              `SELECT id, report_id, url, file_name, include_in_export FROM report_photos
-               WHERE report_id IN (${placeholders}) ORDER BY created_at ASC`,
-              ids
-            );
-            photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
-          } catch {
-            // Legacy schema without the include_in_export column.
-            const [pr] = await pool.query(
-              `SELECT id, report_id, url, file_name FROM report_photos
-               WHERE report_id IN (${placeholders}) ORDER BY created_at ASC`,
-              ids
-            );
-            photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
-          }
+          const [pr] = await pool.query(
+            `SELECT * FROM report_photos WHERE report_id IN (${placeholders})`,
+            ids
+          );
+          photoRows = Array.isArray(pr) ? (pr as Record<string, unknown>[]) : [];
         }
         await signRowUrls("report_photos", photoRows);
         const byReport = new Map<string, Record<string, unknown>[]>();

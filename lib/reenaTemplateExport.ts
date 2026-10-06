@@ -3571,8 +3571,15 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     // Split duplicates (extra photos of the same report) legitimately share
     // the report's coordinate/point_key — never treat them as repeat points.
     const isSplitDup = splitDupRows.has(r);
-    const isRepeatCoord = !isSplitDup && coordKey !== "" && seenCoordKeys.has(coordKey);
-    const isRepeatPointKey = !isSplitDup && pointKey !== "" && seenPointKeys.has(pointKey);
+    // IMPORTANT: do NOT drop a distinct report just because its coordinate or
+    // point_key matches an earlier one. A point added in the app inherits the
+    // previous row's point_key (and often its coordinate), so the old coord/
+    // point_key de-dup silently deleted newly-added points from the document.
+    // Keeping every distinct report is the safe default — a rare duplicate is
+    // far better than a missing survey point. (Only emit a dup when the SAME
+    // report id somehow repeats, which never happens in one list.)
+    const isRepeatCoord = false && !isSplitDup && coordKey !== "" && seenCoordKeys.has(coordKey);
+    const isRepeatPointKey = false && !isSplitDup && pointKey !== "" && seenPointKeys.has(pointKey);
     if (isRepeatCoord || isRepeatPointKey) {
       skippedRepeatPoints += 1;
       console.log("[DOCX SKIP REPEAT POINT]", {

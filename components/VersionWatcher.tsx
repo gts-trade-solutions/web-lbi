@@ -4,12 +4,18 @@
 // users (and the client's demos) always run the latest build instead of a stale
 // cached one. The first poll records the build the tab loaded with; any later
 // change means a new deploy is live.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function VersionWatcher() {
   const [stale, setStale] = useState(false);
+  const newBuildRef = useRef<string | null>(null);
+  const dismissedRef = useRef<string | null>(null);
 
   useEffect(() => {
+    // Only watch in production. In dev the build id churns and would pop the
+    // banner constantly.
+    if (process.env.NODE_ENV !== "production") return;
+
     let baseline: string | null = null;
     let stopped = false;
 
@@ -24,27 +30,34 @@ export default function VersionWatcher() {
           baseline = v; // first successful poll = the build this tab is running
           return;
         }
-        if (v !== baseline) setStale(true);
+        // Show once per NEW build; stay quiet for a build the user dismissed.
+        if (v !== baseline && v !== dismissedRef.current) {
+          newBuildRef.current = v;
+          setStale(true);
+        }
       } catch {
         /* offline / transient — ignore */
       }
     };
 
     check();
+    // Poll on an interval only. (Re-checking on tab focus / visibilitychange
+    // used to fire right after the OS file picker when adding/changing a photo,
+    // which popped this banner immediately after a photo edit.)
     const iv = setInterval(check, 3 * 60 * 1000); // every 3 minutes
-    const onVisible = () => {
-      if (document.visibilityState === "visible") check();
-    };
-    document.addEventListener("visibilitychange", onVisible);
 
     return () => {
       stopped = true;
       clearInterval(iv);
-      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 
   if (!stale) return null;
+
+  const dismiss = () => {
+    dismissedRef.current = newBuildRef.current;
+    setStale(false);
+  };
 
   return (
     <div
@@ -82,6 +95,21 @@ export default function VersionWatcher() {
         }}
       >
         Refresh now
+      </button>
+      <button
+        type="button"
+        onClick={dismiss}
+        style={{
+          background: "transparent",
+          color: "#fff",
+          border: "1px solid rgba(255,255,255,0.5)",
+          borderRadius: 10,
+          padding: "8px 14px",
+          fontWeight: 800,
+          cursor: "pointer",
+        }}
+      >
+        Later
       </button>
     </div>
   );

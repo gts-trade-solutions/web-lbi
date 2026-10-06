@@ -4731,6 +4731,66 @@ function EditReportModal({
     }
   };
 
+  // Drag-and-drop reorder of the photos (grab the ⠿ grip and drop onto another
+  // photo). Pointer events so it works on desktop AND touch.
+  const photoCellRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const dragPhotoRef = useRef<string | null>(null);
+  const [dragPhotoId, setDragPhotoId] = useState<string | null>(null);
+  const startPhotoDrag = (e: React.PointerEvent, id: string) => {
+    e.preventDefault();
+    dragPhotoRef.current = id;
+    setDragPhotoId(id);
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch {}
+  };
+  const onPhotoDragMove = (e: React.PointerEvent) => {
+    const id = dragPhotoRef.current;
+    if (!id) return;
+    const vis = photos.filter((p) => !isVideoUrl(p.url));
+    let overId: string | null = null;
+    for (const p of vis) {
+      const el = photoCellRefs.current[p.id];
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+        overId = p.id;
+        break;
+      }
+    }
+    if (overId && overId !== id) {
+      setPhotos((prev) => {
+        const v = prev.filter((p) => !isVideoUrl(p.url));
+        const vids = prev.filter((p) => isVideoUrl(p.url));
+        const from = v.findIndex((p) => p.id === id);
+        const to = v.findIndex((p) => p.id === overId);
+        if (from < 0 || to < 0 || from === to) return prev;
+        const next = v.slice();
+        const [it] = next.splice(from, 1);
+        next.splice(to, 0, it);
+        return [...next, ...vids];
+      });
+    }
+  };
+  const endPhotoDrag = async (e: React.PointerEvent) => {
+    const id = dragPhotoRef.current;
+    dragPhotoRef.current = null;
+    setDragPhotoId(null);
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
+    if (!id) return;
+    const vis = photos.filter((p) => !isVideoUrl(p.url));
+    setReorderingPhoto(true);
+    try {
+      await apiRequestJson(`/api/reports/${encodeURIComponent(report.id)}/photos`, {
+        method: "PATCH",
+        body: JSON.stringify({ order: vis.map((p) => p.id) }),
+      });
+    } catch (err: any) {
+      toast(err?.message || "Could not reorder photos");
+      await loadPhotos();
+    } finally {
+      setReorderingPhoto(false);
+    }
+  };
+
   const addPhotos = async (list: FileList | null) => {
     const files = Array.from(list || []);
     if (!files.length) return;
@@ -4993,17 +5053,51 @@ function EditReportModal({
                 const isStill = !isVideoUrl(p.url);
                 const vIdx = isStill ? stills.findIndex((x) => x.id === p.id) : -1;
                 const canReorder = isStill && stills.length > 1;
+                const beingDragged = dragPhotoId === p.id;
                 return (
                 <div
                   key={p.id}
+                  ref={(el) => {
+                    photoCellRefs.current[p.id] = el;
+                  }}
                   style={{
                     position: "relative",
                     borderRadius: 12,
-                    border: "1px solid #EAECF0",
+                    border: beingDragged ? "2px solid #6D28D9" : "1px solid #EAECF0",
                     overflow: "hidden",
                     background: "#F9FAFB",
+                    opacity: beingDragged ? 0.6 : 1,
                   }}
                 >
+                  {canReorder && (
+                    <div
+                      onPointerDown={(e) => startPhotoDrag(e, p.id)}
+                      onPointerMove={onPhotoDragMove}
+                      onPointerUp={endPhotoDrag}
+                      onPointerCancel={endPhotoDrag}
+                      title="Drag to reorder this photo"
+                      style={{
+                        position: "absolute",
+                        top: 4,
+                        left: 4,
+                        zIndex: 3,
+                        width: 24,
+                        height: 24,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        borderRadius: 6,
+                        background: "rgba(16,24,40,0.72)",
+                        color: "#fff",
+                        fontWeight: 900,
+                        fontSize: 13,
+                        cursor: "grab",
+                        touchAction: "none",
+                      }}
+                    >
+                      ⠿
+                    </div>
+                  )}
                   {p.url ? (
                     isVideoUrl(p.url) ? (
                       <a
