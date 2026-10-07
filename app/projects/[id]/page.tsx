@@ -2391,6 +2391,61 @@ export default function ProjectReportsPage() {
                     <div style={{ height: 240, borderRadius: 12, background: "#0B1220" }} />
                   )}
 
+                  {/* Thumbnail strip — shows the photo ORDER (numbered), highlights the
+                      current one, and reorders live as you Move earlier/later so you can
+                      SEE which photo goes where. Tap a thumbnail to jump to it. */}
+                  {stills.length > 1 && (
+                    <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "2px 0" }}>
+                      {stills.map((ph, si) => {
+                        const active = ph.id === cur.id;
+                        return (
+                          <button
+                            key={ph.id}
+                            type="button"
+                            onClick={() =>
+                              setPhotoPreview((pp) =>
+                                pp ? { ...pp, index: list.findIndex((x) => x.id === ph.id) } : pp
+                              )
+                            }
+                            title={`Photo ${si + 1} — tap to view`}
+                            style={{
+                              position: "relative",
+                              flexShrink: 0,
+                              width: 72,
+                              height: 54,
+                              borderRadius: 8,
+                              border: active ? "3px solid #175CD3" : "2px solid #D0D5DD",
+                              overflow: "hidden",
+                              padding: 0,
+                              cursor: "pointer",
+                              background: "#F2F4F7",
+                            }}
+                          >
+                            {ph.url ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img src={ph.url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                            ) : null}
+                            <span
+                              style={{
+                                position: "absolute",
+                                bottom: 0,
+                                right: 0,
+                                background: active ? "#175CD3" : "rgba(16,24,40,0.78)",
+                                color: "#fff",
+                                fontSize: 10,
+                                fontWeight: 900,
+                                padding: "0 5px",
+                                borderTopLeftRadius: 6,
+                              }}
+                            >
+                              {si + 1}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                     {cur.url && !isVideoUrl(cur.url) ? (
                       <button
