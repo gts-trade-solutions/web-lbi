@@ -258,6 +258,9 @@ export default function PhotoAnnotator({
   const imgWrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawingRef = useRef<Stroke | null>(null);
+  // Coalesces live-drawing redraws to one per animation frame, so a 120 Hz
+  // pointer doesn't trigger many full-canvas redraws per frame (smoother line).
+  const liveRafRef = useRef<number | null>(null);
   const baseImgRef = useRef<HTMLImageElement | null>(null);
   // The URL the strokes are drawn OVER. On a first drawing this is the photo
   // itself; after a save it's the preserved original (anno_base_url), so
@@ -359,7 +362,10 @@ export default function PhotoAnnotator({
   };
 
   // Draws a stroke WITHOUT rotation. The wrapper below applies rotation.
-  const drawOneStrokeRaw = (ctx: CanvasRenderingContext2D, s: Stroke) => {
+  // `live` = the stroke is still being drawn (render it cheaply so the line
+  // keeps up with the finger); the heavy RDP+Chaikin smoothing is applied only
+  // once the stroke is finished.
+  const drawOneStrokeRaw = (ctx: CanvasRenderingContext2D, s: Stroke, live = false) => {
     ctx.strokeStyle = s.color;
     ctx.fillStyle = s.color;
     ctx.lineWidth = s.width;
@@ -388,8 +394,10 @@ export default function PhotoAnnotator({
       // arrowhead at the end — a Word-style curved arrow.
       // Remove the hand's jitter (RDP) first, then round what's left (Chaikin):
       // a shaky stroke becomes a clean, flowing curve that follows the gesture.
-      const simp = simplifyRDP(pts, Math.max(5, s.width * 1.2));
-      const sm = chaikinSmooth(simp, 4);
+      // While still drawing (`live`), skip that heavy pass so the line stays
+      // smooth and responsive under the finger — the full smoothing is applied
+      // the moment the stroke is finished.
+      const sm = live ? pts : chaikinSmooth(simplifyRDP(pts, Math.max(5, s.width * 1.2)), 4);
       ctx.beginPath();
       ctx.moveTo(sm[0].x, sm[0].y);
       if (sm.length < 3) {
@@ -492,10 +500,10 @@ export default function PhotoAnnotator({
   };
 
   // Applies per-shape rotation (around the bbox centre), then draws.
-  const drawOneStroke = (ctx: CanvasRenderingContext2D, s: Stroke) => {
+  const drawOneStroke = (ctx: CanvasRenderingContext2D, s: Stroke, live = false) => {
     const rot = s.rot || 0;
     if (!rot) {
-      drawOneStrokeRaw(ctx, s);
+      drawOneStrokeRaw(ctx, s, live);
       return;
     }
     const b = strokeBBox(s);
@@ -505,7 +513,7 @@ export default function PhotoAnnotator({
     ctx.translate(cx, cy);
     ctx.rotate(rot);
     ctx.translate(-cx, -cy);
-    drawOneStrokeRaw(ctx, s);
+    drawOneStrokeRaw(ctx, s, live);
     ctx.restore();
   };
 
@@ -573,7 +581,7 @@ export default function PhotoAnnotator({
         if (editingIdx === i) continue;
         drawOneStroke(ctx, strokes[i]);
       }
-      if (extra) drawOneStroke(ctx, extra);
+      if (extra) drawOneStroke(ctx, extra, true); // live: cheap render while drawing
       if (drawTool === "move" && selectedIdx != null && strokes[selectedIdx]) {
         const sel = strokes[selectedIdx];
         const g = handleGeom(sel);
@@ -1083,16 +1091,26 @@ export default function PhotoAnnotator({
         ? constrainEnd(drawingRef.current.points[0], p, drawTool)
         : p;
     }
-    redrawCanvas(drawingRef.current);
+    // Coalesce to one redraw per frame for a smooth line.
+    if (liveRafRef.current == null) {
+      liveRafRef.current = requestAnimationFrame(() => {
+        liveRafRef.current = null;
+        if (drawingRef.current) redrawCanvas(drawingRef.current);
+      });
+    }
   };
   const onDrawUp = () => {
     moveDragRef.current = null;
     resizeHandleRef.current = null;
     boxDragRef.current = null;
+    if (liveRafRef.current != null) {
+      cancelAnimationFrame(liveRafRef.current);
+      liveRafRef.current = null;
+    }
     if (!drawingRef.current) return;
     const s = drawingRef.current;
     drawingRef.current = null;
-    setStrokes((prev) => [...prev, s]);
+    setStrokes((prev) => [...prev, s]); // commit → gets the full smoothing on redraw
     setRedoStack([]); // a new drawing invalidates the redo history
   };
 
