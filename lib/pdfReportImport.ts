@@ -137,6 +137,28 @@ function resolveGs(): string | null {
 
 const RENDER_DPI = 130;
 
+// Every imported photo is padded (letterboxed, never cropped) to ONE aspect
+// ratio so they all look uniform in the report grid — matching the Word photo
+// cell (691x480 ≈ 1.44). White bars are added to the short side; the drawn
+// arrows/labels at the photo edges are always preserved.
+const TARGET_ASPECT = 691 / 480;
+function aspectPad(w: number, h: number) {
+  const bg = { r: 255, g: 255, b: 255 };
+  if (!w || !h) return { top: 0, bottom: 0, left: 0, right: 0, background: bg };
+  const cur = w / h;
+  if (cur < TARGET_ASPECT - 0.01) {
+    const d = Math.round(h * TARGET_ASPECT) - w;
+    const left = Math.floor(d / 2);
+    return { top: 0, bottom: 0, left, right: d - left, background: bg };
+  }
+  if (cur > TARGET_ASPECT + 0.01) {
+    const d = Math.round(w / TARGET_ASPECT) - h;
+    const top = Math.floor(d / 2);
+    return { top, bottom: d - top, left: 0, right: 0, background: bg };
+  }
+  return { top: 0, bottom: 0, left: 0, right: 0, background: bg };
+}
+
 // Render the needed pages (in concurrent chunks) and crop each photo's rect,
 // filling photoMap. Returns the key assigned to each task (in task order).
 async function renderAndCrop(
@@ -211,6 +233,7 @@ async function renderAndCrop(
           try {
             const buf = await sharp(img)
               .extract({ left, top, width: w, height: h })
+              .extend(aspectPad(w, h))
               .jpeg({ quality: 85 })
               .toBuffer();
             if (buf.length < 1200) continue;
@@ -273,7 +296,10 @@ async function encodeRaster(obj: any): Promise<Buffer | null> {
   if (data.length < expected) return null;
   try {
     const raw = Buffer.from(data.buffer, data.byteOffset, expected);
-    const out = await sharp(raw, { raw: { width, height, channels } }).jpeg({ quality: 85 }).toBuffer();
+    const out = await sharp(raw, { raw: { width, height, channels } })
+      .extend(aspectPad(width, height))
+      .jpeg({ quality: 85 })
+      .toBuffer();
     return out.length >= 1200 ? out : null;
   } catch {
     return null;
