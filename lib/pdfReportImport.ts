@@ -447,8 +447,27 @@ export async function parsePdfReport(buffer: Buffer): Promise<DocxReport> {
           if (cx >= (tables[i].left === -Infinity ? -Infinity : tables[i].left - 2)) return tables[i];
         return tables[0];
       };
+
+      // Drop the small category ICONS (warning-triangle etc.) that sit in the
+      // CATEGORY column — real photos there are large, so a size cutoff inside
+      // that column's x-range separates them cleanly without touching reports
+      // that have no category column.
+      const sortedCols = [...labelled].sort((a, b) => a.cx - b.cx);
+      const catRanges = labelled
+        .filter((l) => l.f === "category")
+        .map((c) => {
+          const i = sortedCols.indexOf(c);
+          const lo = i > 0 ? (sortedCols[i - 1].cx + c.cx) / 2 : c.cx - 60;
+          const hi = i < sortedCols.length - 1 ? (c.cx + sortedCols[i + 1].cx) / 2 : c.cx + 60;
+          return [lo, hi] as [number, number];
+        });
+      const catCut = Math.max(220, pageH * 0.3);
+      const isCategoryIcon = (d: Rect) =>
+        Math.min(d.rw, d.rh) < catCut && catRanges.some(([lo, hi]) => d.cx >= lo && d.cx <= hi);
+      const realPhotos = bodyPhotos.filter((d) => !isCategoryIcon(d));
+
       const inPhoto = (it: Item) =>
-        bodyPhotos.some(
+        realPhotos.some(
           (d) => it.cx >= d.cx - d.rw / 2 && it.cx <= d.cx + d.rw / 2 && it.y >= d.cy - d.rh / 2 && it.y <= d.cy + d.rh / 2
         );
       const isFooter = (s: string) =>
@@ -483,7 +502,7 @@ export async function parsePdfReport(buffer: Buffer): Promise<DocxReport> {
         }
       }
 
-      for (const d of bodyPhotos) tableFor(d.cx).photos.push(d);
+      for (const d of realPhotos) tableFor(d.cx).photos.push(d);
 
       const sortedTables = tables.sort(
         (a, b) => (a.left === -Infinity ? -1 : a.left) - (b.left === -Infinity ? -1 : b.left)
