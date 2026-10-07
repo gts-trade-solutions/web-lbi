@@ -32,6 +32,41 @@ export default function FinishedProjectsPage() {
   const [projects, setProjects] = useState<FinalProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [movingId, setMovingId] = useState("");
+  const [dlId, setDlId] = useState("");
+
+  // Generate and download the project's Word report on the fly (same as the
+  // export on the project page), so a finished project can be downloaded here
+  // even when no finalized file was uploaded.
+  const downloadReport = async (projectId: string, name: string) => {
+    try {
+      setDlId(projectId);
+      toast("Preparing the Word report… this can take a minute for large projects.");
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/export`, {
+        headers: authHeaders(),
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d?.error || "Could not generate the report");
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("content-disposition") || "";
+      const m = cd.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
+      const fileName = m ? decodeURIComponent(m[1].replace(/"/g, "")) : `${name}.docx`;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      toast("Report downloaded.", "success");
+    } catch (e: any) {
+      toast(e?.message || "Download failed", "error");
+    } finally {
+      setDlId("");
+    }
+  };
 
   const moveBack = async (projectId: string, name: string) => {
     if (!window.confirm(`Move "${name}" back to active projects?`)) return;
@@ -143,7 +178,15 @@ export default function FinishedProjectsPage() {
               <div key={p.projectId} style={S.card}>
                 <div style={S.head}>
                   <div style={S.pname}>📁 {p.projectName}</div>
-                  <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                  <div style={{ display: "flex", gap: 8, flexShrink: 0, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <button
+                      style={{ ...S.dl, opacity: dlId === p.projectId ? 0.6 : 1 }}
+                      disabled={dlId === p.projectId}
+                      onClick={() => downloadReport(p.projectId, p.projectName)}
+                      title="Generate and download this project's Word report"
+                    >
+                      {dlId === p.projectId ? "Preparing…" : "⬇ Download report"}
+                    </button>
                     {p.finished && (
                       <button
                         style={{ ...S.open, borderColor: "#B54708", color: "#B54708", opacity: movingId === p.projectId ? 0.6 : 1 }}
@@ -181,7 +224,8 @@ export default function FinishedProjectsPage() {
                   </div>
                 ) : (
                   <div style={{ ...S.meta, marginTop: 10 }}>
-                    Marked finished — no final Word report uploaded.
+                    Marked finished — no uploaded file. Use <b>⬇ Download report</b> to generate the
+                    Word report.
                   </div>
                 )}
               </div>
