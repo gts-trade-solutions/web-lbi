@@ -50,6 +50,10 @@ type ReportRow = {
   longitude?: number | null;
   loc_lat?: number | null;
   loc_lon?: number | null;
+  // KM (chainage) of this point, as stored on the report. Either column may be
+  // present depending on where the point came from (mobile capture / import).
+  kms?: number | string | null;
+  km?: number | string | null;
 };
 
 type WatermarkOpts = { enabled: boolean; text: string };
@@ -93,6 +97,36 @@ function isDrawingPhoto(p: ReportPhotoRow): boolean {
 
 function reportHasDrawings(r: ReportRow): boolean {
   return (r.photos || []).some(isDrawingPhoto);
+}
+
+// The KM (chainage) stored ON this report (what the Word export prints when a
+// point has its own KM). Prefer `kms`, fall back to `km`. Returns NaN when the
+// point has no numeric KM of its own (then the export computes a cumulative one).
+function ownKm(r: ReportRow): number {
+  const raw = r?.kms != null && String(r.kms).trim() !== "" ? r.kms
+    : r?.km != null && String(r.km).trim() !== "" ? r.km : null;
+  if (raw == null) return NaN;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+// Scan points in display order and flag every point whose own KM is NOT greater
+// than the previous point that had a KM — i.e. the chainage goes flat or
+// backwards there (typically the "restart at 0" after combining projects).
+// Returns a map: report id -> { prevKm } for the offending points.
+function findKmOrderIssues(list: ReportRow[]): Map<string, { prevKm: number; thisKm: number }> {
+  const issues = new Map<string, { prevKm: number; thisKm: number }>();
+  let lastKm = NaN;
+  for (const r of list) {
+    const k = ownKm(r);
+    if (Number.isFinite(k)) {
+      if (Number.isFinite(lastKm) && k <= lastKm) {
+        issues.set(r.id, { prevKm: lastKm, thisKm: k });
+      }
+      lastKm = k;
+    }
+  }
+  return issues;
 }
 
 function sanitizeFileBaseName(name: string) {
@@ -873,6 +907,13 @@ export default function ProjectReportsPage() {
   }, [selMenuOpen]);
 
   const filteredSortedReports = useMemo(() => reports, [reports]);
+
+  // Points whose KM is not greater than the previous point's KM (chainage goes
+  // flat/backwards). Drives the warning banner and the red KM highlight.
+  const kmOrderIssues = useMemo(
+    () => findKmOrderIssues(filteredSortedReports),
+    [filteredSortedReports]
+  );
 
   const stats = useMemo(() => {
     const shown = filteredSortedReports.length;
@@ -1840,6 +1881,7 @@ export default function ProjectReportsPage() {
     difficulty: VehicleMovement;
     latitude: number | null;
     longitude: number | null;
+    km: number | null;
   }) => {
     if (!editReportRow) return;
     const reportId = editReportRow.id;
@@ -1850,6 +1892,7 @@ export default function ProjectReportsPage() {
     const finalDifficulty = payload.difficulty ? payload.difficulty : null;
     const finalLat = payload.latitude;
     const finalLon = payload.longitude;
+    const finalKm = payload.km;
 
     await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}`, {
       method: "PUT",
@@ -1864,6 +1907,11 @@ export default function ProjectReportsPage() {
         longitude: finalLon,
         loc_lat: finalLat,
         loc_lon: finalLon,
+        // KM (chainage) — write both column names; the API keeps only the ones
+        // that exist on this install. null clears the point's own KM so the
+        // export falls back to a computed cumulative distance.
+        kms: finalKm,
+        km: finalKm,
       }),
     });
 
@@ -1881,6 +1929,8 @@ export default function ProjectReportsPage() {
               longitude: finalLon,
               loc_lat: finalLat,
               loc_lon: finalLon,
+              kms: finalKm,
+              km: finalKm,
             }
           : r
       )
@@ -2721,6 +2771,22 @@ export default function ProjectReportsPage() {
           <EditReportModal
             report={editReportRow}
             projectId={projectId}
+            prevKm={(() => {
+              const idx = filteredSortedReports.findIndex((x) => x.id === editReportRow.id);
+              for (let j = idx - 1; j >= 0; j -= 1) {
+                const k = ownKm(filteredSortedReports[j]);
+                if (Number.isFinite(k)) return k;
+              }
+              return null;
+            })()}
+            nextKm={(() => {
+              const idx = filteredSortedReports.findIndex((x) => x.id === editReportRow.id);
+              for (let j = idx + 1; j < filteredSortedReports.length; j += 1) {
+                const k = ownKm(filteredSortedReports[j]);
+                if (Number.isFinite(k)) return k;
+              }
+              return null;
+            })()}
             onClose={() => setEditOpen(false)}
             onSave={async (p) => {
               try {
@@ -3356,6 +3422,43 @@ export default function ProjectReportsPage() {
           </div>
         ) : (
           <div style={styles.tableCard}>
+            {kmOrderIssues.size > 0 && (
+              <div
+                style={{
+                  margin: "0 0 12px",
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  background: "#FEF3F2",
+                  border: "1px solid #FDA29B",
+                  color: "#B42318",
+                  fontWeight: 800,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 4,
+                }}
+              >
+                <div>
+                  ⚠ KM is not increasing at {kmOrderIssues.size} point
+                  {kmOrderIssues.size === 1 ? "" : "s"}. Each point's KM should be greater than the
+                  point before it.
+                </div>
+                <div style={{ fontWeight: 700, color: "#912018" }}>
+                  {filteredSortedReports
+                    .map((r, i) => ({ r, i }))
+                    .filter(({ r }) => kmOrderIssues.has(r.id))
+                    .slice(0, 8)
+                    .map(({ r, i }) => {
+                      const iss = kmOrderIssues.get(r.id)!;
+                      return `#${i + 1} (${iss.thisKm} km ≤ previous ${iss.prevKm} km)`;
+                    })
+                    .join(",  ")}
+                  {kmOrderIssues.size > 8 ? " …" : ""}
+                </div>
+                <div style={{ fontWeight: 700, color: "#912018" }}>
+                  Open the point (Edit) and set a correct KM to fix it.
+                </div>
+              </div>
+            )}
             <div style={styles.tableWrapNoScroll}>
               <table style={styles.table}>
                 <thead>
@@ -3437,7 +3540,23 @@ export default function ProjectReportsPage() {
 
                           <td className="col-cat" style={styles.td}>
                             <div style={styles.catTitle}>{r.category || "Report"}</div>
-                            <div style={styles.subtle}>Includes photos</div>
+                            {(() => {
+                              const k = ownKm(r);
+                              const bad = kmOrderIssues.has(r.id);
+                              if (!Number.isFinite(k)) return <div style={styles.subtle}>Includes photos</div>;
+                              return (
+                                <div
+                                  style={{
+                                    ...styles.subtle,
+                                    color: bad ? "#B42318" : "#475467",
+                                    fontWeight: bad ? 900 : 700,
+                                  }}
+                                  title={bad ? "This KM is not greater than the previous point's KM. Edit the point to fix it." : "Chainage (KM) of this point"}
+                                >
+                                  {bad ? "⚠ " : ""}KM: {k}
+                                </div>
+                              );
+                            })()}
                           </td>
 
                           <td className="col-desc" style={styles.td}>
@@ -4670,11 +4789,15 @@ function ReorderReportsModal({
 function EditReportModal({
   report,
   projectId,
+  prevKm,
+  nextKm,
   onClose,
   onSave,
 }: {
   report: ReportRow;
   projectId: string;
+  prevKm: number | null;
+  nextKm: number | null;
   onClose: () => void;
   onSave: (payload: {
     category: string;
@@ -4683,6 +4806,7 @@ function EditReportModal({
     difficulty: VehicleMovement;
     latitude: number | null;
     longitude: number | null;
+    km: number | null;
   }) => void | Promise<void>;
 }) {
   const initialCategory = (report.category || "").trim();
@@ -4708,6 +4832,10 @@ function EditReportModal({
     (report as { loc_lon?: number | null }).loc_lon;
   const [latStr, setLatStr] = useState(initLat != null ? String(initLat) : "");
   const [lonStr, setLonStr] = useState(initLon != null ? String(initLon) : "");
+
+  // KM (chainage) — editable. Prefer `kms`, fall back to `km`.
+  const initKm = ownKm(report);
+  const [kmStr, setKmStr] = useState(Number.isFinite(initKm) ? String(initKm) : "");
 
   // ---- Photo management (view existing, remove, add) ----
   const [photos, setPhotos] = useState<ReportPhotoRow[]>([]);
@@ -4921,6 +5049,30 @@ function EditReportModal({
       const latNum = latTrim === "" ? null : Number(latTrim);
       const lonNum = lonTrim === "" ? null : Number(lonTrim);
 
+      const kmTrim = kmStr.trim();
+      const kmNum = kmTrim === "" ? null : Number(kmTrim);
+      const finalKm = kmTrim !== "" && Number.isFinite(kmNum) ? kmNum : null;
+
+      // Chainage sanity check: a point's KM should sit BETWEEN the previous and
+      // next point's KM. Warn (but allow) if it doesn't, so a genuine fix isn't
+      // blocked but an accidental "0 km" restart gets caught.
+      if (finalKm != null) {
+        const problems: string[] = [];
+        if (prevKm != null && finalKm <= prevKm)
+          problems.push(`the previous point is ${prevKm} km (this KM should be greater)`);
+        if (nextKm != null && finalKm >= nextKm)
+          problems.push(`the next point is ${nextKm} km (this KM should be smaller)`);
+        if (problems.length) {
+          const ok = window.confirm(
+            `KM ${finalKm} looks out of order: ${problems.join("; ")}.\n\nSave this KM anyway?`
+          );
+          if (!ok) {
+            setSaving(false);
+            return;
+          }
+        }
+      }
+
       await onSave({
         category: finalCategory,
         description: description.trim(),
@@ -4928,6 +5080,7 @@ function EditReportModal({
         difficulty,
         latitude: latTrim !== "" && Number.isFinite(latNum) ? latNum : null,
         longitude: lonTrim !== "" && Number.isFinite(lonNum) ? lonNum : null,
+        km: finalKm,
       });
     } finally {
       setSaving(false);
@@ -5019,6 +5172,22 @@ function EditReportModal({
               placeholder="E — longitude (e.g. 81.860966)"
               style={{ height: 44, borderRadius: 14, border: "1px solid #D0D5DD", padding: "0 14px", fontWeight: 900, outline: "none", background: "#fff" }}
             />
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={styles.routeLabel}>KM (chainage)</div>
+          <input
+            value={kmStr}
+            onChange={(e) => setKmStr(e.target.value)}
+            inputMode="decimal"
+            placeholder="e.g. 12.50  — leave blank to auto-calculate"
+            style={{ height: 44, borderRadius: 14, border: "1px solid #D0D5DD", padding: "0 14px", fontWeight: 900, outline: "none", background: "#fff" }}
+          />
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#667085" }}>
+            {prevKm != null ? `Previous point: ${prevKm} km. ` : ""}
+            {nextKm != null ? `Next point: ${nextKm} km. ` : ""}
+            This point&apos;s KM should be greater than the previous and less than the next.
           </div>
         </div>
 

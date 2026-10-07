@@ -142,12 +142,29 @@ export async function POST(request: Request) {
     const delFilter = reportCols.has("deleted_at") ? "AND deleted_at IS NULL" : "";
     const orderCols = ["sort_order", "created_at", "id"].filter((cch) => reportCols.has(cch));
     const orderBy = orderCols.length ? `ORDER BY ${orderCols.map((cch) => `${cch} ASC`).join(", ")}` : "";
+    // Continuous KM (chainage) across the combined project: it starts at 0 and
+    // each following project continues from where the previous one ended, instead
+    // of every project restarting at its own 0. Only numeric km values are
+    // shifted; anything non-numeric is left as-is.
+    const kmCols = ["kms", "km"].filter((c) => reportCols.has(c));
+    let prevEndKm = 0;
     for (const srcId of orderedIds) {
       const [reportRows] = await conn.query(
         `SELECT * FROM reports WHERE project_id = ? ${delFilter} ${orderBy}`,
         [srcId]
       );
       const reports = Array.isArray(reportRows) ? reportRows : [];
+      // Shift this project's km so its first point lands at prevEndKm.
+      let projFirstOwn: number | null = null;
+      for (const r of reports as any[]) {
+        const own = Number(r.kms ?? r.km);
+        if (Number.isFinite(own)) {
+          projFirstOwn = own;
+          break;
+        }
+      }
+      const kmShift = kmCols.length && projFirstOwn != null ? prevEndKm - projFirstOwn : 0;
+      let projMaxKm = prevEndKm;
       for (const r of reports as any[]) {
         seq += 1;
         const newReportId = uuidv4();
@@ -158,6 +175,15 @@ export async function POST(request: Request) {
         payload.sort_order = seq * 10;
         payload.user_id = authUser.id;
         payload.created_by = authUser.id;
+        // Make the chainage continuous.
+        if (kmCols.length) {
+          const own = Number(r.kms ?? r.km);
+          if (Number.isFinite(own)) {
+            const adjusted = Math.round((own + kmShift) * 100) / 100;
+            for (const c of kmCols) payload[c] = adjusted;
+            if (adjusted > projMaxKm) projMaxKm = adjusted;
+          }
+        }
         await insertRow(conn, "reports", payload, reportCols);
         reportsCopied += 1;
 

@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from "uuid";
 import pool from "../../../../lib/db";
 import { requireAuth } from "../../../../lib/auth";
 import { parseSurveyReport } from "../../../../lib/docxReportImport";
+import { parsePdfReport } from "../../../../lib/pdfReportImport";
 import { renderAnnotatedPhotos } from "../../../../lib/docxRenderAnnotated";
 import { uploadBufferToS3 } from "../../../../lib/s3";
 import { logActivity } from "../../../../lib/activityLog";
@@ -92,27 +93,37 @@ export async function POST(request: Request) {
     const form = await request.formData();
     const file = form.get("file");
     if (!(file instanceof File)) {
-      return Response.json({ error: "Upload a .docx or .pptx file in the 'file' field" }, { status: 400 });
+      return Response.json({ error: "Upload a .docx, .pptx or .pdf file in the 'file' field" }, { status: 400 });
     }
-    if (!/\.(docx|pptx)$/i.test(file.name)) {
-      return Response.json({ error: "Only .docx or .pptx files are supported" }, { status: 400 });
+    if (!/\.(docx|pptx|pdf)$/i.test(file.name)) {
+      return Response.json({ error: "Only .docx, .pptx or .pdf files are supported" }, { status: 400 });
     }
+    const isPdf = /\.pdf$/i.test(file.name);
 
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    // Keep the raw uploaded .docx so server-side render tests / the upcoming
+    // Keep the raw uploaded file so server-side render tests / the
     // annotation-render step can run against it without needing scp. Overwritten
     // each import; best-effort so it never affects the import.
     try {
-      await fsp.writeFile("/tmp/lbi-last-import.docx", buffer);
+      await fsp.writeFile(isPdf ? "/tmp/lbi-last-import.pdf" : "/tmp/lbi-last-import.docx", buffer);
     } catch (err) {
       console.warn("[import-docx] could not stash raw upload to /tmp (non-fatal):", err);
     }
 
-    const { points, frontImages, objective, getPhoto } = parseSurveyReport(buffer, file.name);
+    // PDF reports are parsed with pdfjs (text + embedded photos); Word/PPT with
+    // the zip-based parser. Both return the SAME shape, so everything below is
+    // identical.
+    const { points, frontImages, objective, getPhoto } = isPdf
+      ? await parsePdfReport(buffer)
+      : parseSurveyReport(buffer, file.name);
     if (!points.length) {
       return Response.json(
-        { error: "No survey points found in this file. Is it the table-style report?" },
+        {
+          error: isPdf
+            ? "No survey points found in this PDF. It may be a scanned/image-only PDF, or use a layout we can't read yet."
+            : "No survey points found in this file. Is it the table-style report?",
+        },
         { status: 422 }
       );
     }

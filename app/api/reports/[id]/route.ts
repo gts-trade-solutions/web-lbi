@@ -61,6 +61,8 @@ export async function PUT(request: Request, context: Ctx) {
       "longitude",
       "loc_lat",
       "loc_lon",
+      "kms",
+      "km",
     ];
     const updates = allowed.filter((k) => cols.has(k) && Object.prototype.hasOwnProperty.call(body, k));
     if (!updates.length) {

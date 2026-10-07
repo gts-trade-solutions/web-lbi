@@ -2618,7 +2618,7 @@ export default function ProjectsPage() {
           <input
             ref={importDocxRef}
             type="file"
-            accept=".docx,.pptx"
+            accept=".docx,.pptx,.pdf"
             style={{ display: "none" }}
             onChange={(e) => {
               const f = e.target.files?.[0] || null;
@@ -2630,9 +2630,9 @@ export default function ProjectsPage() {
             style={styles.btnGhost}
             onClick={() => importDocxRef.current?.click()}
             disabled={importingDocx}
-            title="Convert an old survey report (Word .docx or PowerPoint .pptx) into a new project with points & photos"
+            title="Convert an old survey report (Word .docx, PowerPoint .pptx or PDF) into a new project with points & photos"
           >
-            {importingDocx ? "Converting…" : "📄➜ Import old report (Word/PPT)"}
+            {importingDocx ? "Converting…" : "📄➜ Import old report (Word/PPT/PDF)"}
           </button>
 
           <div style={styles.exportGroup}>

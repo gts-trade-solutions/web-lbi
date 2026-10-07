@@ -158,7 +158,7 @@ function cellText(tc: string | undefined): string {
 
 // A single coordinate token → decimal degrees. Handles N/S/E/W (either end),
 // degrees+decimal-minutes, and degrees-minutes-seconds.
-function parseCoord(v: string): number | null {
+export function parseCoord(v: string): number | null {
   let raw = String(v || "").trim().replace(/^[\s"',]+|[\s"',]+$/g, "");
   if (!raw) return null;
   let sign = 1;
@@ -185,7 +185,7 @@ function parseCoord(v: string): number | null {
 //   • lat & lon run together, dir-first: "N12 59.312E80 10.350"
 //   • space-separated dir-first: "N12 53.397 E79 54.775"
 //   • DMS dir-last: "12°55'21.5\"N 79°52'29.2\"E"
-function splitCoordPair(raw: string): [string, string] | null {
+export function splitCoordPair(raw: string): [string, string] | null {
   const s0 = String(raw || "").trim();
   if (!s0) return null;
   // A: break BEFORE a hemisphere letter that follows a digit (start of 2nd coord).
@@ -199,7 +199,7 @@ function splitCoordPair(raw: string): [string, string] | null {
 
 // TPI-style reports carry no CATEGORY column — infer it from the detail text so
 // the imported report still gets a sensible category (user can fix in the grid).
-function inferCategory(text: string): string {
+export function inferCategory(text: string): string {
   const c = String(text || "").toLowerCase();
   if (/side\s*sign/.test(c)) return "Side Signboard";
   if (/electric\s*sign/.test(c)) return "Electric Sign Board";
