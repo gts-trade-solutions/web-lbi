@@ -3416,6 +3416,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   let gaImageUrls: string[] = [];
   if (includeGa) {
     const gaPageId = String(routePageRow?.id || "").trim();
+    // 1) The GA images on the route page (the expected place).
     if (gaPageId) {
       try {
         const imgRows = await safeQuery(
@@ -3426,9 +3427,27 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           .map((x) => String((x as Row).file_url || "").trim())
           .filter(Boolean);
       } catch (err) {
-        console.error("[export actual] ga images query failed - using single:", err);
+        console.error("[export actual] ga images (page) query failed:", err);
       }
     }
+    // 2) Fallback: ALL GA images for this project (in case they were saved
+    // against a different route-page row than the one we picked above). The
+    // project_route_page_images table holds only GA-drawing images, so this is
+    // safe. De-dup by url in case pages overlap.
+    if (!gaImageUrls.length) {
+      try {
+        const imgRows = await safeQuery(
+          "SELECT file_url FROM project_route_page_images WHERE project_id = ? ORDER BY created_at ASC",
+          [projectId]
+        );
+        gaImageUrls = Array.from(
+          new Set(imgRows.map((x) => String((x as Row).file_url || "").trim()).filter(Boolean))
+        );
+      } catch (err) {
+        console.error("[export actual] ga images (project) query failed:", err);
+      }
+    }
+    // 3) Last resort: the single image from project_ga_drawings.
     if (!gaImageUrls.length && gaImageUrl) gaImageUrls = [gaImageUrl];
   }
   console.log("[export actual] GA images:", gaImageUrls.length);
