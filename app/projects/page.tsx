@@ -955,6 +955,8 @@ export default function ProjectsPage() {
   const [combineOpen, setCombineOpen] = useState(false);
   const [combineSelected, setCombineSelected] = useState<string[]>([]);
   const [combineName, setCombineName] = useState("");
+  // Per-project starting KM typed in the combine dialog (projectId -> text).
+  const [combineStartKm, setCombineStartKm] = useState<Record<string, string>>({});
   const [combining, setCombining] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingProjectId, setDeletingProjectId] = useState<string>("");
@@ -1241,13 +1243,23 @@ export default function ProjectsPage() {
       combineSelected
         .map((id) => safeName(projects.find((p) => p.id === id) || ({} as ProjectRow)))
         .join(" + ");
+    // Build the per-project starting KM map (only entries the user actually
+    // typed; blanks continue from the previous project automatically).
+    const startKms: Record<string, number> = {};
+    combineSelected.forEach((id, i) => {
+      const raw = (combineStartKm[id] ?? (i === 0 ? "0" : "")).trim();
+      if (raw !== "") {
+        const n = Number(raw);
+        if (Number.isFinite(n)) startKms[id] = n;
+      }
+    });
     setCombining(true);
     try {
       const res = await fetch("/api/projects/combine", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ sourceProjectIds: combineSelected, name }),
+        body: JSON.stringify({ sourceProjectIds: combineSelected, name, startKms }),
       });
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(data?.detail || data?.error || "Combine failed");
@@ -3025,6 +3037,85 @@ export default function ProjectsPage() {
                 <div style={{ padding: 10, color: "#98A2B3" }}>No projects to combine.</div>
               )}
             </div>
+
+            {combineSelected.length >= 2 && (
+              <>
+                <div style={styles.formLabel}>Starting KM for each project</div>
+                <div
+                  style={{
+                    border: "1px solid #E4E7EC",
+                    borderRadius: 10,
+                    padding: 8,
+                    marginBottom: 6,
+                  }}
+                >
+                  {combineSelected.map((id, i) => {
+                    const p = projects.find((x) => x.id === id) || ({} as ProjectRow);
+                    return (
+                      <div
+                        key={id}
+                        style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 2px" }}
+                      >
+                        <span
+                          style={{
+                            background: "#111",
+                            color: "#fff",
+                            borderRadius: 999,
+                            minWidth: 20,
+                            height: 20,
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontSize: 12,
+                            fontWeight: 800,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {i + 1}
+                        </span>
+                        <span
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            fontWeight: 600,
+                            color: "#111",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {safeName(p)}
+                        </span>
+                        <input
+                          inputMode="decimal"
+                          placeholder={i === 0 ? "0" : "continue"}
+                          value={combineStartKm[id] ?? (i === 0 ? "0" : "")}
+                          onChange={(e) =>
+                            setCombineStartKm((prev) => ({ ...prev, [id]: e.target.value }))
+                          }
+                          disabled={combining}
+                          style={{
+                            width: 96,
+                            height: 34,
+                            borderRadius: 8,
+                            border: "1px solid #D0D5DD",
+                            padding: "0 10px",
+                            fontWeight: 700,
+                            outline: "none",
+                            textAlign: "right",
+                          }}
+                        />
+                        <span style={{ fontSize: 12, color: "#667085", flexShrink: 0 }}>km</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 12, color: "#667085", marginBottom: 12, lineHeight: 1.5 }}>
+                  Where each project&apos;s KM should begin. The first is usually <b>0</b>; leave a
+                  box blank to continue from the project above it.
+                </div>
+              </>
+            )}
 
             <div style={styles.formLabel}>New combined project name</div>
             <input

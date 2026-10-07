@@ -51,6 +51,20 @@ function copyPayload(row: Record<string, any>, drop: Set<string>, cols: Set<stri
   return out;
 }
 
+// Straight-line distance between two GPS points, in kilometres. Used to work
+// out how far each point sits ALONG its project when the reports carry no KM of
+// their own, so the combined chainage can still be continuous.
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
 const REPORT_DROP = new Set([
   "id",
   "project_id",
@@ -84,6 +98,16 @@ export async function POST(request: Request) {
     ? body.sourceProjectIds.map((v: unknown) => String(v || "").trim()).filter(Boolean)
     : [];
   const name = String(body.name || "").trim();
+
+  // Per-project starting KM entered in the combine dialog (projectId -> km).
+  // A project with no entry continues from where the previous one ended.
+  const startKms: Record<string, number> = {};
+  if (body.startKms && typeof body.startKms === "object") {
+    for (const [k, v] of Object.entries(body.startKms as Record<string, unknown>)) {
+      const n = Number(v);
+      if (Number.isFinite(n)) startKms[String(k)] = n;
+    }
+  }
 
   // De-dupe while preserving order.
   const orderedIds = Array.from(new Set(sourceProjectIds));
@@ -142,30 +166,46 @@ export async function POST(request: Request) {
     const delFilter = reportCols.has("deleted_at") ? "AND deleted_at IS NULL" : "";
     const orderCols = ["sort_order", "created_at", "id"].filter((cch) => reportCols.has(cch));
     const orderBy = orderCols.length ? `ORDER BY ${orderCols.map((cch) => `${cch} ASC`).join(", ")}` : "";
-    // Continuous KM (chainage) across the combined project: it starts at 0 and
-    // each following project continues from where the previous one ended, instead
-    // of every project restarting at its own 0. Only numeric km values are
-    // shifted; anything non-numeric is left as-is.
+    // KM (chainage) for the combined project. Each source project begins at the
+    // "Start KM" entered in the combine dialog (or, if blank, continues from
+    // where the previous project ended). WITHIN a project the point-to-point KM
+    // is kept as-is: its own stored KM when it has one, otherwise the straight-
+    // line distance travelled from that project's first point.
     const kmCols = ["kms", "km"].filter((c) => reportCols.has(c));
+    const hasLatLon = reportCols.has("loc_lat") && reportCols.has("loc_lon");
     let prevEndKm = 0;
     for (const srcId of orderedIds) {
       const [reportRows] = await conn.query(
         `SELECT * FROM reports WHERE project_id = ? ${delFilter} ${orderBy}`,
         [srcId]
       );
-      const reports = Array.isArray(reportRows) ? reportRows : [];
-      // Shift this project's km so its first point lands at prevEndKm.
-      let projFirstOwn: number | null = null;
-      for (const r of reports as any[]) {
+      const reports = (Array.isArray(reportRows) ? reportRows : []) as any[];
+
+      // Where this project's KM starts.
+      const startKm = Number.isFinite(startKms[srcId]) ? startKms[srcId] : prevEndKm;
+      // Each point's distance ALONG this project (own KM, else GPS cumulative).
+      const within: number[] = [];
+      let cum = 0;
+      let prevLat: number | null = null;
+      let prevLon: number | null = null;
+      for (const r of reports) {
+        const lat = hasLatLon ? Number(r.loc_lat) : NaN;
+        const lon = hasLatLon ? Number(r.loc_lon) : NaN;
+        if (prevLat != null && prevLon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
+          cum += haversineKm(prevLat, prevLon, lat, lon);
+        }
         const own = Number(r.kms ?? r.km);
-        if (Number.isFinite(own)) {
-          projFirstOwn = own;
-          break;
+        within.push(Number.isFinite(own) ? own : cum);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+          prevLat = lat;
+          prevLon = lon;
         }
       }
-      const kmShift = kmCols.length && projFirstOwn != null ? prevEndKm - projFirstOwn : 0;
-      let projMaxKm = prevEndKm;
-      for (const r of reports as any[]) {
+      const firstWithin = within.length ? within[0] : 0;
+      let projMaxKm = startKm;
+
+      for (let ri = 0; ri < reports.length; ri++) {
+        const r = reports[ri];
         seq += 1;
         const newReportId = uuidv4();
         const payload = copyPayload(r, REPORT_DROP, reportCols);
@@ -175,14 +215,11 @@ export async function POST(request: Request) {
         payload.sort_order = seq * 10;
         payload.user_id = authUser.id;
         payload.created_by = authUser.id;
-        // Make the chainage continuous.
+        // KM = this project's start + how far this point is along the project.
         if (kmCols.length) {
-          const own = Number(r.kms ?? r.km);
-          if (Number.isFinite(own)) {
-            const adjusted = Math.round((own + kmShift) * 100) / 100;
-            for (const c of kmCols) payload[c] = adjusted;
-            if (adjusted > projMaxKm) projMaxKm = adjusted;
-          }
+          const adjusted = Math.round((startKm + (within[ri] - firstWithin)) * 100) / 100;
+          for (const c of kmCols) payload[c] = adjusted;
+          if (adjusted > projMaxKm) projMaxKm = adjusted;
         }
         await insertRow(conn, "reports", payload, reportCols);
         reportsCopied += 1;
@@ -202,6 +239,8 @@ export async function POST(request: Request) {
           photosCopied += 1;
         }
       }
+      // The next project (if it has no Start KM entered) continues from here.
+      prevEndKm = projMaxKm;
     }
 
     await conn.commit();
