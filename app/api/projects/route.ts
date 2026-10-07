@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import pool from "../../../lib/db";
 import { requireAuth } from "../../../lib/auth";
-import { ensureTrashColumns } from "../../../lib/projects-trash";
+import { ensureTrashColumns, ensureStatusColumn } from "../../../lib/projects-trash";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,6 +26,7 @@ export async function GET(request: Request) {
   try {
     requireAuth(request);
     await ensureTrashColumns();
+    await ensureStatusColumn();
     const columns = await getProjectColumns();
 
     const orderBy = columns.has("created_at")
@@ -34,8 +35,11 @@ export async function GET(request: Request) {
         ? " ORDER BY updated_at DESC"
         : "";
 
-    // Hide soft-deleted (recycle bin) projects from the main listing.
-    const where = columns.has("deleted_at") ? " WHERE deleted_at IS NULL" : "";
+    // Hide soft-deleted (recycle bin) AND finished projects from the main list.
+    const clauses: string[] = [];
+    if (columns.has("deleted_at")) clauses.push("deleted_at IS NULL");
+    if (columns.has("status")) clauses.push("COALESCE(status,'active') <> 'finished'");
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
 
     const [rows] = await pool.query(`SELECT * FROM projects${where}${orderBy}`);
     const projects = Array.isArray(rows) ? rows : [];

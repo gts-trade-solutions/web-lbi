@@ -5,6 +5,7 @@
 // /api/projects/<id>.
 import pool from "../../../../lib/db";
 import { requireAuth } from "../../../../lib/auth";
+import { ensureStatusColumn } from "../../../../lib/projects-trash";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,7 +42,7 @@ export async function GET(request: Request) {
 
     const byProject = new Map<
       string,
-      { projectId: string; projectName: string; files: any[]; latest: string }
+      { projectId: string; projectName: string; files: any[]; latest: string; finished: boolean }
     >();
     for (const r of Array.isArray(rows) ? (rows as any[]) : []) {
       const pid = String(r.project_id);
@@ -51,6 +52,7 @@ export async function GET(request: Request) {
           projectName: String(r.project_name || "Untitled project"),
           files: [],
           latest: String(r.created_at || ""),
+          finished: false,
         });
       }
       byProject.get(pid)!.files.push({
@@ -59,6 +61,33 @@ export async function GET(request: Request) {
         size: Number(r.size_bytes || 0),
         createdAt: r.created_at,
       });
+    }
+
+    // Also include projects the user marked "finished" (which may have no
+    // uploaded report), so they show up here and are hidden from the main list.
+    try {
+      await ensureStatusColumn();
+      const [finRows] = await pool.query(
+        `SELECT id, name, created_at FROM projects
+          WHERE COALESCE(status,'active') = 'finished' AND deleted_at IS NULL`
+      );
+      for (const r of Array.isArray(finRows) ? (finRows as any[]) : []) {
+        const pid = String(r.id);
+        const existing = byProject.get(pid);
+        if (existing) {
+          existing.finished = true;
+        } else {
+          byProject.set(pid, {
+            projectId: pid,
+            projectName: String(r.name || "Untitled project"),
+            files: [],
+            latest: String(r.created_at || ""),
+            finished: true,
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("[api/projects/finalized] status merge skipped:", e);
     }
 
     // Most-recently-finalized projects first.

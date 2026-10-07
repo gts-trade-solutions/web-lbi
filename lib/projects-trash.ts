@@ -53,6 +53,30 @@ export function ensureTrashColumns(): Promise<boolean> {
   return ensured;
 }
 
+// The `status` column drives "Finished projects" (status = 'finished' hides a
+// project from the main list and shows it under Finished). Added lazily like the
+// trash columns so no manual migration is needed.
+let ensuredStatus: Promise<boolean> | null = null;
+export function ensureStatusColumn(): Promise<boolean> {
+  if (!ensuredStatus) {
+    ensuredStatus = (async () => {
+      try {
+        if (!(await columnExists("status"))) {
+          await pool.query(
+            "ALTER TABLE projects ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active'"
+          );
+        }
+        return true;
+      } catch (error) {
+        console.error("[projects-trash] failed to ensure status column:", error);
+        ensuredStatus = null; // allow a retry on the next request
+        return false;
+      }
+    })();
+  }
+  return ensuredStatus;
+}
+
 /**
  * Permanently remove any project that has been in the recycle bin longer than
  * the retention window. Safe to call on every trash read.

@@ -1,6 +1,6 @@
 import pool from "../../../../lib/db";
 import { requireAuth } from "../../../../lib/auth";
-import { ensureTrashColumns } from "../../../../lib/projects-trash";
+import { ensureTrashColumns, ensureStatusColumn } from "../../../../lib/projects-trash";
 import { logActivity } from "../../../../lib/activityLog";
 
 export const runtime = "nodejs";
@@ -74,6 +74,8 @@ export async function PUT(request: Request, context: RouteContext) {
     }
 
     const body = await request.json().catch(() => ({} as any));
+    // Make sure the status column exists before an "mark finished" update.
+    if (body?.status !== undefined) await ensureStatusColumn();
     const columns = await getProjectColumns();
 
     const updates: Record<string, unknown> = {};

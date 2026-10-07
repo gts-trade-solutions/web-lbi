@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "../../../components/Toast";
 
 type FinalFile = { id: string; fileName: string; size: number; createdAt: string };
-type FinalProject = { projectId: string; projectName: string; files: FinalFile[] };
+type FinalProject = { projectId: string; projectName: string; files: FinalFile[]; finished?: boolean };
 
 function authHeaders(): Record<string, string> {
   const t = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
@@ -31,6 +31,30 @@ export default function FinishedProjectsPage() {
   const router = useRouter();
   const [projects, setProjects] = useState<FinalProject[]>([]);
   const [loading, setLoading] = useState(true);
+  const [movingId, setMovingId] = useState("");
+
+  const moveBack = async (projectId: string, name: string) => {
+    if (!window.confirm(`Move "${name}" back to active projects?`)) return;
+    try {
+      setMovingId(projectId);
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ status: "active" }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d?.error || "Failed to move project back");
+      }
+      setProjects((prev) => prev.filter((p) => p.projectId !== projectId));
+      toast(`Moved "${name}" back to active projects.`, "success");
+    } catch (e: any) {
+      toast(e?.message || "Failed to move project back", "error");
+    } finally {
+      setMovingId("");
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -97,16 +121,17 @@ export default function FinishedProjectsPage() {
 
       <div style={S.wrap}>
         <p style={S.lead}>
-          Projects that have a finalized Word report uploaded. Download any of them here, or open a
-          project to add / replace its finalized file.
+          Projects you&apos;ve marked <b>finished</b> (hidden from the main list), plus any with a
+          finalized Word report uploaded. Use <b>↩ Move back to active</b> to return one to the main
+          list.
         </p>
 
         {loading ? (
           <div style={S.empty}>Loading…</div>
         ) : !projects.length ? (
           <div style={S.emptyCard}>
-            No finished projects yet. Open a project → <b>📎 Finalized</b> → upload its final Word
-            report, and it will appear here.
+            No finished projects yet. On the Projects page, click <b>✓ Finished</b> on any project to
+            move it here.
           </div>
         ) : (
           <>
@@ -118,29 +143,47 @@ export default function FinishedProjectsPage() {
               <div key={p.projectId} style={S.card}>
                 <div style={S.head}>
                   <div style={S.pname}>📁 {p.projectName}</div>
-                  <button
-                    style={S.open}
-                    onClick={() => router.push(`/projects/${encodeURIComponent(p.projectId)}/finalized`)}
-                    title="Open this project's finalized manager"
-                  >
-                    Manage ▸
-                  </button>
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
-                  {p.files.map((f) => (
-                    <div key={f.id} style={S.row}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={S.fname}>📄 {f.fileName}</div>
-                        <div style={S.meta}>
-                          {fmtSize(f.size)} · {fmtDate(f.createdAt)}
-                        </div>
-                      </div>
-                      <button style={S.dl} onClick={() => download(p.projectId, f)}>
-                        ⬇ Download
+                  <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                    {p.finished && (
+                      <button
+                        style={{ ...S.open, borderColor: "#B54708", color: "#B54708", opacity: movingId === p.projectId ? 0.6 : 1 }}
+                        disabled={movingId === p.projectId}
+                        onClick={() => moveBack(p.projectId, p.projectName)}
+                        title="Move this project back to the active projects list"
+                      >
+                        {movingId === p.projectId ? "Moving…" : "↩ Move back to active"}
                       </button>
-                    </div>
-                  ))}
+                    )}
+                    <button
+                      style={S.open}
+                      onClick={() => router.push(`/projects/${encodeURIComponent(p.projectId)}`)}
+                      title="Open this project"
+                    >
+                      Open ▸
+                    </button>
+                  </div>
                 </div>
+                {p.files.length ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+                    {p.files.map((f) => (
+                      <div key={f.id} style={S.row}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={S.fname}>📄 {f.fileName}</div>
+                          <div style={S.meta}>
+                            {fmtSize(f.size)} · {fmtDate(f.createdAt)}
+                          </div>
+                        </div>
+                        <button style={S.dl} onClick={() => download(p.projectId, f)}>
+                          ⬇ Download
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ ...S.meta, marginTop: 10 }}>
+                    Marked finished — no final Word report uploaded.
+                  </div>
+                )}
               </div>
             ))}
           </>

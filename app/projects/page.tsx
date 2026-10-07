@@ -960,6 +960,7 @@ export default function ProjectsPage() {
   const [combining, setCombining] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingProjectId, setDeletingProjectId] = useState<string>("");
+  const [finishingId, setFinishingId] = useState<string>("");
 
   const [binOpen, setBinOpen] = useState(false);
   const [trashed, setTrashed] = useState<ProjectRow[]>([]);
@@ -1493,6 +1494,34 @@ export default function ProjectsPage() {
       toast(e?.message || String(e));
     } finally {
       setDeletingProjectId("");
+    }
+  };
+
+  // Mark a project "finished": it moves out of the main list into
+  // "Finished projects" (reversible from there).
+  const finishProject = async (project: ProjectRow) => {
+    const projectName = safeName(project);
+    const confirmed = await confirmDialog(
+      `Move "${projectName}" to Finished projects? It will be hidden from this list. You can move it back any time from the Finished projects page.`,
+      { title: "Move to Finished?", confirmText: "Move to Finished" }
+    );
+    if (!confirmed) return;
+    try {
+      setFinishingId(project.id);
+      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ status: "finished" }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.error || "Failed to move project");
+      setProjects((prev) => prev.filter((x) => x.id !== project.id));
+      toast(`Moved "${projectName}" to Finished projects.`);
+    } catch (e: any) {
+      toast(e?.message || String(e));
+    } finally {
+      setFinishingId("");
     }
   };
 
@@ -2745,6 +2774,24 @@ export default function ProjectsPage() {
                     }}
                   >
                     Edit
+                  </button>
+
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.btnGhostSmall,
+                      borderColor: "#12B76A",
+                      color: "#027A48",
+                      opacity: finishingId === p.id ? 0.7 : 1,
+                    }}
+                    disabled={finishingId === p.id}
+                    title="Mark this project finished and move it to Finished projects"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      finishProject(p);
+                    }}
+                  >
+                    {finishingId === p.id ? "Moving…" : "✓ Finished"}
                   </button>
 
                   <button
