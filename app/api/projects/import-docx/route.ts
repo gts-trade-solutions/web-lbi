@@ -181,7 +181,11 @@ export async function POST(request: Request) {
 
     for (const p of points) {
       const reportId = uuidv4();
-      const kmNum = Number(String(p.km || "").replace(/[^\d.]/g, ""));
+      // Parse the point's own KM. A blank/absent KM must stay NULL (NOT 0 —
+      // Number("") is 0), so points without a surveyed KM don't all collapse to
+      // kilometre zero and break the chainage order.
+      const kmStr = String(p.km ?? "").replace(/[^\d.]/g, "");
+      const kmNum = kmStr === "" ? NaN : Number(kmStr);
       await insertRow(
         "reports",
         {
