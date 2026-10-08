@@ -14,7 +14,19 @@ type ReportPoint = {
   remarks: string;
   location: string;
   state: string;
+  difficulty: "green" | "yellow" | "red" | "";
 };
+
+// Normalise a report's route-difficulty into green / yellow / red / "" (not set),
+// matching the project page's Difficulty filter.
+function normDiff(v: unknown): "green" | "yellow" | "red" | "" {
+  const s = String(v ?? "").toLowerCase();
+  if (!s.trim()) return "";
+  if (s.includes("green") || /normal|go\s*ahead|easy|clear|no\s*obstacle/.test(s)) return "green";
+  if (s.includes("yellow") || s.includes("amber") || /caution|moderate|medium/.test(s)) return "yellow";
+  if (s.includes("red") || /\bstop\b|block|difficult|not\s*(feasible|possible)|don'?t\s*go/.test(s)) return "red";
+  return "";
+}
 
 const INDIAN_STATES = new Set([
   "andhra pradesh", "arunachal pradesh", "assam", "bihar", "chhattisgarh", "goa",
@@ -201,6 +213,23 @@ export default function RouteMapPage() {
   };
 
   const [points, setPoints] = useState<ReportPoint[]>([]);
+  // Route-difficulty filter for the map pins (the full route line stays).
+  const [diffFilter, setDiffFilter] = useState<"all" | "green" | "yellow" | "red" | "none">("all");
+  useEffect(() => {
+    const markers = markersRef.current;
+    if (!markers || !markers.length) return;
+    for (let i = 0; i < points.length; i += 1) {
+      const m = markers[i];
+      if (!m) continue;
+      const d = points[i]?.difficulty;
+      const show = diffFilter === "all" ? true : diffFilter === "none" ? d === "" : d === diffFilter;
+      try {
+        m.setVisible(show);
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [diffFilter, points]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
@@ -662,6 +691,7 @@ export default function RouteMapPage() {
             state: stateName(
               r.resolved_location || r.location || r.location_name || r.address
             ),
+            difficulty: normDiff(r.difficulty ?? r.vehicle_movement),
           });
         }
         setPoints(pts);
@@ -1633,6 +1663,30 @@ export default function RouteMapPage() {
               <button style={styles.ctrlBtn} onClick={togglePlay}>
                 {playing && activeTourRef.current === "report" ? "⏸ Pause" : "▶ Play reports"}
               </button>
+
+              {/* Filter the map pins by route difficulty (the line stays whole). */}
+              <select
+                value={diffFilter}
+                onChange={(e) => setDiffFilter(e.target.value as "all" | "green" | "yellow" | "red" | "none")}
+                title="Show only points of a route difficulty"
+                style={{
+                  height: 38,
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.25)",
+                  background: "#1f2937",
+                  color: "#fff",
+                  fontWeight: 800,
+                  padding: "0 10px",
+                  cursor: "pointer",
+                  outline: "none",
+                }}
+              >
+                <option value="all">Difficulty: All</option>
+                <option value="green">🟢 Green</option>
+                <option value="yellow">🟡 Yellow</option>
+                <option value="red">🔴 Red</option>
+                <option value="none">Not set</option>
+              </select>
 
               {/* Manual playback: rewind to start, step back, step forward. */}
               <button
