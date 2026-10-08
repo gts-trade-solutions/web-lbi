@@ -633,14 +633,17 @@ export default function RouteMapPage() {
       setLoading(true);
       setError(null);
       try {
+        // Cache-buster (?t=) so a fresh copy is always fetched — defeats browser
+        // AND any proxy/CDN cache (a unique URL can't be served from cache).
+        const bust = `t=${Date.now()}`;
         const res = isShare
-          ? await fetch(`/api/share/${encodeURIComponent(shareToken)}/reports`, {
+          ? await fetch(`/api/share/${encodeURIComponent(shareToken)}/reports?${bust}`, {
               method: "GET",
               cache: "no-store",
               headers: { "X-Share-Session": sess },
             })
           : await fetch(
-              `/api/projects/${encodeURIComponent(projectId)}/reports?sort=asc`,
+              `/api/projects/${encodeURIComponent(projectId)}/reports?sort=asc&${bust}`,
               { method: "GET", cache: "no-store", credentials: "include", headers: authHeaders() }
             );
         const data = await res.json().catch(() => ({} as any));
