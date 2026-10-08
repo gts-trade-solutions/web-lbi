@@ -1384,29 +1384,35 @@ export default function RouteMapPage() {
         markersRef.current = points.map((p, i) => {
           const isStart = i === 0;
           const isEnd = i === points.length - 1;
+          // Colour each pin by its ROUTE DIFFICULTY (green / yellow / red; grey
+          // when not set). Start & end are drawn larger with a dark ring so the
+          // route ends stay obvious.
+          const diffColor =
+            p.difficulty === "green"
+              ? "#16a34a"
+              : p.difficulty === "yellow"
+                ? "#eab308"
+                : p.difficulty === "red"
+                  ? "#dc2626"
+                  : "#64748b";
+          const big = isStart || isEnd;
           const opts: any = {
             position: { lat: p.lat, lng: p.lng },
             map,
-            label: { text: String(p.n), color: "#fff", fontWeight: "800", fontSize: "12px" },
-            title: isStart
-              ? `START — ${p.category}`
-              : isEnd
-                ? `END — ${p.category}`
-                : p.category,
-          };
-          // Mark the route's start (green) and end (red) with a distinct
-          // coloured circle so it's obvious where the tour begins and finishes.
-          if (isStart || isEnd) {
-            opts.icon = {
+            label: { text: String(p.n), color: "#fff", fontWeight: "800", fontSize: "11px" },
+            title:
+              (isStart ? `START — ${p.category}` : isEnd ? `END — ${p.category}` : p.category) +
+              (p.difficulty ? ` (${p.difficulty})` : ""),
+            icon: {
               path: g.maps.SymbolPath.CIRCLE,
-              scale: 13,
-              fillColor: isStart ? "#16a34a" : "#dc2626",
+              scale: big ? 15 : 12,
+              fillColor: diffColor,
               fillOpacity: 1,
-              strokeColor: "#ffffff",
-              strokeWeight: 3,
-            };
-            opts.zIndex = 1000;
-          }
+              strokeColor: big ? "#111827" : "#ffffff",
+              strokeWeight: big ? 3.5 : 1.5,
+            },
+            zIndex: big ? 1000 : undefined,
+          };
           const marker = new g.maps.Marker(opts);
           marker.addListener("click", () => {
             stopAnim();
