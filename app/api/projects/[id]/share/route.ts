@@ -125,6 +125,62 @@ export async function GET(request: Request, context: Ctx) {
   }
 }
 
+// Edit a link in place (same token / URL): title, password and/or which points
+// it shows. Nothing changes the link itself, so a client's URL keeps working.
+export async function PATCH(request: Request, context: Ctx) {
+  try {
+    requireAuth(request);
+    const projectId = String(context.params?.id || "").trim();
+    const url = new URL(request.url);
+    const shareId = String(url.searchParams.get("shareId") || "").trim();
+    if (!shareId) return Response.json({ error: "shareId is required" }, { status: 400 });
+
+    const body = await request.json().catch(() => ({} as any));
+    const sets: string[] = [];
+    const args: unknown[] = [];
+
+    if (body?.title !== undefined) {
+      sets.push("title = ?");
+      args.push(String(body.title || "").trim().slice(0, 240) || null);
+    }
+    if (body?.password !== undefined && String(body.password).length > 0) {
+      if (String(body.password).length < 4) {
+        return Response.json({ error: "Password must be at least 4 characters." }, { status: 400 });
+      }
+      sets.push("password_hash = ?");
+      args.push(await bcrypt.hash(String(body.password), 10));
+    }
+    if (Array.isArray(body?.selectedIds)) {
+      const ids = Array.from(
+        new Set(body.selectedIds.map((x: unknown) => String(x || "").trim()).filter(Boolean))
+      );
+      sets.push("selected_ids = ?");
+      args.push(ids.length ? JSON.stringify(ids) : null);
+    }
+    if (!sets.length) {
+      return Response.json({ error: "Nothing to update." }, { status: 400 });
+    }
+
+    await ensureShareTable();
+    args.push(shareId, projectId);
+    await pool.query(
+      `UPDATE report_shares SET ${sets.join(", ")} WHERE id = ? AND project_id = ?`,
+      args
+    );
+    await logActivity(request, {
+      action: "edit_share",
+      table: "report_shares",
+      entityId: shareId,
+      projectId,
+    }).catch(() => {});
+    return Response.json({ ok: true });
+  } catch (error) {
+    if (unauthorized(error)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+    console.error("[api/projects/:id/share] PATCH error:", error);
+    return Response.json({ error: "Failed to update share link" }, { status: 500 });
+  }
+}
+
 export async function DELETE(request: Request, context: Ctx) {
   try {
     requireAuth(request);
@@ -134,12 +190,13 @@ export async function DELETE(request: Request, context: Ctx) {
     if (!shareId) return Response.json({ error: "shareId is required" }, { status: 400 });
 
     await ensureShareTable();
+    // Permanently remove the link (the client's URL stops working).
     await pool.query(
-      "UPDATE report_shares SET revoked = 1 WHERE id = ? AND project_id = ?",
+      "DELETE FROM report_shares WHERE id = ? AND project_id = ?",
       [shareId, projectId]
     );
     await logActivity(request, {
-      action: "revoke_share",
+      action: "delete_share",
       table: "report_shares",
       entityId: shareId,
       projectId,
@@ -148,6 +205,6 @@ export async function DELETE(request: Request, context: Ctx) {
   } catch (error) {
     if (unauthorized(error)) return Response.json({ error: "Unauthorized" }, { status: 401 });
     console.error("[api/projects/:id/share] DELETE error:", error);
-    return Response.json({ error: "Failed to revoke share link" }, { status: 500 });
+    return Response.json({ error: "Failed to delete share link" }, { status: 500 });
   }
 }

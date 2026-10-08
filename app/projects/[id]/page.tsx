@@ -1323,10 +1323,10 @@ export default function ProjectReportsPage() {
       /* clipboard may be blocked */
     }
   };
-  const revokeShareLink = async (id: string) => {
+  const deleteShareLink = async (id: string) => {
     const ok = await confirmDialog(
-      "Revoke this share link? The client's link will stop working.",
-      { title: "Revoke link?", confirmText: "Revoke", danger: true }
+      "Delete this share link? The client's link will stop working for good.",
+      { title: "Delete link?", confirmText: "Delete", danger: true }
     );
     if (!ok) return;
     try {
@@ -1334,10 +1334,54 @@ export default function ProjectReportsPage() {
         `/api/projects/${encodeURIComponent(projectId)}/share?shareId=${encodeURIComponent(id)}`,
         { method: "DELETE" }
       );
-      setShareLinks((prev) => prev.map((s) => (s.id === id ? { ...s, revoked: true } : s)));
-      toast("Share link revoked.");
+      setShareLinks((prev) => prev.filter((s) => s.id !== id));
+      toast("Share link deleted.");
     } catch (e: any) {
-      toast(e?.message || "Could not revoke the link");
+      toast(e?.message || "Could not delete the link");
+    }
+  };
+
+  // Editing a link in place (same URL): title, optional new password, and
+  // whether to update it to the points currently in the project.
+  const [editShareId, setEditShareId] = useState<string>("");
+  const [editShareTitle, setEditShareTitle] = useState("");
+  const [editSharePassword, setEditSharePassword] = useState("");
+  const [editShareUpdatePoints, setEditShareUpdatePoints] = useState(false);
+  const [savingShareEdit, setSavingShareEdit] = useState(false);
+  const startEditShare = (s: ShareLinkRow) => {
+    setEditShareId(s.id);
+    setEditShareTitle(s.title || "");
+    setEditSharePassword("");
+    setEditShareUpdatePoints(false);
+  };
+  const saveShareEdit = async (id: string) => {
+    const pw = editSharePassword.trim();
+    if (pw && pw.length < 4) {
+      toast("Password must be at least 4 characters.");
+      return;
+    }
+    try {
+      setSavingShareEdit(true);
+      const payload: Record<string, unknown> = { title: editShareTitle };
+      if (pw) payload.password = pw;
+      if (editShareUpdatePoints) payload.selectedIds = filteredSortedReports.map((r) => r.id);
+      await apiRequestJson(
+        `/api/projects/${encodeURIComponent(projectId)}/share?shareId=${encodeURIComponent(id)}`,
+        { method: "PATCH", body: JSON.stringify(payload) }
+      );
+      setShareLinks((prev) =>
+        prev.map((s) =>
+          s.id === id
+            ? { ...s, title: editShareTitle.trim() || null, reportCount: editShareUpdatePoints ? filteredSortedReports.length : s.reportCount }
+            : s
+        )
+      );
+      setEditShareId("");
+      toast("Share link updated (same link).");
+    } catch (e: any) {
+      toast(e?.message || "Could not update the link");
+    } finally {
+      setSavingShareEdit(false);
     }
   };
 
@@ -3124,30 +3168,71 @@ export default function ProjectReportsPage() {
                             {s.createdAt ? ` · ${new Date(s.createdAt).toLocaleDateString()}` : ""}
                           </div>
                         </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
                           <input
                             readOnly
                             value={url}
                             onFocus={(e) => e.currentTarget.select()}
-                            style={{ flex: 1, minWidth: 0, height: 36, borderRadius: 8, border: "1px solid #D0D5DD", padding: "0 10px", fontWeight: 700, background: "#fff", textDecoration: s.revoked ? "line-through" : "none" }}
+                            style={{ flex: 1, minWidth: 180, height: 36, borderRadius: 8, border: "1px solid #D0D5DD", padding: "0 10px", fontWeight: 700, background: "#fff", textDecoration: s.revoked ? "line-through" : "none" }}
                           />
                           {!s.revoked && (
                             <>
-                              <button
-                                style={{ ...styles.btnGhost, height: 36 }}
-                                onClick={() => copyShareRow(s.id, url)}
-                              >
-                                {copiedShareId === s.id ? "✓ Copied" : "Copy"}
+                              <button style={{ ...styles.btnGhost, height: 36 }} onClick={() => copyShareRow(s.id, url)}>
+                                {copiedShareId === s.id ? "✓ Copied" : "🔗 Share"}
+                              </button>
+                              <button style={{ ...styles.btnGhost, height: 36 }} onClick={() => startEditShare(s)}>
+                                ✏️ Edit
                               </button>
                               <button
                                 style={{ ...styles.btnGhost, height: 36, borderColor: "#FDA29B", color: "#B42318" }}
-                                onClick={() => revokeShareLink(s.id)}
+                                onClick={() => deleteShareLink(s.id)}
                               >
-                                Revoke
+                                🗑 Delete
                               </button>
                             </>
                           )}
                         </div>
+
+                        {editShareId === s.id && (
+                          <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px dashed #EAECF0", display: "grid", gap: 8 }}>
+                            <div style={{ fontWeight: 800, color: "#101828", fontSize: 13 }}>
+                              Edit this link (the link / URL stays the same)
+                            </div>
+                            <input
+                              value={editShareTitle}
+                              onChange={(e) => setEditShareTitle(e.target.value)}
+                              placeholder="Label (optional)"
+                              style={{ height: 36, borderRadius: 8, border: "1px solid #D0D5DD", padding: "0 10px", fontWeight: 700 }}
+                            />
+                            <input
+                              value={editSharePassword}
+                              onChange={(e) => setEditSharePassword(e.target.value)}
+                              placeholder="New password (leave blank to keep current)"
+                              style={{ height: 36, borderRadius: 8, border: "1px solid #D0D5DD", padding: "0 10px", fontWeight: 700 }}
+                            />
+                            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "#475467" }}>
+                              <input
+                                type="checkbox"
+                                checked={editShareUpdatePoints}
+                                onChange={(e) => setEditShareUpdatePoints(e.target.checked)}
+                                style={{ width: 16, height: 16 }}
+                              />
+                              Update this link to the project&apos;s current points ({filteredSortedReports.length})
+                            </label>
+                            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                              <button style={{ ...styles.btnGhost, height: 34 }} onClick={() => setEditShareId("")} disabled={savingShareEdit}>
+                                Cancel
+                              </button>
+                              <button
+                                style={{ ...styles.btnPrimary, height: 34, opacity: savingShareEdit ? 0.6 : 1 }}
+                                onClick={() => saveShareEdit(s.id)}
+                                disabled={savingShareEdit}
+                              >
+                                {savingShareEdit ? "Saving…" : "Save"}
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
