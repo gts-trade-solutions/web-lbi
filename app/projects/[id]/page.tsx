@@ -1280,6 +1280,67 @@ export default function ProjectReportsPage() {
     }
   };
 
+  // ---- Share links list (view / copy / revoke the project's share links) ----
+  type ShareLinkRow = {
+    id: string;
+    token: string;
+    title: string | null;
+    createdAt: string | null;
+    revoked: boolean;
+    reportCount: number;
+    path: string;
+  };
+  const [shareLinksOpen, setShareLinksOpen] = useState(false);
+  const [shareLinks, setShareLinks] = useState<ShareLinkRow[]>([]);
+  const [shareLinksLoading, setShareLinksLoading] = useState(false);
+  const [copiedShareId, setCopiedShareId] = useState<string>("");
+  const loadShareLinks = async () => {
+    if (!projectId) return;
+    try {
+      setShareLinksLoading(true);
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/share`, {
+        headers: authHeaders(),
+        credentials: "include",
+      });
+      const data = await parseJsonSafe(res);
+      setShareLinks(Array.isArray(data?.shares) ? (data.shares as ShareLinkRow[]) : []);
+    } catch {
+      setShareLinks([]);
+    } finally {
+      setShareLinksLoading(false);
+    }
+  };
+  const openShareLinks = () => {
+    setShareLinksOpen(true);
+    loadShareLinks();
+  };
+  const copyShareRow = async (id: string, url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedShareId(id);
+      setTimeout(() => setCopiedShareId(""), 2000);
+    } catch {
+      /* clipboard may be blocked */
+    }
+  };
+  const revokeShareLink = async (id: string) => {
+    const ok = await confirmDialog(
+      "Revoke this share link? The client's link will stop working.",
+      { title: "Revoke link?", confirmText: "Revoke", danger: true }
+    );
+    if (!ok) return;
+    try {
+      await apiRequestJson(
+        `/api/projects/${encodeURIComponent(projectId)}/share?shareId=${encodeURIComponent(id)}`,
+        { method: "DELETE" }
+      );
+      setShareLinks((prev) => prev.map((s) => (s.id === id ? { ...s, revoked: true } : s)));
+      toast("Share link revoked.");
+    } catch (e: any) {
+      toast(e?.message || "Could not revoke the link");
+    }
+  };
+
   // ✅ Download KM + coordinates only, as an Excel (.xlsx) file. Uses the same
   // cumulative-KM logic as the Word export so the values match. If reports are
   // selected, only those are exported; otherwise all reports in the project.
@@ -3015,6 +3076,93 @@ export default function ProjectReportsPage() {
           />
         )}
 
+        {/* ========= SHARE LINKS LIST MODAL ========= */}
+        {shareLinksOpen && (
+          <div style={styles.modalOverlay} onMouseDown={() => setShareLinksOpen(false)}>
+            <div
+              style={{ ...styles.modalCard, width: "min(720px, 96vw)", maxHeight: "85vh", overflowY: "auto" }}
+              onMouseDown={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Share links"
+            >
+              <div style={styles.modalTitle}>🔗 Share Links</div>
+              <div style={styles.modalHint}>
+                Password-protected links to this project&apos;s animated report. Corrections to
+                reports show on the same link automatically. Create new links from the route map
+                (open a point → map → Share).
+              </div>
+
+              {shareLinksLoading ? (
+                <div style={{ padding: 18, color: "#667085" }}>Loading…</div>
+              ) : shareLinks.length === 0 ? (
+                <div style={{ padding: 18, color: "#98A2B3", fontWeight: 700 }}>
+                  No share links yet. Open the route map and click <b>Share</b> to create one.
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+                  {shareLinks.map((s) => {
+                    const url = typeof window !== "undefined" ? `${window.location.origin}${s.path}` : s.path;
+                    return (
+                      <div
+                        key={s.id}
+                        style={{
+                          border: "1px solid #EAECF0",
+                          borderRadius: 12,
+                          padding: 12,
+                          background: s.revoked ? "#FEF3F2" : "#FCFCFD",
+                          opacity: s.revoked ? 0.75 : 1,
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                          <div style={{ fontWeight: 800, color: "#101828" }}>
+                            {s.title || "Shared report"}
+                            {s.revoked ? <span style={{ color: "#B42318", fontWeight: 800 }}> — revoked</span> : null}
+                          </div>
+                          <div style={{ fontSize: 12, color: "#98A2B3", fontWeight: 700 }}>
+                            {s.reportCount ? `${s.reportCount} points` : "all points"}
+                            {s.createdAt ? ` · ${new Date(s.createdAt).toLocaleDateString()}` : ""}
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                          <input
+                            readOnly
+                            value={url}
+                            onFocus={(e) => e.currentTarget.select()}
+                            style={{ flex: 1, minWidth: 0, height: 36, borderRadius: 8, border: "1px solid #D0D5DD", padding: "0 10px", fontWeight: 700, background: "#fff", textDecoration: s.revoked ? "line-through" : "none" }}
+                          />
+                          {!s.revoked && (
+                            <>
+                              <button
+                                style={{ ...styles.btnGhost, height: 36 }}
+                                onClick={() => copyShareRow(s.id, url)}
+                              >
+                                {copiedShareId === s.id ? "✓ Copied" : "Copy"}
+                              </button>
+                              <button
+                                style={{ ...styles.btnGhost, height: 36, borderColor: "#FDA29B", color: "#B42318" }}
+                                onClick={() => revokeShareLink(s.id)}
+                              >
+                                Revoke
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{ ...styles.modalActions, marginTop: 14 }}>
+                <button style={styles.btnGhost} onClick={() => setShareLinksOpen(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ========= EXPORT MODAL ========= */}
         {exportModalOpen && (
           <div style={styles.modalOverlay} onMouseDown={() => setExportModalOpen(false)}>
@@ -3402,6 +3550,14 @@ export default function ProjectReportsPage() {
               title="View or edit the GA drawing / route page (Objective, Map, Locations, GA images, Conclusion)"
             >
               {gaEditorBusy ? "Opening…" : "🖼 GA Drawing"}
+            </button>
+
+            <button
+              style={styles.btnGhost}
+              onClick={openShareLinks}
+              title="See all the share links for this project (copy or revoke them)"
+            >
+              🔗 Share Links
             </button>
 
             {/* ✅ only change: Export button now uses gate */}
