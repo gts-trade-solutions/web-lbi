@@ -3198,7 +3198,7 @@ export default function ProjectReportsPage() {
                               <div style={{ fontWeight: 800, color: "#101828", fontSize: 13 }}>
                                 Choose the points in this summary — tick to add, untick to remove (same link)
                               </div>
-                              <div style={{ display: "flex", gap: 8 }}>
+                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                                 <button
                                   type="button"
                                   style={{ ...styles.btnGhost, height: 28, fontSize: 12 }}
@@ -3213,6 +3213,32 @@ export default function ProjectReportsPage() {
                                 >
                                   None
                                 </button>
+                                {/* Quick pick: set the link to ONLY one route difficulty. */}
+                                {(["green", "yellow", "red"] as const).map((d) => (
+                                  <button
+                                    key={d}
+                                    type="button"
+                                    style={{
+                                      ...styles.btnGhost,
+                                      height: 28,
+                                      fontSize: 12,
+                                      borderColor: d === "green" ? "#12B76A" : d === "yellow" ? "#eab308" : "#F04438",
+                                      color: d === "green" ? "#027A48" : d === "yellow" ? "#854d0e" : "#B42318",
+                                    }}
+                                    title={`Set the link to only the ${d} points`}
+                                    onClick={() =>
+                                      setEditShareSel(
+                                        new Set(
+                                          filteredSortedReports
+                                            .filter((r) => normalizeVM(r.difficulty) === d)
+                                            .map((r) => r.id)
+                                        )
+                                      )
+                                    }
+                                  >
+                                    {d === "green" ? "🟢" : d === "yellow" ? "🟡" : "🔴"} Only {d}
+                                  </button>
+                                ))}
                               </div>
                             </div>
                             <div style={{ fontSize: 12, color: "#667085" }}>
