@@ -636,11 +636,12 @@ export default function RouteMapPage() {
         const res = isShare
           ? await fetch(`/api/share/${encodeURIComponent(shareToken)}/reports`, {
               method: "GET",
+              cache: "no-store",
               headers: { "X-Share-Session": sess },
             })
           : await fetch(
               `/api/projects/${encodeURIComponent(projectId)}/reports?sort=asc`,
-              { method: "GET", credentials: "include", headers: authHeaders() }
+              { method: "GET", cache: "no-store", credentials: "include", headers: authHeaders() }
             );
         const data = await res.json().catch(() => ({} as any));
         if (res.status === 401 && isShare) {

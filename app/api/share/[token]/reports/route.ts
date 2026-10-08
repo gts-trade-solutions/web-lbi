@@ -55,7 +55,12 @@ export async function GET(request: Request, context: Ctx) {
       reports = reports.filter((r) => set.has(String(r.id)));
     }
 
-    return Response.json({ reports });
+    // Never cache: the client must always see the latest corrections on the
+    // same link (browsers / proxies would otherwise serve a stale copy).
+    return Response.json(
+      { reports },
+      { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } }
+    );
   } catch (error) {
     console.error("[api/share/:token/reports] error:", error);
     return Response.json({ error: "Failed to load reports" }, { status: 500 });
