@@ -108,15 +108,20 @@ export async function GET(request: Request, context: Ctx) {
          FROM report_shares WHERE project_id = ? ORDER BY created_at DESC`,
       [projectId]
     );
-    const shares = (Array.isArray(rows) ? rows : []).map((r: any) => ({
-      id: r.id,
-      token: r.token,
-      title: r.title,
-      createdAt: r.created_at,
-      revoked: !!r.revoked,
-      reportCount: parseSelectedIds(r.selected_ids).length,
-      path: `/share/${r.token}`,
-    }));
+    const shares = (Array.isArray(rows) ? rows : []).map((r: any) => {
+      const selectedIds = parseSelectedIds(r.selected_ids);
+      return {
+        id: r.id,
+        token: r.token,
+        title: r.title,
+        createdAt: r.created_at,
+        revoked: !!r.revoked,
+        reportCount: selectedIds.length,
+        // The exact points this link shows ([] = all points in the project).
+        selectedIds,
+        path: `/share/${r.token}`,
+      };
+    });
     return Response.json({ shares });
   } catch (error) {
     if (unauthorized(error)) return Response.json({ error: "Unauthorized" }, { status: 401 });

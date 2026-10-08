@@ -1288,6 +1288,7 @@ export default function ProjectReportsPage() {
     createdAt: string | null;
     revoked: boolean;
     reportCount: number;
+    selectedIds: string[];
     path: string;
   };
   const [shareLinksOpen, setShareLinksOpen] = useState(false);
@@ -1341,43 +1342,41 @@ export default function ProjectReportsPage() {
     }
   };
 
-  // Editing a link in place (same URL): title, optional new password, and
-  // whether to update it to the points currently in the project.
+  // Editing a link = choosing WHICH points appear in the shared summary
+  // (add / remove points). The link / URL and password are unchanged.
   const [editShareId, setEditShareId] = useState<string>("");
-  const [editShareTitle, setEditShareTitle] = useState("");
-  const [editSharePassword, setEditSharePassword] = useState("");
-  const [editShareUpdatePoints, setEditShareUpdatePoints] = useState(false);
+  const [editShareSel, setEditShareSel] = useState<Set<string>>(new Set());
   const [savingShareEdit, setSavingShareEdit] = useState(false);
   const startEditShare = (s: ShareLinkRow) => {
     setEditShareId(s.id);
-    setEditShareTitle(s.title || "");
-    setEditSharePassword("");
-    setEditShareUpdatePoints(false);
+    // An empty selection on the link means "all points" — start from all.
+    const base = s.selectedIds && s.selectedIds.length ? s.selectedIds : filteredSortedReports.map((r) => r.id);
+    setEditShareSel(new Set(base));
   };
+  const toggleEditPoint = (id: string) =>
+    setEditShareSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   const saveShareEdit = async (id: string) => {
-    const pw = editSharePassword.trim();
-    if (pw && pw.length < 4) {
-      toast("Password must be at least 4 characters.");
+    const ids = filteredSortedReports.map((r) => r.id).filter((x) => editShareSel.has(x));
+    if (!ids.length) {
+      toast("Select at least one point for the shared summary.");
       return;
     }
     try {
       setSavingShareEdit(true);
-      const payload: Record<string, unknown> = { title: editShareTitle };
-      if (pw) payload.password = pw;
-      if (editShareUpdatePoints) payload.selectedIds = filteredSortedReports.map((r) => r.id);
       await apiRequestJson(
         `/api/projects/${encodeURIComponent(projectId)}/share?shareId=${encodeURIComponent(id)}`,
-        { method: "PATCH", body: JSON.stringify(payload) }
+        { method: "PATCH", body: JSON.stringify({ selectedIds: ids }) }
       );
       setShareLinks((prev) =>
-        prev.map((s) =>
-          s.id === id
-            ? { ...s, title: editShareTitle.trim() || null, reportCount: editShareUpdatePoints ? filteredSortedReports.length : s.reportCount }
-            : s
-        )
+        prev.map((s) => (s.id === id ? { ...s, selectedIds: ids, reportCount: ids.length } : s))
       );
       setEditShareId("");
-      toast("Share link updated (same link).");
+      toast(`Shared summary updated to ${ids.length} point(s) — same link.`);
     } catch (e: any) {
       toast(e?.message || "Could not update the link");
     } finally {
@@ -3195,30 +3194,59 @@ export default function ProjectReportsPage() {
 
                         {editShareId === s.id && (
                           <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px dashed #EAECF0", display: "grid", gap: 8 }}>
-                            <div style={{ fontWeight: 800, color: "#101828", fontSize: 13 }}>
-                              Edit this link (the link / URL stays the same)
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                              <div style={{ fontWeight: 800, color: "#101828", fontSize: 13 }}>
+                                Choose the points in this summary — tick to add, untick to remove (same link)
+                              </div>
+                              <div style={{ display: "flex", gap: 8 }}>
+                                <button
+                                  type="button"
+                                  style={{ ...styles.btnGhost, height: 28, fontSize: 12 }}
+                                  onClick={() => setEditShareSel(new Set(filteredSortedReports.map((r) => r.id)))}
+                                >
+                                  All
+                                </button>
+                                <button
+                                  type="button"
+                                  style={{ ...styles.btnGhost, height: 28, fontSize: 12 }}
+                                  onClick={() => setEditShareSel(new Set())}
+                                >
+                                  None
+                                </button>
+                              </div>
                             </div>
-                            <input
-                              value={editShareTitle}
-                              onChange={(e) => setEditShareTitle(e.target.value)}
-                              placeholder="Label (optional)"
-                              style={{ height: 36, borderRadius: 8, border: "1px solid #D0D5DD", padding: "0 10px", fontWeight: 700 }}
-                            />
-                            <input
-                              value={editSharePassword}
-                              onChange={(e) => setEditSharePassword(e.target.value)}
-                              placeholder="New password (leave blank to keep current)"
-                              style={{ height: 36, borderRadius: 8, border: "1px solid #D0D5DD", padding: "0 10px", fontWeight: 700 }}
-                            />
-                            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "#475467" }}>
-                              <input
-                                type="checkbox"
-                                checked={editShareUpdatePoints}
-                                onChange={(e) => setEditShareUpdatePoints(e.target.checked)}
-                                style={{ width: 16, height: 16 }}
-                              />
-                              Update this link to the project&apos;s current points ({filteredSortedReports.length})
-                            </label>
+                            <div style={{ fontSize: 12, color: "#667085" }}>
+                              {editShareSel.size} of {filteredSortedReports.length} points selected
+                            </div>
+                            <div
+                              style={{
+                                maxHeight: 220,
+                                overflowY: "auto",
+                                border: "1px solid #EAECF0",
+                                borderRadius: 8,
+                                padding: 6,
+                                background: "#fff",
+                              }}
+                            >
+                              {filteredSortedReports.map((r, ri) => (
+                                <label
+                                  key={r.id}
+                                  style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 6px", borderRadius: 6, cursor: "pointer" }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={editShareSel.has(r.id)}
+                                    onChange={() => toggleEditPoint(r.id)}
+                                    style={{ width: 16, height: 16 }}
+                                  />
+                                  <span style={{ fontWeight: 800, color: "#475467", minWidth: 28 }}>#{ri + 1}</span>
+                                  <span style={{ fontWeight: 700, color: "#101828", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                    {r.category || "Report"}
+                                    {Number.isFinite(ownKm(r)) ? ` — KM ${ownKm(r)}` : ""}
+                                  </span>
+                                </label>
+                              ))}
+                            </div>
                             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
                               <button style={{ ...styles.btnGhost, height: 34 }} onClick={() => setEditShareId("")} disabled={savingShareEdit}>
                                 Cancel
@@ -3228,7 +3256,7 @@ export default function ProjectReportsPage() {
                                 onClick={() => saveShareEdit(s.id)}
                                 disabled={savingShareEdit}
                               >
-                                {savingShareEdit ? "Saving…" : "Save"}
+                                {savingShareEdit ? "Saving…" : "Save points"}
                               </button>
                             </div>
                           </div>
