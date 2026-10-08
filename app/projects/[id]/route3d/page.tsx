@@ -643,6 +643,9 @@ export default function RouteMapPage() {
           const lng = Number(r.longitude ?? r.loc_lon);
           if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
           if (Math.abs(lat) > 90 || Math.abs(lng) > 180) continue;
+          // Skip (0,0) / near-null-island — a point with no real GPS that would
+          // otherwise drag the route line off across the map.
+          if (Math.abs(lat) < 0.001 && Math.abs(lng) < 0.001) continue;
           if (String(r.point_key || "") === "__NO_GPS__") continue;
           n += 1;
           pts.push({
