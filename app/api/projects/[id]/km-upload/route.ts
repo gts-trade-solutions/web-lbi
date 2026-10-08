@@ -87,18 +87,23 @@ export async function POST(request: Request, context: Ctx) {
     return NextResponse.json({ error: "The spreadsheet is empty." }, { status: 400 });
   }
 
-  // Locate the S.No and KM columns from the header row; fall back to the
-  // download layout (col 0 = S.No, col 1 = KM).
+  // The sheet MUST have a proper header row with a KM column (as produced by
+  // the "KM + Coords (Excel)" download). This rejects random / dummy files.
   const header = (aoa[0] || []).map((h) => String(h || "").toLowerCase().trim());
-  let kmCol = header.findIndex((h) => /\bkms?\b/.test(h) || h === "km" || h.startsWith("km"));
+  const BAD_SHEET =
+    "This doesn't look like a KM sheet. Click \"KM + Coords (Excel)\" to download it, edit the KM column, then upload that same file.";
+  const kmCol = header.findIndex((h) => h === "km" || h === "kms" || /\bkms?\b/.test(h) || /kilom/.test(h));
+  if (kmCol < 0) {
+    return NextResponse.json({ error: BAD_SHEET }, { status: 422 });
+  }
+  // Point-number column (S.No). Default to the first column (the download puts
+  // S.No there) only when a header row is clearly present.
   let snoCol = header.findIndex((h) => /s\.?\s*no|serial|point|key|^no\.?$|^#$/.test(h));
-  const hasHeader = kmCol >= 0 || snoCol >= 0;
-  if (kmCol < 0) kmCol = 1;
   if (snoCol < 0) snoCol = 0;
 
-  // Build pointNumber -> km from the data rows.
+  // Build pointNumber -> km from the data rows (skip the header row).
   const kmByNum = new Map<number, number>();
-  for (let i = hasHeader ? 1 : 0; i < aoa.length; i += 1) {
+  for (let i = 1; i < aoa.length; i += 1) {
     const row = aoa[i] || [];
     const num = Number(String(row[snoCol] ?? "").trim());
     const km = parseKm(row[kmCol]);
@@ -106,7 +111,7 @@ export async function POST(request: Request, context: Ctx) {
   }
   if (!kmByNum.size) {
     return NextResponse.json(
-      { error: "No KM values found. The sheet needs a point-number column (S.No) and a KM column." },
+      { error: "No KM values found in the sheet. Put the point number in the S.No column and the KM value in the KM column." },
       { status: 422 }
     );
   }
@@ -142,6 +147,16 @@ export async function POST(request: Request, context: Ctx) {
     } catch (e) {
       console.error("[km-upload] update failed for", r.id, e);
     }
+  }
+
+  if (updated === 0) {
+    return NextResponse.json(
+      {
+        error:
+          "No points were updated — the point numbers (S.No) in the file don't match this project's points. Make sure you downloaded the sheet from THIS project.",
+      },
+      { status: 422 }
+    );
   }
 
   return NextResponse.json({
