@@ -1286,6 +1286,33 @@ export default function ProjectReportsPage() {
     }
   };
 
+  // ✅ Upload KM values in bulk from an Excel sheet (pairs with the download
+  // above): download → fix the KM column → upload here to set every point's KM.
+  const kmUploadRef = useRef<HTMLInputElement | null>(null);
+  const [kmUploading, setKmUploading] = useState(false);
+  const uploadKmXlsx = async (file: File) => {
+    if (!projectId) return;
+    try {
+      setKmUploading(true);
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/km-upload`, {
+        method: "POST",
+        credentials: "include",
+        headers: authHeaders(),
+        body: fd,
+      });
+      const data = await parseJsonSafe(res);
+      if (!res.ok) throw new Error(data?.error || `Failed with status ${res.status}`);
+      toast(`KM updated for ${data.updated} of ${data.totalPoints} point(s).`);
+      await fetchReports(q, sortDir, vmFilter);
+    } catch (e: any) {
+      toast("KM upload error: " + (e?.message || String(e)));
+    } finally {
+      setKmUploading(false);
+    }
+  };
+
   // If user switches to GPX, force allowed modes
   useEffect(() => {
     if (!exportModalOpen) return;
@@ -3232,6 +3259,27 @@ export default function ProjectReportsPage() {
               }
             >
               {xlsxLoading ? "Preparing…" : "KM + Coords (Excel)"}
+            </button>
+
+            {/* ✅ Upload KM values in bulk from an Excel sheet */}
+            <input
+              ref={kmUploadRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const f = e.target.files?.[0] || null;
+                if (f) uploadKmXlsx(f);
+                if (kmUploadRef.current) kmUploadRef.current.value = "";
+              }}
+            />
+            <button
+              style={styles.btnGhost}
+              onClick={() => kmUploadRef.current?.click()}
+              disabled={loading || kmUploading}
+              title="Upload an Excel sheet (S.No + KM columns) to set each point's KM in bulk"
+            >
+              {kmUploading ? "Uploading…" : "⬆ Upload KM (Excel)"}
             </button>
 
             {/* Download the photos ONLY (no Word file) of the selected/listed reports. */}
