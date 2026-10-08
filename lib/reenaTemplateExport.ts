@@ -913,21 +913,19 @@ async function compositeImagesGrid(
     return null;
   }
 }
-// Per spec: observation photo size depends on how many photos the report
-// has. Single photo: 9.4" × 6.6" (900 × 636 px) — big, but short enough to
-// sit UNDER the observation table on the SAME landscape-A3 page (the table +
-// its 2.5" category icon leave ~7" of height; an 8"+ photo spilled onto the
-// next page). Kept below the route map (13") / GA drawing (14") widths (and
-// isObservationPhotoCx excludes those two explicitly) so the layout-rebuild
-// pass can't confuse a full single photo with them. Same 720:509 (~1.414)
-// aspect as before, so no new distortion. 2 photos: each one is 7.2" × 5.0" (691 × 480 px) —
-// rendered side-by-side inside a 100%-width borderless 2-column table; if
-// the page can't accommodate the total width, Word scales each down
-// proportionally while preserving aspect ratio. The actual embedded JPEG
-// is compressed via sharp BEFORE being added to imageMap (max 1400×900
-// inside, q78 mozjpeg) so the DOCX file size stays small.
+// Observation photo size. EVERY observation photo renders at this ONE size —
+// 9.4" × 6.6" (900 × 636 px) — whether a point has one photo or several, so
+// they all match in the report (previously single-photo points were 900×636
+// but multi-photo points were a smaller 691×480, which made some photos look
+// bigger than others). Short enough to sit UNDER the observation table on the
+// SAME landscape-A3 page; kept below the route map (13") / GA drawing (14")
+// widths (isObservationPhotoCx excludes those two explicitly). A point with
+// several photos lays them out one per row, flowing to more pages as needed —
+// each photo kept whole at full size. The embedded JPEG is compressed via
+// sharp before imageMap so the DOCX stays small.
 const OBSERVATION_PHOTO_SIZE: [number, number] = [900, 636];
-const MULTI_PHOTO_SIZE: [number, number] = [691, 480];
+// Unified with the single-photo size so all observation photos are identical.
+const MULTI_PHOTO_SIZE: [number, number] = [900, 636];
 // Category icon shown in the CATEGORY column of the observation table.
 // WIDTH stays 240 so wide glyphs (gate, etc.) keep their full width and the
 // CATEGORY column width (derived from [0], see OBS_COL_DXA) is unchanged.
