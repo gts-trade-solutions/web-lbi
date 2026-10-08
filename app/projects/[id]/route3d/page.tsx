@@ -2362,6 +2362,21 @@ async function drawRoute(
         for (const ll of road) fullPath.push(ll);
         build.road = true;
         build.via = "google";
+      } else if (fetchRoad) {
+        // Google failed for THIS section — try OpenRouteService for just this
+        // section before drawing it as a straight line. (Previously a single
+        // failed section stayed straight because the whole-route ORS fallback
+        // below only runs when Google produced no roads at all.)
+        // eslint-disable-next-line no-await-in-loop
+        const orsSeg = await orsRoute(batch, fetchRoad);
+        if (orsSeg.road && orsSeg.path.length >= 2) {
+          for (const ll of orsSeg.path) fullPath.push(ll);
+          build.road = true;
+          if (orsSeg.straight) build.straight = true;
+          if (build.via === "straight") build.via = "ors";
+        } else {
+          pushStraight(batch);
+        }
       } else {
         pushStraight(batch); // this section only
       }
