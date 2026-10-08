@@ -150,8 +150,10 @@ export async function GET(request: Request, context: Ctx) {
       console.error("[export] photos count:", photos.length);
 
       await ensureGaDrawingsTable();
+      // Pick the LATEST ga_drawings row (saves can leave older rows behind if
+      // project_id isn't unique), so a freshly-saved GA image is recognised.
       const gaRows = await safeQuery(
-        "SELECT id, project_id, image_url, image_key, file_name FROM project_ga_drawings WHERE project_id = ? LIMIT 1",
+        "SELECT id, project_id, image_url, image_key, file_name FROM project_ga_drawings WHERE project_id = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
         [projectId]
       );
       const gaDrawing = gaRows[0] || null;
@@ -163,12 +165,26 @@ export async function GET(request: Request, context: Ctx) {
       );
       const routePage = routeRows[0] || null;
 
+      // GA images are actually stored in project_route_page_images (the GA
+      // setup's multi-image table). Count them so a saved GA counts as "has
+      // images" even if the single project_ga_drawings.image_url wasn't set.
+      let gaPageImageCount = 0;
+      try {
+        const imgCountRows = await safeQuery(
+          "SELECT COUNT(*) AS n FROM project_route_page_images WHERE project_id = ?",
+          [projectId]
+        );
+        gaPageImageCount = Number((imgCountRows[0] as any)?.n || 0);
+      } catch {
+        /* table may not exist yet */
+      }
+
       // The original frontend reads { hasSetup, hasImages, pageId } - keep that
       // contract while also returning richer debug fields.
       const gaImageUrl = String(gaDrawing?.image_url || "").trim();
       const routeMapUrl = String(routePage?.map_file_url || "").trim();
       const hasSetup = Boolean(routePage || gaDrawing);
-      const hasImages = Boolean(gaImageUrl || routeMapUrl);
+      const hasImages = Boolean(gaImageUrl || routeMapUrl || gaPageImageCount > 0);
 
       const templateExists = fs.existsSync(TEMPLATE_PATH);
       console.error("[export] template path:", TEMPLATE_PATH, "exists:", templateExists);

@@ -739,6 +739,9 @@ export default function ProjectReportsPage() {
   // ✅ if GA already exists -> ask Edit or Skip
   const [gaChoiceOpen, setGaChoiceOpen] = useState(false);
   const [gaExistingPageId, setGaExistingPageId] = useState<string | null>(null);
+  // When true, the GA setup modal was opened on its own (via the GA Drawing
+  // button) to just edit — saving it returns to the list, not the export flow.
+  const [gaStandalone, setGaStandalone] = useState(false);
 
   // ✅ Insert report modal (between rows)
   const [insertOpen, setInsertOpen] = useState(false);
@@ -1205,6 +1208,7 @@ export default function ProjectReportsPage() {
   // ✅ Check GA drawing setup before export, else open GA modal
   const onClickExport = async () => {
     if (!projectId) return;
+    setGaStandalone(false);
 
     try {
       const token =
@@ -1235,14 +1239,44 @@ export default function ProjectReportsPage() {
         return;
       }
 
+      // GA is already set up (saved) — go straight to export, don't keep asking.
       setGaExistingPageId(pageId);
-      setGaChoiceOpen(true);
+      openExportModal();
     } catch (e: any) {
       console.error("[export] failed:", e);
       setDlTitle("Export");
       setDlError("Failed to export");
       setDlDone(true);
       setDlOpen(true);
+    }
+  };
+
+  // ✅ Open the GA drawing / route-page setup on its own (to view or edit it),
+  // separate from the export flow.
+  const [gaEditorBusy, setGaEditorBusy] = useState(false);
+  const openGaEditor = async () => {
+    if (!projectId) return;
+    try {
+      setGaEditorBusy(true);
+      // Find the existing route-page id (if any) so the modal edits it.
+      let pageId: string | null = null;
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/export?check=1`, {
+          method: "GET",
+          credentials: "include",
+          headers: authHeaders(),
+        });
+        const data = await res.json().catch(() => ({} as any));
+        if (res.ok && data?.pageId) pageId = String(data.pageId);
+      } catch {
+        /* open blank if the check fails */
+      }
+      setGaExistingPageId(pageId);
+      setGaStandalone(true);
+      setGaSetupReason("GA drawing & route page — edit the Objective, Map, Locations, GA images and Conclusion.");
+      setGaSetupOpen(true);
+    } finally {
+      setGaEditorBusy(false);
     }
   };
 
@@ -2972,7 +3006,11 @@ export default function ProjectReportsPage() {
             onClose={() => setGaSetupOpen(false)}
             onSaved={() => {
               setGaSetupOpen(false);
-              openExportModal();
+              if (gaStandalone) {
+                toast("GA drawing saved.");
+              } else {
+                openExportModal();
+              }
             }}
           />
         )}
@@ -3353,6 +3391,17 @@ export default function ProjectReportsPage() {
               title="Change the order of the survey points (move any point up, down, or to any position)"
             >
               ↕ Reorder points
+            </button>
+
+            {/* ✅ Edit the GA drawing / route page on its own (export no longer
+                asks about GA every time once it's set up). */}
+            <button
+              style={styles.btnGhost}
+              onClick={openGaEditor}
+              disabled={loading || gaEditorBusy}
+              title="View or edit the GA drawing / route page (Objective, Map, Locations, GA images, Conclusion)"
+            >
+              {gaEditorBusy ? "Opening…" : "🖼 GA Drawing"}
             </button>
 
             {/* ✅ only change: Export button now uses gate */}
