@@ -1313,6 +1313,53 @@ export default function ProjectReportsPage() {
     }
   };
 
+  // ✅ Inline KM edit: click the "KM:" line on a point to change it right there.
+  const [kmEditId, setKmEditId] = useState<string>("");
+  const [kmEditVal, setKmEditVal] = useState<string>("");
+  const [kmSaving, setKmSaving] = useState(false);
+  const saveInlineKm = async (r: ReportRow) => {
+    const raw = kmEditVal.trim();
+    const km = raw === "" ? null : Number(raw.replace(/[^0-9.\-]/g, ""));
+    if (raw !== "" && (km == null || !Number.isFinite(km))) {
+      toast("Enter a number for KM.");
+      return;
+    }
+    // Validation: a point's KM should be greater than the point before it and
+    // less than the one after. Warn (but allow) if it isn't.
+    if (km != null) {
+      const idx = filteredSortedReports.findIndex((x) => x.id === r.id);
+      let prevKm: number | null = null;
+      let nextKm: number | null = null;
+      for (let j = idx - 1; j >= 0; j -= 1) {
+        const kk = ownKm(filteredSortedReports[j]);
+        if (Number.isFinite(kk)) { prevKm = kk; break; }
+      }
+      for (let j = idx + 1; j < filteredSortedReports.length; j += 1) {
+        const kk = ownKm(filteredSortedReports[j]);
+        if (Number.isFinite(kk)) { nextKm = kk; break; }
+      }
+      const problems: string[] = [];
+      if (prevKm != null && km <= prevKm) problems.push(`the previous point is ${prevKm} km`);
+      if (nextKm != null && km >= nextKm) problems.push(`the next point is ${nextKm} km`);
+      if (problems.length && !window.confirm(`KM ${km} looks out of order: ${problems.join("; ")}.\n\nSave anyway?`)) {
+        return;
+      }
+    }
+    try {
+      setKmSaving(true);
+      await apiRequestJson(`/api/reports/${encodeURIComponent(r.id)}`, {
+        method: "PUT",
+        body: JSON.stringify({ kms: km, km }),
+      });
+      setReports((prev) => prev.map((x) => (x.id === r.id ? { ...x, kms: km, km } : x)));
+      setKmEditId("");
+    } catch (e: any) {
+      toast(e?.message || "Could not save KM");
+    } finally {
+      setKmSaving(false);
+    }
+  };
+
   // If user switches to GPX, force allowed modes
   useEffect(() => {
     if (!exportModalOpen) return;
@@ -3591,17 +3638,64 @@ export default function ProjectReportsPage() {
                             {(() => {
                               const k = ownKm(r);
                               const bad = kmOrderIssues.has(r.id);
-                              if (!Number.isFinite(k)) return <div style={styles.subtle}>Includes photos</div>;
+                              if (kmEditId === r.id) {
+                                return (
+                                  <div
+                                    style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 3 }}
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <span style={{ fontSize: 12, fontWeight: 800, color: "#475467" }}>KM</span>
+                                    <input
+                                      autoFocus
+                                      value={kmEditVal}
+                                      inputMode="decimal"
+                                      onChange={(e) => setKmEditVal(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") saveInlineKm(r);
+                                        if (e.key === "Escape") setKmEditId("");
+                                      }}
+                                      style={{ width: 72, height: 28, borderRadius: 7, border: "1px solid #D0D5DD", padding: "0 7px", fontWeight: 800, outline: "none" }}
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => saveInlineKm(r)}
+                                      disabled={kmSaving}
+                                      title="Save KM"
+                                      style={{ height: 28, padding: "0 8px", borderRadius: 7, border: "none", background: "#12B76A", color: "#fff", fontWeight: 900, cursor: "pointer" }}
+                                    >
+                                      {kmSaving ? "…" : "✓"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setKmEditId("")}
+                                      title="Cancel"
+                                      style={{ height: 28, padding: "0 8px", borderRadius: 7, border: "1px solid #D0D5DD", background: "#fff", color: "#475467", fontWeight: 900, cursor: "pointer" }}
+                                    >
+                                      ✕
+                                    </button>
+                                  </div>
+                                );
+                              }
                               return (
                                 <div
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setKmEditId(r.id);
+                                    setKmEditVal(Number.isFinite(k) ? String(k) : "");
+                                  }}
+                                  title="Click to change the KM"
                                   style={{
                                     ...styles.subtle,
                                     color: bad ? "#B42318" : "#475467",
                                     fontWeight: bad ? 900 : 700,
+                                    cursor: "pointer",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 4,
                                   }}
-                                  title={bad ? "This KM is not greater than the previous point's KM. Edit the point to fix it." : "Chainage (KM) of this point"}
                                 >
-                                  {bad ? "⚠ " : ""}KM: {k}
+                                  {bad ? "⚠ " : ""}KM: {Number.isFinite(k) ? k : "—"}
+                                  <span style={{ fontSize: 11, opacity: 0.6 }}>✏️</span>
                                 </div>
                               );
                             })()}
