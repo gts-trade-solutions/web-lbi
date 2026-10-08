@@ -165,6 +165,12 @@ export default function RouteMapPage() {
   const [shareErr, setShareErr] = useState<string | null>(null);
   const [shareLink, setShareLink] = useState<string>("");
   const [shareCopied, setShareCopied] = useState(false);
+  // Existing (already-created) share links for this project, so a correction
+  // reuses the SAME link instead of minting a new one each time.
+  const [existingShares, setExistingShares] = useState<
+    Array<{ token: string; path: string; title: string | null }>
+  >([]);
+  const [copiedToken, setCopiedToken] = useState<string>("");
 
   // Fetch road-following geometry for a batch of stops via our server proxy
   // (OpenRouteService). Sends the auth header when logged in, or the share
@@ -1428,6 +1434,38 @@ export default function RouteMapPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Load the project's existing (non-revoked) share links so the dialog can
+  // offer the SAME link to reuse — corrections to reports show on it live, so a
+  // new link isn't needed.
+  const loadExistingShares = async () => {
+    if (!projectId) return;
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/share`, {
+        headers: authHeaders(),
+        credentials: "include",
+      });
+      const data = await res.json().catch(() => ({} as any));
+      const shares = (Array.isArray(data?.shares) ? data.shares : []).filter((s: any) => !s.revoked);
+      setExistingShares(shares.map((s: any) => ({ token: s.token, path: s.path, title: s.title })));
+    } catch {
+      setExistingShares([]);
+    }
+  };
+  useEffect(() => {
+    if (shareOpen && !isShare) loadExistingShares();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shareOpen, isShare, projectId]);
+
+  const copyExisting = async (token: string, url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedToken(token);
+      setTimeout(() => setCopiedToken(""), 2000);
+    } catch {
+      /* clipboard may be blocked */
+    }
+  };
+
   // Create a password-protected share link for exactly the points now on the
   // map, so a client can watch the animated report without an app login.
   const createShare = async () => {
@@ -1485,6 +1523,8 @@ export default function RouteMapPage() {
     setShareErr(null);
     setShareLink("");
     setShareCopied(false);
+    setExistingShares([]);
+    setCopiedToken("");
   };
 
   // Back button: router.back() silently does nothing when the page was opened
@@ -1997,6 +2037,49 @@ export default function RouteMapPage() {
             <div style={styles.modalTitle}>🔗 Share animated report</div>
             {!shareLink ? (
               <>
+                {existingShares.length > 0 && (
+                  <div
+                    style={{
+                      border: "1px solid #D1FADF",
+                      background: "#F6FEF9",
+                      borderRadius: 12,
+                      padding: 12,
+                      marginBottom: 12,
+                    }}
+                  >
+                    <div style={{ fontWeight: 800, color: "#027A48", marginBottom: 2 }}>
+                      You already have a share link — reuse this one:
+                    </div>
+                    <div style={{ fontSize: 12.5, color: "#475467", marginBottom: 8 }}>
+                      Any corrections you make to the reports show up on this same link
+                      automatically — you don&apos;t need a new one.
+                    </div>
+                    {existingShares.map((s) => {
+                      const url =
+                        typeof window !== "undefined"
+                          ? `${window.location.origin}${s.path}`
+                          : s.path;
+                      return (
+                        <div key={s.token} style={{ ...styles.linkRow, marginBottom: 6 }}>
+                          <input
+                            style={styles.linkInput}
+                            readOnly
+                            value={url}
+                            onFocus={(e) => e.currentTarget.select()}
+                            title={s.title || ""}
+                          />
+                          <button style={styles.copyBtn} onClick={() => copyExisting(s.token, url)}>
+                            {copiedToken === s.token ? "✓ Copied" : "Copy"}
+                          </button>
+                        </div>
+                      );
+                    })}
+                    <div style={{ fontSize: 12, color: "#98A2B3", marginTop: 4 }}>
+                      Only create a new link below if you want a different password or a different
+                      set of points.
+                    </div>
+                  </div>
+                )}
                 <div style={styles.modalSub}>
                   Creates a password-protected link. The client opens it, types the password, and
                   watches this report ({points.length} points) — no app login needed.
