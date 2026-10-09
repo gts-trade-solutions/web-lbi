@@ -3696,15 +3696,8 @@ export default function ProjectReportsPage() {
                 : `⬇ Photos${stats.selectedCount ? ` (${stats.selectedCount})` : ""}`}
             </button>
 
-            {/* Reorder the survey points (e.g. move the 10th point to the top). */}
-            <button
-              style={styles.btnGhost}
-              onClick={() => setReorderOpen(true)}
-              disabled={loading}
-              title="Change the order of the survey points (move any point up, down, or to any position)"
-            >
-              ↕ Reorder points
-            </button>
+            {/* Reorder is now done by dragging a row directly in the list below,
+                so the separate "Reorder points" button was removed. */}
 
             {/* ✅ Edit the GA drawing / route page on its own (export no longer
                 asks about GA every time once it's set up). */}
