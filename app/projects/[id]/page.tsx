@@ -1498,6 +1498,32 @@ export default function ProjectReportsPage() {
     }
   };
 
+  // ---- Drag-and-drop reordering of the report rows, directly in the list ----
+  const [dragRow, setDragRow] = useState<number | null>(null);
+  const [dragOverRow, setDragOverRow] = useState<number | null>(null);
+  const [savingOrder, setSavingOrder] = useState(false);
+  const reorderByDrag = async (from: number, to: number) => {
+    if (from == null || to == null || from === to) return;
+    const arr = [...filteredSortedReports];
+    if (from < 0 || from >= arr.length || to < 0 || to >= arr.length) return;
+    const [moved] = arr.splice(from, 1);
+    arr.splice(to, 0, moved);
+    setReports(arr); // optimistic — the list re-numbers immediately
+    try {
+      setSavingOrder(true);
+      await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}/reports`, {
+        method: "PATCH",
+        body: JSON.stringify({ order: arr.map((r) => r.id) }),
+      });
+      toast("New order saved.");
+    } catch (e: any) {
+      toast(e?.message || "Could not save the new order");
+      await fetchReports(q, sortDir, vmFilter); // revert to server order
+    } finally {
+      setSavingOrder(false);
+    }
+  };
+
   // If user switches to GPX, force allowed modes
   useEffect(() => {
     if (!exportModalOpen) return;
@@ -3957,8 +3983,47 @@ export default function ProjectReportsPage() {
 
                     return (
                       <React.Fragment key={r.id}>
-                        <tr>
+                        <tr
+                          onDragOver={(e) => {
+                            if (dragRow == null) return;
+                            e.preventDefault();
+                            if (dragOverRow !== i) setDragOverRow(i);
+                          }}
+                          onDrop={(e) => {
+                            if (dragRow == null) return;
+                            e.preventDefault();
+                            const from = dragRow;
+                            setDragRow(null);
+                            setDragOverRow(null);
+                            reorderByDrag(from, i);
+                          }}
+                          style={
+                            dragOverRow === i && dragRow != null && dragRow !== i
+                              ? { outline: "2px dashed #2563EB", outlineOffset: -2, background: "#EFF6FF" }
+                              : undefined
+                          }
+                        >
                           <td className="col-idx" style={styles.td}>
+                            <span
+                              draggable={!savingOrder}
+                              onDragStart={(e) => {
+                                setDragRow(i);
+                                try {
+                                  e.dataTransfer.effectAllowed = "move";
+                                  e.dataTransfer.setData("text/plain", String(i));
+                                } catch {
+                                  /* ignore */
+                                }
+                              }}
+                              onDragEnd={() => {
+                                setDragRow(null);
+                                setDragOverRow(null);
+                              }}
+                              title="Drag to reorder this point"
+                              style={{ cursor: savingOrder ? "wait" : "grab", color: "#98A2B3", fontSize: 16, marginRight: 4, userSelect: "none" }}
+                            >
+                              ⠿
+                            </span>
                             {i + 1}
                           </td>
 
