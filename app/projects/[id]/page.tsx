@@ -3924,6 +3924,21 @@ export default function ProjectReportsPage() {
                 </div>
               </div>
             )}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                margin: "2px 0 8px",
+                fontSize: 13,
+                fontWeight: 700,
+                color: "#667085",
+              }}
+            >
+              <span style={{ fontSize: 15, color: "#98A2B3" }}>⠿</span>
+              Drag any row up or down to reorder the points — grab it anywhere except the
+              buttons, tick-boxes and photos.
+            </div>
             <div style={styles.tableWrapNoScroll}>
               <table style={styles.table}>
                 <thead>
@@ -3984,6 +3999,27 @@ export default function ProjectReportsPage() {
                     return (
                       <React.Fragment key={r.id}>
                         <tr
+                          draggable={!savingOrder}
+                          onDragStart={(e) => {
+                            // Drag from anywhere on the row EXCEPT its interactive
+                            // controls (buttons, inputs, selects, photos, KM edit).
+                            const t = e.target as HTMLElement;
+                            if (t.closest("button, input, select, textarea, a, img, video, [data-no-drag]")) {
+                              e.preventDefault();
+                              return;
+                            }
+                            setDragRow(i);
+                            try {
+                              e.dataTransfer.effectAllowed = "move";
+                              e.dataTransfer.setData("text/plain", String(i));
+                            } catch {
+                              /* ignore */
+                            }
+                          }}
+                          onDragEnd={() => {
+                            setDragRow(null);
+                            setDragOverRow(null);
+                          }}
                           onDragOver={(e) => {
                             if (dragRow == null) return;
                             e.preventDefault();
@@ -3997,30 +4033,17 @@ export default function ProjectReportsPage() {
                             setDragOverRow(null);
                             reorderByDrag(from, i);
                           }}
-                          style={
-                            dragOverRow === i && dragRow != null && dragRow !== i
+                          style={{
+                            cursor: savingOrder ? "wait" : "grab",
+                            ...(dragOverRow === i && dragRow != null && dragRow !== i
                               ? { outline: "2px dashed #2563EB", outlineOffset: -2, background: "#EFF6FF" }
-                              : undefined
-                          }
+                              : {}),
+                          }}
                         >
-                          <td className="col-idx" style={styles.td}>
+                          <td className="col-idx" style={{ ...styles.td, cursor: savingOrder ? "wait" : "grab" }}>
                             <span
-                              draggable={!savingOrder}
-                              onDragStart={(e) => {
-                                setDragRow(i);
-                                try {
-                                  e.dataTransfer.effectAllowed = "move";
-                                  e.dataTransfer.setData("text/plain", String(i));
-                                } catch {
-                                  /* ignore */
-                                }
-                              }}
-                              onDragEnd={() => {
-                                setDragRow(null);
-                                setDragOverRow(null);
-                              }}
-                              title="Drag to reorder this point"
-                              style={{ cursor: savingOrder ? "wait" : "grab", color: "#98A2B3", fontSize: 16, marginRight: 4, userSelect: "none" }}
+                              title="Drag the row to reorder this point"
+                              style={{ color: "#98A2B3", fontSize: 16, marginRight: 4, userSelect: "none" }}
                             >
                               ⠿
                             </span>
@@ -4050,6 +4073,7 @@ export default function ProjectReportsPage() {
                               if (kmEditId === r.id) {
                                 return (
                                   <div
+                                    data-no-drag
                                     style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 3 }}
                                     onClick={(e) => e.stopPropagation()}
                                   >
@@ -4087,6 +4111,7 @@ export default function ProjectReportsPage() {
                               }
                               return (
                                 <div
+                                  data-no-drag
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     setKmEditId(r.id);
