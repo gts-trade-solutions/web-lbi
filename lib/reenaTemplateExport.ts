@@ -913,19 +913,22 @@ async function compositeImagesGrid(
     return null;
   }
 }
-// Observation photo size. EVERY observation photo renders at this ONE size —
-// 9.4" × 6.6" (900 × 636 px) — whether a point has one photo or several, so
-// they all match in the report (previously single-photo points were 900×636
-// but multi-photo points were a smaller 691×480, which made some photos look
-// bigger than others). Short enough to sit UNDER the observation table on the
-// SAME landscape-A3 page; kept below the route map (13") / GA drawing (14")
-// widths (isObservationPhotoCx excludes those two explicitly). A point with
-// several photos lays them out one per row, flowing to more pages as needed —
-// each photo kept whole at full size. The embedded JPEG is compressed via
-// sharp before imageMap so the DOCX stays small.
+// Observation photo size for a point with a SINGLE photo — it renders BIG at
+// this one size (9.4" × 6.6" / 900 × 636 px), filling the width under its
+// observation table on the same landscape-A3 page. A point with 2+ photos is
+// instead laid out two-per-row at SIDE_BY_SIDE_PHOTO_SIZE (see below), every
+// photo the same size. Kept below the route map (13") / GA drawing (14")
+// widths (isObservationPhotoCx excludes those two explicitly). The embedded
+// JPEG is compressed via sharp before imageMap so the DOCX stays small.
 const OBSERVATION_PHOTO_SIZE: [number, number] = [900, 636];
 // Unified with the single-photo size so all observation photos are identical.
 const MULTI_PHOTO_SIZE: [number, number] = [900, 636];
+// A point with 2+ photos lays them out TWO PER ROW (side by side) at this
+// SAME smaller size, so a pair of photos sits together on one landscape page.
+// Width ~6.1" so two + the cell gaps fit inside the ~14.5" content area; the
+// 900:636 aspect ratio is preserved so nothing is stretched. A single-photo
+// point is NOT affected — it still renders big at OBSERVATION_PHOTO_SIZE.
+const SIDE_BY_SIDE_PHOTO_SIZE: [number, number] = [760, 537];
 // Category icon shown in the CATEGORY column of the observation table.
 // WIDTH stays 240 so wide glyphs (gate, etc.) keep their full width and the
 // CATEGORY column width (derived from [0], see OBS_COL_DXA) is unchanged.
@@ -948,6 +951,8 @@ const PX_TO_EMU = 9525;
 const OBSERVATION_PHOTO_EMU_WIDTH = OBSERVATION_PHOTO_SIZE[0] * PX_TO_EMU;
 const MULTI_PHOTO_EMU_WIDTH = MULTI_PHOTO_SIZE[0] * PX_TO_EMU;
 const MULTI_PHOTO_EMU_HEIGHT = MULTI_PHOTO_SIZE[1] * PX_TO_EMU;
+const SIDE_BY_SIDE_EMU_WIDTH = SIDE_BY_SIDE_PHOTO_SIZE[0] * PX_TO_EMU;
+const SIDE_BY_SIDE_EMU_HEIGHT = SIDE_BY_SIDE_PHOTO_SIZE[1] * PX_TO_EMU;
 
 async function safeQuery(sql: string, args: unknown[] = []): Promise<Row[]> {
   try {
@@ -6416,16 +6421,15 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           renderedZip.file("word/_rels/document.xml.rels", docRelsXml);
         }
 
-        // Build a borderless 2-per-row grid of ALL the point's photos. Cell
-        // size shrinks with the photo count so 3-4 photos + the table stay on
-        // one page; more than that flows to the next page (table not repeated).
-        // Every photo renders at the SAME full size as a single-photo report
-        // (7.2" × 5.0"), one per row — so adding more photos never shrinks them.
-        // More photos simply flow onto more pages (each photo kept whole).
-        const gridCellSize = (_n: number): { cx: number; cy: number } => ({
-          cx: MULTI_PHOTO_EMU_WIDTH,
-          cy: MULTI_PHOTO_EMU_HEIGHT,
-        });
+        // Build a borderless grid of ALL the point's photos, laid out TWO PER
+        // ROW (side by side) at the SAME smaller size — so a pair of photos
+        // sits together on one page. An odd final photo takes the left of its
+        // own row, still the identical size. (A single-photo point never
+        // reaches here: it renders big in place at OBSERVATION_PHOTO_SIZE.)
+        const gridCellSize = (n: number): { cx: number; cy: number } =>
+          n > 1
+            ? { cx: SIDE_BY_SIDE_EMU_WIDTH, cy: SIDE_BY_SIDE_EMU_HEIGHT }
+            : { cx: MULTI_PHOTO_EMU_WIDTH, cy: MULTI_PHOTO_EMU_HEIGHT };
         const NO_BORDER =
           `<w:tcBorders>` +
             `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
@@ -6442,6 +6446,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           `</w:tcMar>`;
         const buildPhotoGrid = (rIds: string[], docPrBase: number): string => {
           const { cx, cy } = gridCellSize(rIds.length);
+          const twoUp = rIds.length > 1; // two photos side by side per row
+          const cellPct = twoUp ? "2500" : "5000"; // 50% vs 100% of the row
           const drawing = (rId: string, dpId: number) =>
             `<w:drawing>` +
               `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
@@ -6466,18 +6472,24 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             `</w:drawing>`;
           const cell = (rId: string, dpId: number) =>
             `<w:tc>` +
-              `<w:tcPr><w:tcW w:w="5000" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+              `<w:tcPr><w:tcW w:w="${cellPct}" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
               `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="40" w:after="40"/><w:keepNext/><w:keepLines/></w:pPr>` +
                 (rId ? `<w:r>${drawing(rId, dpId)}</w:r>` : "") +
               `</w:p>` +
             `</w:tc>`;
-          // One photo per row at full size (no shrinking as the count grows).
+          // Two photos per row (side by side). An odd final photo fills the
+          // left cell and gets a blank same-width right cell, so every photo
+          // ends up the identical size.
+          const perRow = twoUp ? 2 : 1;
           let rowsXml = "";
-          for (let r = 0; r < rIds.length; r += 1) {
-            rowsXml +=
-              `<w:tr><w:trPr><w:cantSplit/></w:trPr>` +
-              cell(rIds[r], docPrBase + r) +
-              `</w:tr>`;
+          for (let r = 0; r < rIds.length; r += perRow) {
+            let cellsXml = "";
+            for (let c = 0; c < perRow; c += 1) {
+              const idx = r + c;
+              if (idx < rIds.length) cellsXml += cell(rIds[idx], docPrBase + idx);
+              else if (twoUp) cellsXml += cell("", docPrBase + 500 + idx); // blank filler cell
+            }
+            rowsXml += `<w:tr><w:trPr><w:cantSplit/></w:trPr>${cellsXml}</w:tr>`;
           }
           return (
             `<w:tbl>` +
@@ -6500,7 +6512,9 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                 `</w:tblCellMar>` +
               `</w:tblPr>` +
               `<w:tblGrid>` +
-                `<w:gridCol w:w="9360"/>` +
+                (twoUp
+                  ? `<w:gridCol w:w="4680"/><w:gridCol w:w="4680"/>`
+                  : `<w:gridCol w:w="9360"/>`) +
               `</w:tblGrid>` +
               rowsXml +
             `</w:tbl>`
