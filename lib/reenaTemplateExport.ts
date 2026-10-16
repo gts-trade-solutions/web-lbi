@@ -3496,33 +3496,35 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // Reuses the module-level ImageEntry type so category-icon entries (loaded
   // from disk, no url) and S3-fetched entries (no path) share a single shape.
   const imageMap = new Map<string, ImageEntry>();
+  // Extra GA-drawing images (index 1..N-1). GA image 0 goes into imageMap under
+  // "gaDrawing" (the template renders it in the GA slot); each EXTRA GA image is
+  // injected on its OWN page in the post-render pass — so multiple GA drawings
+  // come one-per-page instead of being squeezed into a grid on a single page.
+  const gaExtraBuffers: Buffer[] = [];
   try {
-    // Fetch every GA image, then: 1 image → use as-is; 2+ → lay them out in a
-    // grid on one canvas so all of them appear in the single GA slot.
+    // Fetch every GA image. Image 0 fills the GA slot; every other GA image is
+    // kept whole and placed on its own separate page (not a grid).
     const gaBuffers: Buffer[] = [];
     for (const u of gaImageUrls) {
       const f = await fetchImageBuffer(u, "gaDrawing");
       if (f && Buffer.isBuffer(f.buffer)) gaBuffers.push(f.buffer);
     }
     if (gaBuffers.length) {
-      let finalBuf: Buffer;
-      if (gaBuffers.length === 1) {
-        finalBuf = await optimizeDocxImage(gaBuffers[0], "gaDrawing", "gaDrawing");
-      } else {
-        const grid = await compositeImagesGrid(gaBuffers, GA_DRAWING_SIZE[0], GA_DRAWING_SIZE[1]);
-        finalBuf = grid
-          ? await optimizeDocxImage(grid, "gaDrawing", "gaDrawing")
-          : await optimizeDocxImage(gaBuffers[0], "gaDrawing", "gaDrawing");
-      }
+      const first = await optimizeDocxImage(gaBuffers[0], "gaDrawing", "gaDrawing");
       imageMap.set("gaDrawing", {
-        buffer: finalBuf,
+        buffer: first,
         contentType: "image/jpeg",
         url: gaImageUrls[0] || gaImageUrl,
       });
+      for (let gi = 1; gi < gaBuffers.length; gi += 1) {
+        const extra = await optimizeDocxImage(gaBuffers[gi], "gaDrawing", "gaDrawing");
+        if (extra && Buffer.isBuffer(extra)) gaExtraBuffers.push(extra);
+      }
     }
   } catch (err) {
     console.error("[export actual] gaDrawing fetch step threw - ignoring:", err);
   }
+  console.log("[export actual] GA extra pages:", gaExtraBuffers.length);
   try {
     const routeMapFetched = routeMapUrl ? await fetchImageBuffer(routeMapUrl, "routeMap") : null;
     if (routeMapFetched && Buffer.isBuffer(routeMapFetched.buffer)) {
@@ -6566,6 +6568,108 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           observationsWithPhotos: obsWithPhotos.length,
           photoParagraphsScanned: photoParaIdx,
           gridsInjected: multiPhotoGridsInjected,
+        });
+      }
+
+      // ---- EXTRA GA-DRAWING PAGES INJECTION ----
+      // GA image 0 was rendered by the template in the GA slot. Any further GA
+      // images are placed on their OWN separate page (one GA drawing per page),
+      // each at the SAME full GA size — never squeezed into a grid on one page.
+      // A page break precedes each; the title pass below then adds the report
+      // title above each GA-sized image, exactly like GA image 0's page.
+      let gaExtraPagesInjected = 0;
+      if (gaExtraBuffers.length > 0) {
+        // 1) Register each extra GA image in the zip + the document rels.
+        const gaRelsFile = renderedZip.file("word/_rels/document.xml.rels");
+        let gaRelsXml = gaRelsFile ? gaRelsFile.asText() : "";
+        const gaCtFile = renderedZip.file("[Content_Types].xml");
+        if (gaCtFile) {
+          let gaCtXml = gaCtFile.asText();
+          if (!gaCtXml.includes('Extension="jpeg"')) {
+            gaCtXml = gaCtXml.replace(
+              "</Types>",
+              `<Default Extension="jpeg" ContentType="image/jpeg"/></Types>`
+            );
+            renderedZip.file("[Content_Types].xml", gaCtXml);
+          }
+        }
+        const gaExtraRIds: string[] = [];
+        for (let gi = 0; gi < gaExtraBuffers.length; gi += 1) {
+          const mediaName = `word/media/ga_extra_${gi}.jpeg`;
+          renderedZip.file(mediaName, gaExtraBuffers[gi]);
+          const rId = `rIdGaExtra${gi}`;
+          gaExtraRIds.push(rId);
+          if (gaRelsXml && !gaRelsXml.includes(`Id="${rId}"`)) {
+            gaRelsXml = gaRelsXml.replace(
+              "</Relationships>",
+              `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/ga_extra_${gi}.jpeg"/></Relationships>`
+            );
+          }
+        }
+        if (gaRelsXml) renderedZip.file("word/_rels/document.xml.rels", gaRelsXml);
+
+        // 2) One "page" per extra GA image: a page-break paragraph, then a
+        //    centered full-size GA drawing (same size as GA image 0).
+        const GA_CX = GA_DRAWING_SIZE[0] * PX_TO_EMU;
+        const GA_CY = GA_DRAWING_SIZE[1] * PX_TO_EMU;
+        const gaPageBlock = (rId: string, dpId: number): string =>
+          `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>` +
+          `<w:p>` +
+            `<w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="0"/><w:keepNext/><w:keepLines/></w:pPr>` +
+            `<w:r><w:drawing>` +
+              `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                `<wp:extent cx="${GA_CX}" cy="${GA_CY}"/>` +
+                `<wp:docPr id="${dpId}" name="GA Drawing ${dpId}"/>` +
+                `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+                  `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                    `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                      `<pic:nvPicPr><pic:cNvPr id="0" name=""/><pic:cNvPicPr/></pic:nvPicPr>` +
+                      `<pic:blipFill>` +
+                        `<a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${rId}"/>` +
+                        `<a:stretch><a:fillRect/></a:stretch>` +
+                      `</pic:blipFill>` +
+                      `<pic:spPr>` +
+                        `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${GA_CX}" cy="${GA_CY}"/></a:xfrm>` +
+                        `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+                      `</pic:spPr>` +
+                    `</pic:pic>` +
+                  `</a:graphicData>` +
+                `</a:graphic>` +
+              `</wp:inline>` +
+            `</w:drawing></w:r>` +
+          `</w:p>`;
+
+        // 3) Insert all extra GA pages right AFTER GA image 0's paragraph
+        //    (found by its GA-sized drawing width). A TIGHT ±4% tolerance so
+        //    the GA width (1344px) is matched but the slightly-smaller route
+        //    map (1248px, ~7% apart) is never mistaken for the GA drawing.
+        const GA_W_EMU_INS = GA_DRAWING_SIZE[0] * PX_TO_EMU;
+        const GA_TOL_INS = GA_W_EMU_INS * 0.04;
+        const gaParaRe =
+          /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:drawing\b[\s\S]*?<\/w:drawing>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
+        let gaImg0End = -1;
+        let gpm: RegExpExecArray | null;
+        while ((gpm = gaParaRe.exec(xml)) !== null) {
+          const cxMatch = gpm[0].match(/<wp:extent\s+cx="(\d+)"/);
+          if (!cxMatch) continue;
+          const cx = Number(cxMatch[1]);
+          if (Number.isFinite(cx) && Math.abs(cx - GA_W_EMU_INS) <= GA_TOL_INS) {
+            gaImg0End = gpm.index + gpm[0].length;
+            break; // the first GA-sized drawing is GA image 0
+          }
+        }
+        if (gaImg0End > 0) {
+          let block = "";
+          for (let gi = 0; gi < gaExtraRIds.length; gi += 1) {
+            block += gaPageBlock(gaExtraRIds[gi], 9100 + gi);
+          }
+          xml = xml.slice(0, gaImg0End) + block + xml.slice(gaImg0End);
+          gaExtraPagesInjected = gaExtraRIds.length;
+        }
+        console.log("[DOCX EXTRA GA PAGES INJECTED]", {
+          extraGaImages: gaExtraBuffers.length,
+          injected: gaExtraPagesInjected,
+          foundGaImage0: gaImg0End > 0,
         });
       }
 
