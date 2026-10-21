@@ -1498,6 +1498,52 @@ export default function ProjectReportsPage() {
     }
   };
 
+  // ✅ Inline NE-coordinate edit: click the Lat/Lon on a point to change them
+  // right in the list (replaces the old "Report ID" column so coordinates are
+  // easy to see and fix). Prefers latitude/longitude, falls back to loc_lat/lon.
+  const rowLat = (r: ReportRow): number | null => {
+    const v = r.latitude ?? r.loc_lat;
+    return v == null || !Number.isFinite(Number(v)) ? null : Number(v);
+  };
+  const rowLon = (r: ReportRow): number | null => {
+    const v = r.longitude ?? r.loc_lon;
+    return v == null || !Number.isFinite(Number(v)) ? null : Number(v);
+  };
+  const [coordEditId, setCoordEditId] = useState<string>("");
+  const [coordLatVal, setCoordLatVal] = useState<string>("");
+  const [coordLonVal, setCoordLonVal] = useState<string>("");
+  const [coordSaving, setCoordSaving] = useState(false);
+  const saveInlineCoord = async (r: ReportRow) => {
+    const latRaw = coordLatVal.trim();
+    const lonRaw = coordLonVal.trim();
+    const lat = latRaw === "" ? null : Number(latRaw.replace(/[^0-9.\-]/g, ""));
+    const lon = lonRaw === "" ? null : Number(lonRaw.replace(/[^0-9.\-]/g, ""));
+    if (
+      (latRaw !== "" && (lat == null || !Number.isFinite(lat))) ||
+      (lonRaw !== "" && (lon == null || !Number.isFinite(lon)))
+    ) {
+      toast("Enter valid numbers for latitude and longitude.");
+      return;
+    }
+    try {
+      setCoordSaving(true);
+      await apiRequestJson(`/api/reports/${encodeURIComponent(r.id)}`, {
+        method: "PUT",
+        body: JSON.stringify({ latitude: lat, longitude: lon, loc_lat: lat, loc_lon: lon }),
+      });
+      setReports((prev) =>
+        prev.map((x) =>
+          x.id === r.id ? { ...x, latitude: lat, longitude: lon, loc_lat: lat, loc_lon: lon } : x
+        )
+      );
+      setCoordEditId("");
+    } catch (e: any) {
+      toast(e?.message || "Could not save coordinates");
+    } finally {
+      setCoordSaving(false);
+    }
+  };
+
   // ---- Drag-and-drop reordering of the report rows, directly in the list ----
   const [dragRow, setDragRow] = useState<number | null>(null);
   const [dragOverRow, setDragOverRow] = useState<number | null>(null);
@@ -3971,7 +4017,7 @@ export default function ProjectReportsPage() {
                       Created
                     </th>
                     <th className="col-id" style={styles.th}>
-                      Report ID
+                      NE Coordinates
                     </th>
                     <th className="col-vm" style={styles.th}>
                       Route difficulty
@@ -3986,7 +4032,6 @@ export default function ProjectReportsPage() {
                   {filteredSortedReports.map((r, i) => {
                     const created = r.created_at ? new Date(r.created_at).toLocaleString() : "—";
                     const desc = displayDescription((r.description || "").trim());
-                    const shortId = r.id ? `${r.id.slice(0, 8)}...` : "—";
                     const vmValue = normalizeVM(r.difficulty);
 
                     return (
@@ -4286,9 +4331,85 @@ export default function ProjectReportsPage() {
                           </td>
 
                           <td className="col-id" style={styles.td}>
-                            <span style={styles.codePillWrap} title={r.id}>
-                              {shortId}
-                            </span>
+                            {(() => {
+                              const lat = rowLat(r);
+                              const lon = rowLon(r);
+                              if (coordEditId === r.id) {
+                                return (
+                                  <div
+                                    data-no-drag
+                                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                      <span style={{ fontSize: 11, fontWeight: 800, color: "#475467", width: 26 }}>Lat</span>
+                                      <input
+                                        autoFocus
+                                        value={coordLatVal}
+                                        inputMode="decimal"
+                                        placeholder="latitude"
+                                        onChange={(e) => setCoordLatVal(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter") saveInlineCoord(r);
+                                          if (e.key === "Escape") setCoordEditId("");
+                                        }}
+                                        style={{ width: 112, height: 26, borderRadius: 7, border: "1px solid #D0D5DD", padding: "0 6px", fontWeight: 700, fontSize: 12, outline: "none" }}
+                                      />
+                                    </div>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                      <span style={{ fontSize: 11, fontWeight: 800, color: "#475467", width: 26 }}>Lon</span>
+                                      <input
+                                        value={coordLonVal}
+                                        inputMode="decimal"
+                                        placeholder="longitude"
+                                        onChange={(e) => setCoordLonVal(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter") saveInlineCoord(r);
+                                          if (e.key === "Escape") setCoordEditId("");
+                                        }}
+                                        style={{ width: 112, height: 26, borderRadius: 7, border: "1px solid #D0D5DD", padding: "0 6px", fontWeight: 700, fontSize: 12, outline: "none" }}
+                                      />
+                                    </div>
+                                    <div style={{ display: "flex", gap: 4 }}>
+                                      <button
+                                        type="button"
+                                        onClick={() => saveInlineCoord(r)}
+                                        disabled={coordSaving}
+                                        title="Save coordinates"
+                                        style={{ height: 26, padding: "0 8px", borderRadius: 7, border: "none", background: "#12B76A", color: "#fff", fontWeight: 900, cursor: "pointer", fontSize: 12 }}
+                                      >
+                                        {coordSaving ? "…" : "✓ Save"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setCoordEditId("")}
+                                        title="Cancel"
+                                        style={{ height: 26, padding: "0 8px", borderRadius: 7, border: "1px solid #D0D5DD", background: "#fff", color: "#475467", fontWeight: 900, cursor: "pointer", fontSize: 12 }}
+                                      >
+                                        ✕
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              }
+                              return (
+                                <div
+                                  data-no-drag
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setCoordEditId(r.id);
+                                    setCoordLatVal(lat == null ? "" : String(lat));
+                                    setCoordLonVal(lon == null ? "" : String(lon));
+                                  }}
+                                  title="Click to edit the NE coordinates"
+                                  style={{ cursor: "pointer", display: "inline-flex", flexDirection: "column", gap: 1, fontSize: 12, fontWeight: 700, color: "#475467", lineHeight: 1.3 }}
+                                >
+                                  <span>Lat: {lat == null ? "—" : lat.toFixed(6)}</span>
+                                  <span>Lon: {lon == null ? "—" : lon.toFixed(6)}</span>
+                                  <span style={{ fontSize: 11, color: "#1570EF", fontWeight: 800 }}>✏️ edit</span>
+                                </div>
+                              );
+                            })()}
                           </td>
 
                           <td className="col-vm" style={styles.td}>
@@ -4508,7 +4629,7 @@ export default function ProjectReportsPage() {
                 width: 190px;
               }
               .col-id {
-                width: 120px;
+                width: 172px;
               }
               .col-vm {
                 width: 150px;
