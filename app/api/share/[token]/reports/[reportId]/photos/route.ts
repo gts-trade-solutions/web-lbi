@@ -43,8 +43,20 @@ export async function GET(request: Request, context: Ctx) {
       return Response.json({ photos: [] });
     }
 
+    // Return photos in the user's saved order (sort_order), matching the
+    // authored endpoint, so the shared route map shows the same first photo /
+    // carousel order the user set. Falls back to created_at when unordered.
+    let orderBy = "ORDER BY created_at ASC";
+    try {
+      const [pc] = await pool.query("SHOW COLUMNS FROM report_photos LIKE 'sort_order'");
+      if (Array.isArray(pc) && pc.length) {
+        orderBy = "ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC";
+      }
+    } catch {
+      /* keep created_at ordering if the column check fails */
+    }
     const [rows] = await pool.query(
-      "SELECT * FROM report_photos WHERE report_id = ? ORDER BY created_at ASC",
+      `SELECT * FROM report_photos WHERE report_id = ? ${orderBy}`,
       [reportId]
     );
     return Response.json({ photos: await signRowUrls("report_photos", Array.isArray(rows) ? rows : []) });

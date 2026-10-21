@@ -742,13 +742,20 @@ export default function RouteMapPage() {
             headers: authHeaders(),
           });
       const data = await res.json().catch(() => ({} as any));
-      // Prefer the user's annotated version (the drawn-on photo) as the marker
-      // preview, so the route map shows the same marked-up image as the report.
       const photos: any[] = Array.isArray(data?.photos) ? data.photos : [];
-      const annotated = photos.find((p) =>
-        String(p?.file_name || p?.url || "").toLowerCase().includes("annotated")
-      );
-      const url = String((annotated || photos[0])?.url || "") || null;
+      // If the user has MANUALLY ordered this report's photos (any sort_order
+      // set), honour that order — their first photo is the marker preview. Only
+      // when there's no manual order do we prefer the annotated (drawn-on)
+      // version, so the marker matches the report by default.
+      const hasManualOrder = photos.some((p) => p?.sort_order != null);
+      let chosen = photos[0];
+      if (!hasManualOrder) {
+        const annotated = photos.find((p) =>
+          String(p?.file_name || p?.url || "").toLowerCase().includes("annotated")
+        );
+        chosen = annotated || photos[0];
+      }
+      const url = String(chosen?.url || "") || null;
       photoCacheRef.current[reportId] = url;
       return url;
     } catch {
@@ -774,11 +781,17 @@ export default function RouteMapPage() {
           });
       const data = await res.json().catch(() => ({} as any));
       const rows: any[] = Array.isArray(data?.photos) ? data.photos : [];
-      // Lead the carousel with annotated photos so the drawn-on version shows
-      // first — same emphasis as the listed reports.
-      const isAnn = (p: any) =>
-        String(p?.file_name || p?.url || "").toLowerCase().includes("annotated");
-      const ordered = [...rows].sort((a, b) => (isAnn(b) ? 1 : 0) - (isAnn(a) ? 1 : 0));
+      // Respect the user's manual photo order when they've set one (any
+      // sort_order present) — the API already returns them in that order. Only
+      // when there's no manual order do we lead the carousel with annotated
+      // photos so the drawn-on version shows first.
+      const hasManualOrder = rows.some((p) => p?.sort_order != null);
+      let ordered = rows;
+      if (!hasManualOrder) {
+        const isAnn = (p: any) =>
+          String(p?.file_name || p?.url || "").toLowerCase().includes("annotated");
+        ordered = [...rows].sort((a, b) => (isAnn(b) ? 1 : 0) - (isAnn(a) ? 1 : 0));
+      }
       const list: string[] = ordered.map((x: any) => String(x?.url || "")).filter(Boolean);
       return list;
     } catch {
