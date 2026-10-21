@@ -1307,22 +1307,29 @@ function actionForDifficulty(key: string): string {
   return "Go ahead, Normal pass"; // green / default
 }
 
-// Build the REMARKS / ACTION cell. It ALWAYS leads with the standard action for
-// the point's difficulty colour, then appends any specific written remark that
-// adds information (so nothing typed by the user is lost). Bare colour/status
-// words and remarks that just repeat the action are dropped to avoid noise.
+// Build the REMARKS / ACTION cell. When the user has typed a remark it is
+// ALWAYS shown, so any edit they make appears in the Word file. The cell leads
+// with the standard action for the point's difficulty colour, then the user's
+// own remark. Only a bare colour word / dash (which carries no information) is
+// replaced by the standard action.
+//
+// NOTE: an earlier version dropped any remark that was a substring of the
+// standard phrase (e.g. "normal"/"go ahead" on green, "caution" on yellow,
+// "stop" on red). That silently discarded real edits — the report never
+// changed no matter what the user typed. We no longer drop on that basis.
 function formatRemarksAction(written: unknown, difficultyKey: string): string {
   const action = actionForDifficulty(difficultyKey);
   const note = String(written ?? "").trim();
-  if (!note) return action;
+  if (!note) return action; // nothing typed → just the standard action
   const noteLc = note.toLowerCase();
-  // Only drop notes that are a bare COLOUR word or plainly repeat the action —
-  // never drop a real status word like "stop"/"caution", which carries meaning.
-  // (Genuine repeats such as "caution" on a yellow row are still caught by the
-  // action-includes check below, so nothing meaningful is lost.)
-  const REDUNDANT = ["red", "yellow", "green", "normal", "normal pass", "ok", "-", "—"];
-  if (REDUNDANT.includes(noteLc)) return action;
-  if (action.toLowerCase().includes(noteLc)) return action;
+  const actionLc = action.toLowerCase();
+  // A bare colour word / dash adds nothing — show the standard action instead.
+  const COLOUR_ONLY = ["red", "yellow", "green", "-", "—", "--"];
+  if (COLOUR_ONLY.includes(noteLc)) return action;
+  // If the note already IS the standard action (or contains it in full), show
+  // the note on its own so we don't print the phrase twice.
+  if (noteLc === actionLc || noteLc.includes(actionLc)) return note;
+  // Otherwise ALWAYS keep the user's remark after the standard action.
   return `${action} — ${note}`;
 }
 
