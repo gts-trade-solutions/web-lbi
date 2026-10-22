@@ -64,15 +64,26 @@ function groupByY(items: Item[]): Row[] {
   return rows.sort((a, b) => b.y - a.y);
 }
 
-// Difficulty from observation + remarks wording. An action that must be taken
-// (shutdown / open / remove / caution / feasibility concern …) -> YELLOW; an
-// outright block -> RED; otherwise GREEN ("Normal Pass").
+// Difficulty from the point's observation + remarks/action wording. Priority
+// matters so colours come out the way the original report shows them:
+//   1) an outright block                       -> RED
+//   2) an explicit "Normal Pass" / "No obstacle" -> GREEN, even when the line
+//      also mentions a word like "diversion" (e.g. "Diversion End, Normal
+//      Pass") — the clear decision wins.
+//   3) "caution" or an action that must be taken -> YELLOW. Checked BEFORE the
+//      plain "go ahead" so "Go ahead WITH CAUTION" stays yellow (it also
+//      starts with "go ahead").
+//   4) anything else (incl. a plain "go ahead") -> GREEN.
+// The yellow list is kept tight: words like "open", "develop", "compact" or
+// "required" used to appear in plain observations and wrongly painted clear
+// points yellow.
 function inferDifficulty(text: string): string {
   const t = String(text || "").toLowerCase();
-  if (/(don'?t|do not)\s*go|not\s*(feasible|possible)|cannot|\bstop\b|blocked|no\s*movement|dead\s*end/.test(t))
+  if (/(don'?t|do not)\s*go|not\s*(feasible|possible)|cannot|\bstop\b|blocked|no\s*movement|dead\s*end|road\s*closed/.test(t))
     return "red";
+  if (/normal\s*pass|no\s*obstacle|no\s*obstruction/.test(t)) return "green";
   if (
-    /shut\s*down|shutdown|need\s*to\s*be|needs?\s*to\s*be|required|require\b|remove|removed|caution|careful|restrict|diversion|detour|shift|\blift\b|regulate|work\s*(is\s*)?in\s*progress|develop|compact|open(ed)?\b|height\s*restriction|escort|puller|trans-?shipment|bypass|feasibility\s*concern|obstruct/.test(
+    /caution|careful|go\s*slow|with\s*care|restrict|diversion|detour|\bshift\b|\blift\b|remove|removal|shut\s*down|shutdown|opposite\s*(lane|road|side)|height\s*restriction|escort|puller|trans-?shipment|\bbypass\b|obstruct/.test(
       t
     )
   )
