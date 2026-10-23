@@ -243,6 +243,10 @@ export default function RouteMapPage() {
   // one is showing. Manual prev/next only — never auto-advances.
   const [lbPhotos, setLbPhotos] = useState<string[]>([]);
   const [lbIndex, setLbIndex] = useState(0);
+  // Add a video / photo to the open point (authored view only). It uploads to
+  // the report and then appears here AND in the shared link.
+  const mediaInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadingMedia, setUploadingMedia] = useState(false);
 
   // ---- Draw-on-image annotation state (authored view only) ----
   type Stroke = {
@@ -742,7 +746,10 @@ export default function RouteMapPage() {
             headers: authHeaders(),
           });
       const data = await res.json().catch(() => ({} as any));
-      const photos: any[] = Array.isArray(data?.photos) ? data.photos : [];
+      const all: any[] = Array.isArray(data?.photos) ? data.photos : [];
+      // The marker preview is an <img>, so videos can't be the thumbnail — pick
+      // from the still images. (If a point has only videos, there's no preview.)
+      const photos = all.filter((p) => !isVideoUrl(String(p?.url || p?.file_name || "")));
       // If the user has MANUALLY ordered this report's photos (any sort_order
       // set), honour that order — their first photo is the marker preview. Only
       // when there's no manual order do we prefer the annotated (drawn-on)
@@ -1263,6 +1270,40 @@ export default function RouteMapPage() {
       alert((err as { message?: string })?.message || "Failed to save the annotated image.");
     } finally {
       setSavingAnno(false);
+    }
+  };
+
+  // Upload a video (or photo) and attach it to the currently open point, so it
+  // shows in the route-map carousel here and in the client's shared link.
+  const addMediaToPoint = async (file: File | null) => {
+    if (!file || !lightbox || uploadingMedia) return;
+    setUploadingMedia(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file, file.name || `clip_${Date.now()}`);
+      fd.append("folder", "uploads");
+      fd.append("reportId", lightbox.reportId);
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        credentials: "include",
+        headers: authHeaders(),
+        body: fd,
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.error || "Upload failed");
+      const newUrl = String(data?.url || data?.photo?.url || "");
+      // Refresh this point's preview + carousel so the new clip appears.
+      delete photoCacheRef.current[lightbox.reportId];
+      const urls = await fetchAllPhotos(lightbox.reportId);
+      if (urls.length) {
+        setLbPhotos(urls);
+        const at = newUrl ? urls.findIndex((u) => sameFile(u, newUrl)) : -1;
+        setLbIndex(at >= 0 ? at : urls.length - 1);
+      }
+    } catch (err) {
+      alert((err as { message?: string })?.message || "Failed to add the video.");
+    } finally {
+      setUploadingMedia(false);
     }
   };
 
@@ -2099,6 +2140,42 @@ export default function RouteMapPage() {
                         </div>
                       </>
                     )}
+                  </div>
+                ) : null}
+
+                {!isShare && !drawMode ? (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      paddingTop: 10,
+                      borderTop: "1px solid rgba(148,163,184,0.25)",
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <input
+                      ref={mediaInputRef}
+                      type="file"
+                      accept="video/*,image/*"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0] || null;
+                        addMediaToPoint(f);
+                        if (mediaInputRef.current) mediaInputRef.current.value = "";
+                      }}
+                    />
+                    <button
+                      style={styles.drawBtn}
+                      onClick={() => mediaInputRef.current?.click()}
+                      disabled={uploadingMedia}
+                    >
+                      {uploadingMedia ? "Uploading…" : "📹 Add video / photo"}
+                    </button>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "#64748b" }}>
+                      Adds to this point — shows in the shared link too.
+                    </span>
                   </div>
                 ) : null}
               </div>
