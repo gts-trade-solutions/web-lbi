@@ -2,6 +2,7 @@ import pool from "../../../../lib/db";
 import { requireAuth } from "../../../../lib/auth";
 import { ensureTrashColumns, ensureStatusColumn } from "../../../../lib/projects-trash";
 import { logActivity } from "../../../../lib/activityLog";
+import { signS3Url } from "../../../../lib/s3";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +23,19 @@ async function getProjectColumns() {
     )
   );
   return cols;
+}
+
+// Lazily add the optional client-logo column so a project can carry a client
+// logo (shown top-right of the exported report). Safe to call repeatedly.
+async function ensureClientLogoColumn() {
+  try {
+    const [rows] = await pool.query("SHOW COLUMNS FROM projects LIKE 'client_logo_url'");
+    if (!Array.isArray(rows) || rows.length === 0) {
+      await pool.query("ALTER TABLE projects ADD COLUMN client_logo_url TEXT NULL");
+    }
+  } catch (e) {
+    console.error("[api/projects/:id] ensureClientLogoColumn failed:", e);
+  }
 }
 
 function isUnauthorizedError(error: unknown) {
@@ -54,6 +68,17 @@ export async function GET(request: Request, context: RouteContext) {
       return Response.json({ error: "Project not found" }, { status: 404 });
     }
 
+    // The client logo lives in the private bucket; sign it so the browser can
+    // display it. The DB keeps the canonical URL (what the export reads).
+    const clientLogo = (project as { client_logo_url?: string | null }).client_logo_url;
+    if (clientLogo) {
+      try {
+        (project as { client_logo_url?: string | null }).client_logo_url = await signS3Url(clientLogo);
+      } catch {
+        /* fall back to the stored URL */
+      }
+    }
+
     return Response.json({ project });
   } catch (error) {
     if (isUnauthorizedError(error)) {
@@ -76,6 +101,8 @@ export async function PUT(request: Request, context: RouteContext) {
     const body = await request.json().catch(() => ({} as any));
     // Make sure the status column exists before an "mark finished" update.
     if (body?.status !== undefined) await ensureStatusColumn();
+    // Make sure the client-logo column exists before setting / clearing it.
+    if (body?.client_logo_url !== undefined) await ensureClientLogoColumn();
     const columns = await getProjectColumns();
 
     const updates: Record<string, unknown> = {};
@@ -106,6 +133,11 @@ export async function PUT(request: Request, context: RouteContext) {
     if (body?.status !== undefined && columns.has("status")) {
       const status = String(body?.status || "").trim();
       updates.status = status || "active";
+    }
+
+    if (body?.client_logo_url !== undefined && columns.has("client_logo_url")) {
+      const clientLogoUrl = String(body?.client_logo_url || "").trim();
+      updates.client_logo_url = clientLogoUrl || null; // empty string clears it
     }
 
     if (columns.has("last_modified_by")) {

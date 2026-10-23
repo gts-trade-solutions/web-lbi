@@ -31,6 +31,7 @@ type ProjectRow = {
   title?: string | null;
   project_name?: string | null;
   created_at?: string | null;
+  client_logo_url?: string | null;
 };
 
 type ReportRow = {
@@ -1277,6 +1278,58 @@ export default function ProjectReportsPage() {
       setGaSetupOpen(true);
     } finally {
       setGaEditorBusy(false);
+    }
+  };
+
+  // ---- Client logo (optional; shown top-RIGHT of the exported report, with
+  // the RACE logo mandatory on the left). Stored per project. ----
+  const [clientLogoOpen, setClientLogoOpen] = useState(false);
+  const [clientLogoBusy, setClientLogoBusy] = useState(false);
+  const clientLogoInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadClientLogo = async (file: File | null) => {
+    if (!file || !projectId) return;
+    try {
+      setClientLogoBusy(true);
+      const fd = new FormData();
+      fd.append("file", file, file.name || "client_logo.png");
+      fd.append("folder", `projects/${projectId}/client-logo`);
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        credentials: "include",
+        headers: authHeaders(),
+        body: fd,
+      });
+      const data = await parseJsonSafe(res);
+      if (!res.ok) throw new Error(data?.error || "Upload failed");
+      const url = String(data?.url || data?.photo?.url || ""); // canonical → stored in DB
+      if (!url) throw new Error("Upload did not return a URL");
+      const displayUrl = String(data?.signedUrl || url); // signed → for immediate display
+      await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ client_logo_url: url }),
+      });
+      setProject((p) => (p ? { ...p, client_logo_url: displayUrl } : p));
+      toast("Client logo saved — it will appear top-right on the next report you generate.");
+    } catch (e: any) {
+      toast(e?.message || "Could not save the client logo");
+    } finally {
+      setClientLogoBusy(false);
+    }
+  };
+  const removeClientLogo = async () => {
+    if (!projectId) return;
+    try {
+      setClientLogoBusy(true);
+      await apiRequestJson(`/api/projects/${encodeURIComponent(projectId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ client_logo_url: "" }),
+      });
+      setProject((p) => (p ? { ...p, client_logo_url: null } : p));
+      toast("Client logo removed.");
+    } catch (e: any) {
+      toast(e?.message || "Could not remove the client logo");
+    } finally {
+      setClientLogoBusy(false);
     }
   };
 
@@ -3096,6 +3149,68 @@ export default function ProjectReportsPage() {
           />
         )}
 
+        {clientLogoOpen && (
+          <div style={styles.modalOverlay} onMouseDown={() => !clientLogoBusy && setClientLogoOpen(false)}>
+            <div
+              style={{ ...styles.modalCard, width: "min(520px, 96vw)" }}
+              onMouseDown={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Client logo"
+            >
+              <div style={styles.modalTitle}>🏢 Client Logo</div>
+              <div style={styles.modalHint}>
+                Optional. The client&apos;s logo appears at the <b>top-right</b> of every page of the
+                exported report. The RACE logo stays at the top-left (always included).
+              </div>
+
+              <input
+                ref={clientLogoInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/*"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] || null;
+                  uploadClientLogo(f);
+                  if (clientLogoInputRef.current) clientLogoInputRef.current.value = "";
+                }}
+              />
+
+              {project?.client_logo_url ? (
+                <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-start" }}>
+                  <div style={{ fontWeight: 800, color: "#475467", fontSize: 13 }}>Current client logo:</div>
+                  <div style={{ border: "1px solid #EAECF0", borderRadius: 12, padding: 10, background: "#fff" }}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={project.client_logo_url} alt="Client logo" style={{ maxWidth: 260, maxHeight: 90, display: "block" }} />
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: 12, padding: 14, borderRadius: 12, border: "1px dashed #D0D5DD", background: "#F9FAFB", fontWeight: 700, color: "#667085" }}>
+                  No client logo yet. Use a PNG with a transparent background for the cleanest result.
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
+                <button
+                  style={styles.btnPrimary}
+                  onClick={() => clientLogoInputRef.current?.click()}
+                  disabled={clientLogoBusy}
+                >
+                  {clientLogoBusy ? "Saving…" : project?.client_logo_url ? "Replace logo" : "Upload logo"}
+                </button>
+                {project?.client_logo_url ? (
+                  <button style={styles.btnGhost} onClick={removeClientLogo} disabled={clientLogoBusy}>
+                    Remove
+                  </button>
+                ) : null}
+                <button style={styles.btnGhost} onClick={() => setClientLogoOpen(false)} disabled={clientLogoBusy}>
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ✅ NEW PROJECT FROM SELECTED REPORTS MODAL */}
         {fromSelOpen && (
           <CreateProjectFromSelectedModal
@@ -3754,6 +3869,17 @@ export default function ProjectReportsPage() {
               title="View or edit the GA drawing / route page (Objective, Map, Locations, GA images, Conclusion)"
             >
               {gaEditorBusy ? "Opening…" : "🖼 GA Drawing"}
+            </button>
+
+            {/* ✅ Client logo — optional, shown top-right of the exported report
+                (the RACE logo stays top-left, mandatory). */}
+            <button
+              style={styles.btnGhost}
+              onClick={() => setClientLogoOpen(true)}
+              disabled={loading}
+              title="Add the client's logo (shown top-right of the report). The RACE logo stays top-left."
+            >
+              {project?.client_logo_url ? "🏢 Client Logo ✓" : "🏢 Client Logo"}
             </button>
 
             <button

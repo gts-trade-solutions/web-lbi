@@ -7661,6 +7661,88 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
 
         const logoRelId = "rIdLogoImg";
 
+        // ---- Optional CLIENT logo (top-RIGHT of every page's header) ----
+        // The RACE logo on the left is mandatory; a client logo appears on the
+        // right ONLY when the project has one set (projects.client_logo_url).
+        const clientRelId = "rIdClientLogo";
+        const clientExtDecl = 'Extension="jpeg"';
+        let clientLogoBuffer: Buffer | null = null;
+        let clientLogoExt = "png";
+        let clientEmuW = 0;
+        let clientEmuH = 0;
+        try {
+          const clientLogoUrl = String((projectRow as any)?.client_logo_url || "").trim();
+          if (clientLogoUrl) {
+            const fetched = await fetchImageBuffer(clientLogoUrl, "clientLogo");
+            if (fetched?.buffer && fetched.buffer.length > 0) {
+              clientLogoBuffer = fetched.buffer;
+              clientLogoExt = /jpe?g/i.test(fetched.contentType) ? "jpeg" : "png";
+              // Match the RACE logo's HEIGHT so the two look balanced; width
+              // from the client logo's own aspect ratio (never stretched),
+              // capped so a very wide logo still fits the right cell.
+              let cAspect = 0.5; // height/width fallback
+              const sh = getSharp();
+              if (sh) {
+                try {
+                  const m = await sh(clientLogoBuffer).metadata();
+                  if (m.width && m.height && m.width > 0) cAspect = m.height / m.width;
+                } catch {
+                  /* keep fallback */
+                }
+              } else {
+                const d = readPngDimensions(clientLogoBuffer);
+                if (d && d.width > 0) cAspect = d.height / d.width;
+              }
+              let w = Math.round(logoEmuH / (cAspect || 0.5)); // width for matched height
+              let h = logoEmuH;
+              const maxW = Math.round(2.6 * EMU_PER_INCH);
+              if (w > maxW) {
+                w = maxW;
+                h = Math.round(w * cAspect);
+              }
+              clientEmuW = w;
+              clientEmuH = h;
+            }
+          }
+        } catch (e) {
+          console.warn("[CLIENT DOCX HEADER] client logo fetch failed:", e);
+          clientLogoBuffer = null;
+        }
+        if (clientLogoBuffer) {
+          renderedZip.file(`word/media/client_logo.${clientLogoExt}`, clientLogoBuffer);
+          const ctFileC = renderedZip.file("[Content_Types].xml");
+          if (ctFileC) {
+            let ctXmlC = ctFileC.asText();
+            const extDecl = clientLogoExt === "jpeg" ? clientExtDecl : 'Extension="png"';
+            const ctType = clientLogoExt === "jpeg" ? "image/jpeg" : "image/png";
+            if (!ctXmlC.includes(extDecl)) {
+              ctXmlC = ctXmlC.replace("</Types>", `<Default ${extDecl} ContentType="${ctType}"/></Types>`);
+              renderedZip.file("[Content_Types].xml", ctXmlC);
+            }
+          }
+        }
+
+        // Right-cell content: the client logo (right-aligned) when present,
+        // otherwise an empty spacer paragraph (the original behaviour).
+        const rightCellInner = clientLogoBuffer
+          ? `<w:p>` +
+              `<w:pPr><w:pStyle w:val="Header"/><w:jc w:val="right"/><w:spacing w:before="0" w:after="0"/></w:pPr>` +
+              `<w:r><w:rPr/><w:drawing>` +
+                `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                  `<wp:extent cx="${clientEmuW}" cy="${clientEmuH}"/>` +
+                  `<wp:docPr id="998" name="Client Logo"/>` +
+                  `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                    `<pic:pic>` +
+                      `<pic:nvPicPr><pic:cNvPr id="0" name="client_logo.${clientLogoExt}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+                      `<pic:blipFill><a:blip r:embed="${clientRelId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+                      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${clientEmuW}" cy="${clientEmuH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+                    `</pic:pic>` +
+                  `</a:graphicData></a:graphic>` +
+                `</wp:inline>` +
+              `</w:drawing></w:r>` +
+            `</w:p>`
+          : `<w:p><w:pPr><w:pStyle w:val="Header"/><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>`;
+
         // Header layout: borderless 2-column table.
         //   Left cell  (≈ 4 inches): logo image, vertically centered
         //   Right cell (≈ remaining): project title (22pt bold grey-blue),
@@ -7775,10 +7857,11 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                   titleHeaderRunXml +
                 `</w:p>` +
               `</w:tc>` +
-              // Right cell — empty spacer (25% — balances the logo column)
+              // Right cell — client logo (right-aligned) when present, else
+              // an empty spacer that balances the RACE logo column (25%).
               `<w:tc>` +
                 `<w:tcPr><w:tcW w:w="1250" w:type="pct"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
-                `<w:p><w:pPr><w:pStyle w:val="Header"/><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>` +
+                rightCellInner +
               `</w:tc>` +
             `</w:tr>` +
           `</w:tbl>` +
@@ -7799,10 +7882,14 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
 
           const hdrBaseName = hdrName.replace("word/", "");
           const hdrRelsPath = `word/_rels/${hdrBaseName}.rels`;
+          const clientRelXml = clientLogoBuffer
+            ? `<Relationship Id="${clientRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/client_logo.${clientLogoExt}"/>`
+            : "";
           const hdrRelsXml =
             `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
             `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
               `<Relationship Id="${logoRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/race_logo.png"/>` +
+              clientRelXml +
             `</Relationships>`;
           renderedZip.file(hdrRelsPath, hdrRelsXml);
           headerPatched += 1;
