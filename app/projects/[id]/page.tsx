@@ -6762,6 +6762,16 @@ function RouteSetupModal({
 
   const removeGaAt = (idx: number) => setGaFiles((p) => p.filter((_, i) => i !== idx));
 
+  // GA drawing images already saved for this page (when editing). Kept so the
+  // user can ADD a new point / location WITHOUT re-uploading the GA drawing
+  // from scratch. They are sent back on save (unless removed here), so the
+  // server's replace-all write doesn't wipe them.
+  const [existingGaImages, setExistingGaImages] = useState<
+    { file_url: string; file_name: string; mime_type: string; file_size: number | null }[]
+  >([]);
+  const removeExistingGaAt = (idx: number) =>
+    setExistingGaImages((p) => p.filter((_, i) => i !== idx));
+
   const isPdfFile = (file: File) => {
     const name = String(file?.name || "").toLowerCase();
     const type = String(file?.type || "").toLowerCase();
@@ -6897,6 +6907,20 @@ function RouteSetupModal({
           while (labels.length < 2) labels.push("");
           setRouteLocations(labels);
         }
+
+        // Load the GA drawing images already saved for this page so the user
+        // can just add a point without re-uploading the whole GA drawing.
+        const imgs = Array.isArray((data as any)?.images) ? ((data as any).images as any[]) : [];
+        setExistingGaImages(
+          imgs
+            .map((x) => ({
+              file_url: String(x?.file_url || x?.url || ""),
+              file_name: String(x?.file_name || ""),
+              mime_type: String(x?.mime_type || ""),
+              file_size: Number.isFinite(Number(x?.file_size)) ? Number(x?.file_size) : null,
+            }))
+            .filter((x) => x.file_url)
+        );
       } catch (e: any) {
         setErr(e?.message || String(e));
       } finally {
@@ -6936,9 +6960,11 @@ function RouteSetupModal({
     setErr(null);
 
     try {
-      // Must have at least 1 GA image to proceed
-      if (!gaFiles.length) {
-        throw new Error("Please upload at least 1 GA drawing file (image or PDF).");
+      // Must have at least 1 GA image to proceed — either one already saved
+      // (kept) or a newly added file. This is what lets the user add a point
+      // without re-uploading the GA drawing every time.
+      if (!gaFiles.length && !existingGaImages.length) {
+        throw new Error("Please add at least 1 GA drawing file (image or PDF).");
       }
 
       let preset_map_key: string | null = null;
@@ -6969,6 +6995,21 @@ function RouteSetupModal({
       // If user uploads a PDF GA drawing, convert page 1 to PNG first and store that PNG in storage + DB.
       // This makes project_route_page_images behave like normal image rows, so DOCX export can retrieve them directly.
       const rows: any[] = [];
+      // Keep the GA images already saved for this page (the server replaces all
+      // image rows on save, so we must send these back or they'd be deleted).
+      for (const ex of existingGaImages) {
+        rows.push({
+          file_url: ex.file_url,
+          imageUrl: ex.file_url,
+          imageKey: "",
+          file_name: ex.file_name,
+          fileName: ex.file_name,
+          mime_type: ex.mime_type || "image/png",
+          mimeType: ex.mime_type || "image/png",
+          file_size: ex.file_size,
+          fileSize: ex.file_size,
+        });
+      }
       for (const originalFile of gaFiles) {
         const storageFile = isPdfFile(originalFile)
           ? await convertPdfFirstPageToPngFile(originalFile)
@@ -7327,6 +7368,39 @@ function RouteSetupModal({
             </button>
           </div>
 
+          {existingGaImages.length > 0 && (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ fontWeight: 900, color: "#101828", marginBottom: 6 }}>
+                Already-saved GA drawings ({existingGaImages.length}) — kept automatically. You don&apos;t
+                need to upload them again; just add your new point. Remove one only if you want to replace it.
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {existingGaImages.map((img, idx) => (
+                  <div key={`ex-${idx}`} style={{ border: "1px solid #EAECF0", borderRadius: 16, padding: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+                      <div style={{ minWidth: 0, fontWeight: 900, color: "#101828", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {img.file_name || "GA drawing"}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeExistingGaAt(idx)}
+                        style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #FECDD6", background: "#FFF1F3", color: "#B42318", fontWeight: 900, cursor: "pointer" }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    {/\.(png|jpe?g|webp|gif)(\?|$)/i.test(img.file_url) && (
+                      <div style={{ marginTop: 10, borderRadius: 14, overflow: "hidden", border: "1px solid #EAECF0" }}>
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={img.file_url} alt={img.file_name || "GA drawing"} style={{ width: "100%", display: "block" }} />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {!gaFiles.length ? (
             <div
               style={{
@@ -7338,7 +7412,7 @@ function RouteSetupModal({
                 color: "#667085",
               }}
             >
-              No GA files selected.
+              {existingGaImages.length ? "No new GA files added (the saved ones above are kept)." : "No GA files selected."}
             </div>
           ) : (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
