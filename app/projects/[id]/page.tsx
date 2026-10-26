@@ -1412,8 +1412,9 @@ export default function ProjectReportsPage() {
   const [savingShareEdit, setSavingShareEdit] = useState(false);
   const startEditShare = (s: ShareLinkRow) => {
     setEditShareId(s.id);
-    // An empty selection on the link means "all points" — start from all.
-    const base = s.selectedIds && s.selectedIds.length ? s.selectedIds : filteredSortedReports.map((r) => r.id);
+    // Start PRE-TICKED with the link's current points so updating one point is
+    // a single toggle (not re-picking from scratch). Empty = "all points".
+    const base = s.selectedIds && s.selectedIds.length ? s.selectedIds : reports.map((r) => r.id);
     setEditShareSel(new Set(base));
   };
   const toggleEditPoint = (id: string) =>
@@ -1424,7 +1425,10 @@ export default function ProjectReportsPage() {
       return next;
     });
   const saveShareEdit = async (id: string) => {
-    const ids = filteredSortedReports.map((r) => r.id).filter((x) => editShareSel.has(x));
+    // Use the full ticked set (ordered by the full list) — NOT just the rows
+    // visible under the current search/filter — so editing one point never
+    // silently drops points that happen to be filtered out of view.
+    const ids = reports.map((r) => r.id).filter((x) => editShareSel.has(x));
     if (!ids.length) {
       toast("Select at least one point for the shared summary.");
       return;

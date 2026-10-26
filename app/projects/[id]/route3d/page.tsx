@@ -181,9 +181,14 @@ export default function RouteMapPage() {
   // Existing (already-created) share links for this project, so a correction
   // reuses the SAME link instead of minting a new one each time.
   const [existingShares, setExistingShares] = useState<
-    Array<{ token: string; path: string; title: string | null }>
+    Array<{ id: string; token: string; path: string; title: string | null; selectedIds: string[] }>
   >([]);
   const [copiedToken, setCopiedToken] = useState<string>("");
+  // Edit WHICH points an existing link shows — pre-filled from the link so
+  // updating one point is a single tick/untick (not choosing from scratch).
+  const [editShareId, setEditShareId] = useState<string>("");
+  const [editShareSel, setEditShareSel] = useState<Set<string>>(new Set());
+  const [editShareBusy, setEditShareBusy] = useState(false);
 
   // Fetch road-following geometry for a batch of stops via our server proxy
   // (OpenRouteService). Sends the auth header when logged in, or the share
@@ -1544,9 +1549,61 @@ export default function RouteMapPage() {
       });
       const data = await res.json().catch(() => ({} as any));
       const shares = (Array.isArray(data?.shares) ? data.shares : []).filter((s: any) => !s.revoked);
-      setExistingShares(shares.map((s: any) => ({ token: s.token, path: s.path, title: s.title })));
+      setExistingShares(
+        shares.map((s: any) => ({
+          id: s.id,
+          token: s.token,
+          path: s.path,
+          title: s.title,
+          selectedIds: Array.isArray(s.selectedIds) ? s.selectedIds : [],
+        }))
+      );
     } catch {
       setExistingShares([]);
+    }
+  };
+
+  // ---- Edit an existing link's points (pre-filled, PATCH keeps the same URL) --
+  const startEditShareR = (s: { id: string; selectedIds: string[] }) => {
+    const base = s.selectedIds && s.selectedIds.length ? s.selectedIds : points.map((p) => p.id);
+    setEditShareSel(new Set(base));
+    setEditShareId(s.id);
+    setShareErr(null);
+  };
+  const toggleEditPointR = (id: string) =>
+    setEditShareSel((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  const saveEditShareR = async (id: string) => {
+    if (editShareBusy) return;
+    const ids = points.map((p) => p.id).filter((x) => editShareSel.has(x));
+    if (!ids.length) {
+      setShareErr("Tick at least one point for the link.");
+      return;
+    }
+    setEditShareBusy(true);
+    setShareErr(null);
+    try {
+      const res = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/share?shareId=${encodeURIComponent(id)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          credentials: "include",
+          body: JSON.stringify({ selectedIds: ids }),
+        }
+      );
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.error || "Failed to update the link");
+      setExistingShares((prev) => prev.map((s) => (s.id === id ? { ...s, selectedIds: ids } : s)));
+      setEditShareId("");
+    } catch (e: any) {
+      setShareErr(e?.message || "Failed to update the link");
+    } finally {
+      setEditShareBusy(false);
     }
   };
   useEffect(() => {
@@ -1623,6 +1680,8 @@ export default function RouteMapPage() {
     setShareCopied(false);
     setExistingShares([]);
     setCopiedToken("");
+    setEditShareId("");
+    setEditShareSel(new Set());
   };
 
   // Back button: router.back() silently does nothing when the page was opened
@@ -2218,17 +2277,71 @@ export default function RouteMapPage() {
                           ? `${window.location.origin}${s.path}`
                           : s.path;
                       return (
-                        <div key={s.token} style={{ ...styles.linkRow, marginBottom: 6 }}>
-                          <input
-                            style={styles.linkInput}
-                            readOnly
-                            value={url}
-                            onFocus={(e) => e.currentTarget.select()}
-                            title={s.title || ""}
-                          />
-                          <button style={styles.copyBtn} onClick={() => copyExisting(s.token, url)}>
-                            {copiedToken === s.token ? "✓ Copied" : "Copy"}
-                          </button>
+                        <div key={s.token} style={{ marginBottom: 8 }}>
+                          <div style={{ ...styles.linkRow }}>
+                            <input
+                              style={styles.linkInput}
+                              readOnly
+                              value={url}
+                              onFocus={(e) => e.currentTarget.select()}
+                              title={s.title || ""}
+                            />
+                            <button style={styles.copyBtn} onClick={() => copyExisting(s.token, url)}>
+                              {copiedToken === s.token ? "✓ Copied" : "Copy"}
+                            </button>
+                            <button
+                              style={styles.copyBtn}
+                              onClick={() => (editShareId === s.id ? setEditShareId("") : startEditShareR(s))}
+                              title="Change which points this link shows (keeps the same link)"
+                            >
+                              {editShareId === s.id ? "Close" : "✏️ Edit points"}
+                            </button>
+                          </div>
+
+                          {editShareId === s.id && (
+                            <div
+                              style={{
+                                marginTop: 8,
+                                border: "1px solid #D0D5DD",
+                                borderRadius: 10,
+                                padding: 10,
+                                background: "#fff",
+                              }}
+                            >
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                                <div style={{ fontWeight: 800, color: "#101828", fontSize: 12.5 }}>
+                                  Tick the points this link shows — it&apos;s already set to the
+                                  current ones, so just change what you need.
+                                </div>
+                                <div style={{ display: "flex", gap: 6 }}>
+                                  <button style={{ ...styles.copyBtn, padding: "4px 8px" }} onClick={() => setEditShareSel(new Set(points.map((p) => p.id)))}>All</button>
+                                  <button style={{ ...styles.copyBtn, padding: "4px 8px" }} onClick={() => setEditShareSel(new Set())}>None</button>
+                                </div>
+                              </div>
+                              <div style={{ fontSize: 11.5, color: "#667085", marginBottom: 6 }}>
+                                {editShareSel.size} of {points.length} points selected
+                              </div>
+                              <div style={{ maxHeight: 200, overflowY: "auto", border: "1px solid #EAECF0", borderRadius: 8, padding: 4 }}>
+                                {points.map((p) => (
+                                  <label key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 6px", borderRadius: 6, cursor: "pointer" }}>
+                                    <input type="checkbox" checked={editShareSel.has(p.id)} onChange={() => toggleEditPointR(p.id)} style={{ width: 15, height: 15 }} />
+                                    <span style={{ fontWeight: 800, color: "#475467", minWidth: 26 }}>#{p.n}</span>
+                                    <span style={{ fontWeight: 700, color: "#101828", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                      {p.category || "Report"}
+                                    </span>
+                                  </label>
+                                ))}
+                              </div>
+                              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
+                                <button style={styles.modalCancel} onClick={() => setEditShareId("")} disabled={editShareBusy}>
+                                  Cancel
+                                </button>
+                                <button style={styles.modalCreate} onClick={() => saveEditShareR(s.id)} disabled={editShareBusy}>
+                                  {editShareBusy ? "Saving…" : "Save points"}
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
