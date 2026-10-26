@@ -4222,6 +4222,9 @@ export default function ProjectReportsPage() {
                     <th className="col-id" style={styles.th}>
                       NE Coordinates
                     </th>
+                    <th className="col-remarks" style={styles.th}>
+                      Remarks / Action
+                    </th>
                     <th className="col-vm" style={styles.th}>
                       Route difficulty
                     </th>
@@ -4379,20 +4382,6 @@ export default function ProjectReportsPage() {
                           <td className="col-desc" style={styles.td}>
                             <div style={styles.descCell}>
                               {desc ? desc : <span style={{ color: "#98A2B3", fontWeight: 800 }}>No description</span>}
-                            </div>
-                            <div
-                              style={{
-                                marginTop: 6,
-                                fontSize: 12,
-                                fontWeight: 700,
-                                color: "#475467",
-                                lineHeight: 1.4,
-                                whiteSpace: "normal",
-                                wordBreak: "break-word",
-                              }}
-                            >
-                              <span style={{ fontWeight: 900, color: "#B54708" }}>Remarks / Action: </span>
-                              {remarksForList(r)}
                             </div>
                           </td>
 
@@ -4629,6 +4618,21 @@ export default function ProjectReportsPage() {
                             })()}
                           </td>
 
+                          <td className="col-remarks" style={styles.td}>
+                            <div
+                              style={{
+                                fontSize: 12.5,
+                                fontWeight: 700,
+                                color: "#475467",
+                                lineHeight: 1.4,
+                                whiteSpace: "normal",
+                                wordBreak: "break-word",
+                              }}
+                            >
+                              {remarksForList(r)}
+                            </div>
+                          </td>
+
                           <td className="col-vm" style={styles.td}>
                             <select
                               value={vmValue || ""}
@@ -4827,6 +4831,7 @@ export default function ProjectReportsPage() {
               .col-desc,
               .col-created,
               .col-id,
+              .col-remarks,
               .col-vm {
                 word-break: break-word;
               }
@@ -4847,6 +4852,9 @@ export default function ProjectReportsPage() {
               }
               .col-id {
                 width: 160px;
+              }
+              .col-remarks {
+                width: 220px;
               }
               .col-vm {
                 width: 140px;
