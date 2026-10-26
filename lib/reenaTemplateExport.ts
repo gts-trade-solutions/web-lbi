@@ -1296,30 +1296,16 @@ function actionForDifficulty(key: string): string {
   return "Go ahead, Normal pass"; // green / default
 }
 
-// Build the REMARKS / ACTION cell. When the user has typed a remark it is
-// ALWAYS shown, so any edit they make appears in the Word file. The cell leads
-// with the standard action for the point's difficulty colour, then the user's
-// own remark. Only a bare colour word / dash (which carries no information) is
-// replaced by the standard action.
-//
-// NOTE: an earlier version dropped any remark that was a substring of the
-// standard phrase (e.g. "normal"/"go ahead" on green, "caution" on yellow,
-// "stop" on red). That silently discarded real edits — the report never
-// changed no matter what the user typed. We no longer drop on that basis.
+// Build the REMARKS / ACTION cell. The two cases are NOT merged:
+//   • the user TYPED a remark   → show ONLY what they typed (nothing added)
+//   • the remark is EMPTY       → fill in the standard action for the colour
+// A bare colour word / dash counts as empty (it carries no information).
 function formatRemarksAction(written: unknown, difficultyKey: string): string {
   const action = actionForDifficulty(difficultyKey);
   const note = String(written ?? "").trim();
-  if (!note) return action; // nothing typed → just the standard action
-  const noteLc = note.toLowerCase();
-  const actionLc = action.toLowerCase();
-  // A bare colour word / dash adds nothing — show the standard action instead.
   const COLOUR_ONLY = ["red", "yellow", "green", "-", "—", "--"];
-  if (COLOUR_ONLY.includes(noteLc)) return action;
-  // If the note already IS the standard action (or contains it in full), show
-  // the note on its own so we don't print the phrase twice.
-  if (noteLc === actionLc || noteLc.includes(actionLc)) return note;
-  // Otherwise ALWAYS keep the user's remark after the standard action.
-  return `${action} — ${note}`;
+  if (!note || COLOUR_ONLY.includes(note.toLowerCase())) return action;
+  return note; // user typed something → show exactly that, on its own
 }
 
 function cleanFileName(name: string, fallback: string) {
