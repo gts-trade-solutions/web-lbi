@@ -4207,26 +4207,26 @@ export default function ProjectReportsPage() {
                         All
                       </label>
                     </th>
+                    <th className="col-id" style={styles.th}>
+                      NE Coordinates
+                    </th>
                     <th className="col-cat" style={styles.th}>
                       Category
                     </th>
                     <th className="col-desc" style={styles.th}>
                       Description
                     </th>
-                    <th className="col-photos" style={styles.th}>
-                      Photos (tick = in Word)
-                    </th>
-                    <th className="col-created" style={styles.th}>
-                      Created
-                    </th>
-                    <th className="col-id" style={styles.th}>
-                      NE Coordinates
-                    </th>
                     <th className="col-remarks" style={styles.th}>
                       Remarks / Action
                     </th>
+                    <th className="col-photos" style={styles.th}>
+                      Photos (tick = in Word)
+                    </th>
                     <th className="col-vm" style={styles.th}>
                       Route difficulty
+                    </th>
+                    <th className="col-created" style={styles.th}>
+                      Created
                     </th>
                     <th className="col-act" style={{ ...styles.th, textAlign: "right" }}>
                       Actions
@@ -4309,6 +4309,88 @@ export default function ProjectReportsPage() {
                             />
                           </td>
 
+                          <td className="col-id" style={styles.td}>
+                            {(() => {
+                              const lat = rowLat(r);
+                              const lon = rowLon(r);
+                              if (coordEditId === r.id) {
+                                return (
+                                  <div
+                                    data-no-drag
+                                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                      <span style={{ fontSize: 11, fontWeight: 800, color: "#475467", width: 26 }}>N</span>
+                                      <input
+                                        autoFocus
+                                        value={coordLatVal}
+                                        inputMode="decimal"
+                                        placeholder="latitude"
+                                        onChange={(e) => setCoordLatVal(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter") saveInlineCoord(r);
+                                          if (e.key === "Escape") setCoordEditId("");
+                                        }}
+                                        style={{ width: 112, height: 26, borderRadius: 7, border: "1px solid #D0D5DD", padding: "0 6px", fontWeight: 700, fontSize: 12, outline: "none" }}
+                                      />
+                                    </div>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                      <span style={{ fontSize: 11, fontWeight: 800, color: "#475467", width: 26 }}>E</span>
+                                      <input
+                                        value={coordLonVal}
+                                        inputMode="decimal"
+                                        placeholder="longitude"
+                                        onChange={(e) => setCoordLonVal(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter") saveInlineCoord(r);
+                                          if (e.key === "Escape") setCoordEditId("");
+                                        }}
+                                        style={{ width: 112, height: 26, borderRadius: 7, border: "1px solid #D0D5DD", padding: "0 6px", fontWeight: 700, fontSize: 12, outline: "none" }}
+                                      />
+                                    </div>
+                                    <div style={{ display: "flex", gap: 4 }}>
+                                      <button
+                                        type="button"
+                                        onClick={() => saveInlineCoord(r)}
+                                        disabled={coordSaving}
+                                        title="Save coordinates"
+                                        style={{ height: 26, padding: "0 8px", borderRadius: 7, border: "none", background: "#12B76A", color: "#fff", fontWeight: 900, cursor: "pointer", fontSize: 12 }}
+                                      >
+                                        {coordSaving ? "…" : "✓ Save"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setCoordEditId("")}
+                                        title="Cancel"
+                                        style={{ height: 26, padding: "0 8px", borderRadius: 7, border: "1px solid #D0D5DD", background: "#fff", color: "#475467", fontWeight: 900, cursor: "pointer", fontSize: 12 }}
+                                      >
+                                        ✕
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              }
+                              return (
+                                <div
+                                  data-no-drag
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setCoordEditId(r.id);
+                                    setCoordLatVal(lat == null ? "" : String(lat));
+                                    setCoordLonVal(lon == null ? "" : String(lon));
+                                  }}
+                                  title="Click to edit the NE coordinates"
+                                  style={{ cursor: "pointer", display: "inline-flex", flexDirection: "column", gap: 1, fontSize: 12, fontWeight: 700, color: "#475467", lineHeight: 1.3 }}
+                                >
+                                  <span>{lat == null ? "N —" : formatNeLat(lat)}</span>
+                                  <span>{lon == null ? "E —" : formatNeLon(lon)}</span>
+                                  <span style={{ fontSize: 11, color: "#1570EF", fontWeight: 800 }}>✏️ edit</span>
+                                </div>
+                              );
+                            })()}
+                          </td>
+
                           <td className="col-cat" style={styles.td}>
                             <div style={styles.catTitle}>{r.category || "Report"}</div>
                             {(() => {
@@ -4382,6 +4464,21 @@ export default function ProjectReportsPage() {
                           <td className="col-desc" style={styles.td}>
                             <div style={styles.descCell}>
                               {desc ? desc : <span style={{ color: "#98A2B3", fontWeight: 800 }}>No description</span>}
+                            </div>
+                          </td>
+
+                          <td className="col-remarks" style={styles.td}>
+                            <div
+                              style={{
+                                fontSize: 12.5,
+                                fontWeight: 700,
+                                color: "#475467",
+                                lineHeight: 1.4,
+                                whiteSpace: "normal",
+                                wordBreak: "break-word",
+                              }}
+                            >
+                              {remarksForList(r)}
                             </div>
                           </td>
 
@@ -4532,107 +4629,6 @@ export default function ProjectReportsPage() {
                             )}
                           </td>
 
-                          <td className="col-created" style={styles.td}>
-                            <span style={{ ...styles.mutedWrap, fontSize: 12 }}>{created}</span>
-                          </td>
-
-                          <td className="col-id" style={styles.td}>
-                            {(() => {
-                              const lat = rowLat(r);
-                              const lon = rowLon(r);
-                              if (coordEditId === r.id) {
-                                return (
-                                  <div
-                                    data-no-drag
-                                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                                      <span style={{ fontSize: 11, fontWeight: 800, color: "#475467", width: 26 }}>N</span>
-                                      <input
-                                        autoFocus
-                                        value={coordLatVal}
-                                        inputMode="decimal"
-                                        placeholder="latitude"
-                                        onChange={(e) => setCoordLatVal(e.target.value)}
-                                        onKeyDown={(e) => {
-                                          if (e.key === "Enter") saveInlineCoord(r);
-                                          if (e.key === "Escape") setCoordEditId("");
-                                        }}
-                                        style={{ width: 112, height: 26, borderRadius: 7, border: "1px solid #D0D5DD", padding: "0 6px", fontWeight: 700, fontSize: 12, outline: "none" }}
-                                      />
-                                    </div>
-                                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                                      <span style={{ fontSize: 11, fontWeight: 800, color: "#475467", width: 26 }}>E</span>
-                                      <input
-                                        value={coordLonVal}
-                                        inputMode="decimal"
-                                        placeholder="longitude"
-                                        onChange={(e) => setCoordLonVal(e.target.value)}
-                                        onKeyDown={(e) => {
-                                          if (e.key === "Enter") saveInlineCoord(r);
-                                          if (e.key === "Escape") setCoordEditId("");
-                                        }}
-                                        style={{ width: 112, height: 26, borderRadius: 7, border: "1px solid #D0D5DD", padding: "0 6px", fontWeight: 700, fontSize: 12, outline: "none" }}
-                                      />
-                                    </div>
-                                    <div style={{ display: "flex", gap: 4 }}>
-                                      <button
-                                        type="button"
-                                        onClick={() => saveInlineCoord(r)}
-                                        disabled={coordSaving}
-                                        title="Save coordinates"
-                                        style={{ height: 26, padding: "0 8px", borderRadius: 7, border: "none", background: "#12B76A", color: "#fff", fontWeight: 900, cursor: "pointer", fontSize: 12 }}
-                                      >
-                                        {coordSaving ? "…" : "✓ Save"}
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setCoordEditId("")}
-                                        title="Cancel"
-                                        style={{ height: 26, padding: "0 8px", borderRadius: 7, border: "1px solid #D0D5DD", background: "#fff", color: "#475467", fontWeight: 900, cursor: "pointer", fontSize: 12 }}
-                                      >
-                                        ✕
-                                      </button>
-                                    </div>
-                                  </div>
-                                );
-                              }
-                              return (
-                                <div
-                                  data-no-drag
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setCoordEditId(r.id);
-                                    setCoordLatVal(lat == null ? "" : String(lat));
-                                    setCoordLonVal(lon == null ? "" : String(lon));
-                                  }}
-                                  title="Click to edit the NE coordinates"
-                                  style={{ cursor: "pointer", display: "inline-flex", flexDirection: "column", gap: 1, fontSize: 12, fontWeight: 700, color: "#475467", lineHeight: 1.3 }}
-                                >
-                                  <span>{lat == null ? "N —" : formatNeLat(lat)}</span>
-                                  <span>{lon == null ? "E —" : formatNeLon(lon)}</span>
-                                  <span style={{ fontSize: 11, color: "#1570EF", fontWeight: 800 }}>✏️ edit</span>
-                                </div>
-                              );
-                            })()}
-                          </td>
-
-                          <td className="col-remarks" style={styles.td}>
-                            <div
-                              style={{
-                                fontSize: 12.5,
-                                fontWeight: 700,
-                                color: "#475467",
-                                lineHeight: 1.4,
-                                whiteSpace: "normal",
-                                wordBreak: "break-word",
-                              }}
-                            >
-                              {remarksForList(r)}
-                            </div>
-                          </td>
-
                           <td className="col-vm" style={styles.td}>
                             <select
                               value={vmValue || ""}
@@ -4672,6 +4668,10 @@ export default function ProjectReportsPage() {
                               <option value="yellow">Yellow</option>
                               <option value="red">Red</option>
                             </select>
+                          </td>
+
+                          <td className="col-created" style={styles.td}>
+                            <span style={{ ...styles.mutedWrap, fontSize: 12 }}>{created}</span>
                           </td>
 
                           <td className="col-act" style={{ ...styles.td, textAlign: "right" }}>
