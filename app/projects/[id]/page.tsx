@@ -154,6 +154,19 @@ function normalizeVM(v: any): VehicleMovement {
   return "";
 }
 
+// The Remarks/Action text to show in the list — identical to what the Word/PDF
+// report prints: the typed remark if there is one, otherwise the standard
+// action for the point's colour. So every row always shows a line.
+function remarksForList(r: { remarks_action?: string | null; difficulty?: any }): string {
+  const note = String(r.remarks_action || "").trim();
+  const COLOUR_ONLY = ["red", "yellow", "green", "-", "—", "--"];
+  if (note && !COLOUR_ONLY.includes(note.toLowerCase())) return note;
+  const k = normalizeVM(r.difficulty);
+  if (k === "red") return "Don't go, Stop";
+  if (k === "yellow") return "Go ahead with caution";
+  return "Go ahead, Normal pass";
+}
+
 function vmDisplayToDb(v: string): VehicleMovement {
   const t = String(v || "").trim().toLowerCase();
   if (t === "green") return "green";
@@ -4367,22 +4380,20 @@ export default function ProjectReportsPage() {
                             <div style={styles.descCell}>
                               {desc ? desc : <span style={{ color: "#98A2B3", fontWeight: 800 }}>No description</span>}
                             </div>
-                            {r.remarks_action && String(r.remarks_action).trim() ? (
-                              <div
-                                style={{
-                                  marginTop: 6,
-                                  fontSize: 12,
-                                  fontWeight: 700,
-                                  color: "#475467",
-                                  lineHeight: 1.4,
-                                  whiteSpace: "normal",
-                                  wordBreak: "break-word",
-                                }}
-                              >
-                                <span style={{ fontWeight: 900, color: "#B54708" }}>Remarks / Action: </span>
-                                {String(r.remarks_action).trim()}
-                              </div>
-                            ) : null}
+                            <div
+                              style={{
+                                marginTop: 6,
+                                fontSize: 12,
+                                fontWeight: 700,
+                                color: "#475467",
+                                lineHeight: 1.4,
+                                whiteSpace: "normal",
+                                wordBreak: "break-word",
+                              }}
+                            >
+                              <span style={{ fontWeight: 900, color: "#B54708" }}>Remarks / Action: </span>
+                              {remarksForList(r)}
+                            </div>
                           </td>
 
                           <td className="col-photos" style={styles.td}>
