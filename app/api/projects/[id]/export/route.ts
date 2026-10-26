@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 import pool from "../../../../../lib/db";
 import { requireAuth } from "../../../../../lib/auth";
 import { generateReenaDocx } from "../../../../../lib/reenaTemplateExport";
+import { convertDocxToPdf } from "../../../../../lib/docxToPdf";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -294,6 +295,7 @@ export async function GET(request: Request, context: Ctx) {
     includeGa: String(url.searchParams.get("includeGa") || "1") !== "0",
     requestedFileName: String(url.searchParams.get("fileName") || "").trim(),
     sort: url.searchParams.get("sort") === "desc" ? "desc" : "asc",
+    format: url.searchParams.get("format") === "pdf" ? "pdf" : "docx",
   });
 }
 
@@ -309,8 +311,10 @@ async function renderAndRespond(args: {
   includeGa?: boolean;
   requestedFileName: string;
   sort?: "asc" | "desc";
+  format?: "docx" | "pdf";
 }) {
   const { projectId, reportIds, includePhotos, includeGa, requestedFileName, sort } = args;
+  const format = args.format === "pdf" ? "pdf" : "docx";
   let stage: string = "started";
   try {
     console.log("[export stage] started", {
@@ -336,10 +340,32 @@ async function renderAndRespond(args: {
       sort,
     });
 
+    // Same report, PDF format: convert the just-rendered DOCX with LibreOffice.
+    let outBuffer = result.buffer;
+    let ext = "docx";
+    if (format === "pdf") {
+      stage = "pdf_convert";
+      const pdf = await convertDocxToPdf(result.buffer);
+      if (!pdf) {
+        return NextResponse.json(
+          {
+            error:
+              "PDF conversion isn't available on the server (LibreOffice missing). You can still download the Word file.",
+            stage,
+          },
+          { status: 503 }
+        );
+      }
+      outBuffer = pdf;
+      ext = "pdf";
+    }
+
     stage = "respond";
-    const fileName = requestedFileName
-      ? requestedFileName.replace(/\.docx$/i, "") + ".docx"
-      : result.fileName;
+    const baseName = (requestedFileName
+      ? requestedFileName
+      : result.fileName
+    ).replace(/\.(docx|pdf)$/i, "");
+    const fileName = `${baseName}.${ext}`;
     const safeFileName = String(fileName)
       .replace(/[\r\n"\\/?*<>|:]/g, "_")
       .slice(0, 200);
@@ -352,12 +378,12 @@ async function renderAndRespond(args: {
     ensureTempExportDir();
     cleanupOldExports();
 
-    // Random token + .docx extension. The GET endpoint validates that the
-    // requested file lives under TEMP_EXPORT_DIR and matches this pattern.
+    // Random token + .docx/.pdf extension. The download endpoint validates that
+    // the requested file lives under TEMP_EXPORT_DIR and matches this pattern.
     const token = crypto.randomBytes(16).toString("hex");
-    const storedName = `${token}.docx`;
+    const storedName = `${token}.${ext}`;
     const storedPath = path.join(TEMP_EXPORT_DIR, storedName);
-    fs.writeFileSync(storedPath, result.buffer);
+    fs.writeFileSync(storedPath, outBuffer);
 
     const downloadUrl =
       `/api/projects/${encodeURIComponent(projectId)}/export/download` +
@@ -368,7 +394,7 @@ async function renderAndRespond(args: {
       projectId,
       fileName: safeFileName,
       storedName,
-      bytes: result.buffer.length,
+      bytes: outBuffer.length,
       downloadUrl,
     });
 
@@ -377,7 +403,7 @@ async function renderAndRespond(args: {
         success: true,
         fileName: safeFileName,
         downloadUrl,
-        bytes: result.buffer.length,
+        bytes: outBuffer.length,
       },
       {
         status: 200,
@@ -460,6 +486,7 @@ export async function POST(request: Request, context: Ctx) {
   const includeGa = body.includeGa !== false;
   const requestedFileName = String(body.fileName || "").trim();
   const sort = (body as { sort?: unknown }).sort === "desc" ? "desc" : "asc";
+  const format = (body as { format?: unknown }).format === "pdf" ? "pdf" : "docx";
 
-  return renderAndRespond({ projectId, reportIds, includePhotos, includeGa, requestedFileName, sort });
+  return renderAndRespond({ projectId, reportIds, includePhotos, includeGa, requestedFileName, sort, format });
 }

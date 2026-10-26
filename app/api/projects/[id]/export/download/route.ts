@@ -21,7 +21,7 @@ type Ctx = { params: { id: string } };
 function resolveSafeTempPath(requested: string): string | null {
   const name = String(requested || "").trim();
   if (!name) return null;
-  if (!/^[a-f0-9]{32}\.docx$/i.test(name)) return null;
+  if (!/^[a-f0-9]{32}\.(docx|pdf)$/i.test(name)) return null;
   // basename() guarantees no path components survive even if the regex were
   // ever loosened. Final realpath check ensures the resolved path lives
   // strictly inside TEMP_EXPORT_DIR.
@@ -82,10 +82,11 @@ export async function GET(request: Request, _context: Ctx) {
     bytes: buffer.length,
   });
 
+  const isPdf = /\.pdf$/i.test(safePath);
   return new NextResponse(new Uint8Array(buffer), {
     status: 200,
     headers: {
-      "Content-Type": DOCX_MIME,
+      "Content-Type": isPdf ? "application/pdf" : DOCX_MIME,
       "Content-Disposition":
         `attachment; filename="${downloadName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
       // Content-Length intentionally omitted - same reason as the POST path:

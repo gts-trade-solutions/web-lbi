@@ -23,7 +23,7 @@ import PizZip from "pizzip";
 type VehicleMovement = "green" | "yellow" | "red" | "";
 type VMFilter = "all" | "green" | "yellow" | "red" | "unset";
 
-type ExportFormat = "docx" | "gpx";
+type ExportFormat = "docx" | "pdf" | "gpx";
 type ExportMode = "listed" | "selectedOne" | "selectedSplit" | "all";
 
 type ProjectRow = {
@@ -427,6 +427,7 @@ async function fetchProjectExportDocx(params: {
   includeGa?: boolean;
   fileName?: string;
   sort?: "asc" | "desc";
+  format?: "docx" | "pdf";
 }): Promise<ExportDocxResult> {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
@@ -457,6 +458,7 @@ async function fetchProjectExportDocx(params: {
         sp.set("fileName", params.fileName.trim());
       }
       if (params.sort) sp.set("sort", params.sort);
+      if (params.format === "pdf") sp.set("format", "pdf");
       const suffix = sp.toString() ? `?${sp.toString()}` : "";
       res = await fetch(`${exportUrl}${suffix}`, {
         method: "GET",
@@ -480,6 +482,7 @@ async function fetchProjectExportDocx(params: {
           includeGa: params.includeGa,
           fileName: params.fileName?.trim() || undefined,
           sort: params.sort,
+          format: params.format,
         }),
       });
     }
@@ -536,9 +539,12 @@ async function fetchProjectExportDocx(params: {
     throw new Error(envelope?.error || "Export completed but download URL missing");
   }
 
+  const ext = params.format === "pdf" ? "pdf" : "docx";
   const fileName =
     envelope.fileName ||
-    (params.fileName?.trim() ? `${params.fileName.trim().replace(/\.docx$/i, "")}.docx` : "export.docx");
+    (params.fileName?.trim()
+      ? `${params.fileName.trim().replace(/\.(docx|pdf)$/i, "")}.${ext}`
+      : `export.${ext}`);
 
   // Trigger native browser download. The browser fetches the binary itself
   // from the GET endpoint - no fetch() blob handling, no
@@ -1768,8 +1774,15 @@ export default function ProjectReportsPage() {
             ? stats.selectedCount
             : Math.max(stats.shown, 1);
 
+      // "pdf" is the SAME report as the Word file, just converted on the server.
+      const docFormat: "docx" | "pdf" = exportFormat === "pdf" ? "pdf" : "docx";
+      const docExt = docFormat;
+
       const est = estimateSeconds(exportMode, count, includePhotos);
-      startDlUI("Preparing DOCX export…", est);
+      startDlUI(
+        docFormat === "pdf" ? "Preparing PDF export…" : "Preparing DOCX export…",
+        est + (docFormat === "pdf" ? 10 : 0)
+      );
 
       // ✅ attach route_id for any newly added reports included in export
       if (exportMode === "all" || exportMode === "listed") {
@@ -1782,13 +1795,14 @@ export default function ProjectReportsPage() {
       void wm;
 
       if (exportMode === "all") {
-        const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-ALL-REPORTS`)}.docx`;
+        const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-ALL-REPORTS`)}.${docExt}`;
         const { blob, fileName: serverFileName, downloadUrl } = await fetchProjectExportDocx({
           projectId,
           includePhotos,
           includeGa,
           fileName,
           sort: sortDir,
+          format: docFormat,
         });
         setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
         setDlDone(true);
@@ -1801,7 +1815,7 @@ export default function ProjectReportsPage() {
 
         const fileName = `${sanitizeFileBaseName(
           exportName || `${projectName}-${vmFilterLabel(vmFilter)}-${ids.length}`
-        )}.docx`;
+        )}.${docExt}`;
 
         const { blob, fileName: serverFileName, downloadUrl } = await fetchProjectExportDocx({
           projectId,
@@ -1810,6 +1824,7 @@ export default function ProjectReportsPage() {
           includeGa,
           fileName,
           sort: sortDir,
+          format: docFormat,
         });
 
         setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
@@ -1819,7 +1834,7 @@ export default function ProjectReportsPage() {
 
       if (exportMode === "selectedOne") {
         const ids = selectedIdsInOrder;
-        const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-SELECTED-${ids.length}`)}.docx`;
+        const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-SELECTED-${ids.length}`)}.${docExt}`;
 
         const { blob, fileName: serverFileName, downloadUrl } = await fetchProjectExportDocx({
           projectId,
@@ -1828,6 +1843,7 @@ export default function ProjectReportsPage() {
           includeGa,
           fileName,
           sort: sortDir,
+          format: docFormat,
         });
 
         setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
@@ -1850,7 +1866,7 @@ export default function ProjectReportsPage() {
           const subset = ids.slice(st.from - 1, st.to);
           if (!subset.length) continue;
 
-          const fileName = `${base}-${st.label}.docx`;
+          const fileName = `${base}-${st.label}.${docExt}`;
           const { blob, fileName: serverFileName, downloadUrl } = await fetchProjectExportDocx({
             projectId,
             reportIds: subset,
@@ -1858,6 +1874,7 @@ export default function ProjectReportsPage() {
             includeGa,
             fileName,
             sort: sortDir,
+            format: docFormat,
           });
 
           files.push({ fileName: serverFileName || fileName, blob, downloadUrl });
@@ -3550,8 +3567,21 @@ export default function ProjectReportsPage() {
                       onChange={() => setExportFormat("docx")}
                     />
                     <div>
-                      <div style={styles.radioTitle}>DOCX</div>
-                      <div style={styles.radioSub}>Table export with photos + watermark</div>
+                      <div style={styles.radioTitle}>Word (DOCX)</div>
+                      <div style={styles.radioSub}>Editable Word file with photos</div>
+                    </div>
+                  </label>
+
+                  <label style={styles.radioRow}>
+                    <input
+                      type="radio"
+                      name="fmt"
+                      checked={exportFormat === "pdf"}
+                      onChange={() => setExportFormat("pdf")}
+                    />
+                    <div>
+                      <div style={styles.radioTitle}>PDF</div>
+                      <div style={styles.radioSub}>Same report as Word, as a PDF</div>
                     </div>
                   </label>
 
