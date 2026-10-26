@@ -226,6 +226,33 @@ function annoAuthHeaders(): Record<string, string> {
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
+// Break text into lines that fit within maxWidth (canvas px), wrapping on
+// spaces and hard-breaking any single word that is still too long. Honours
+// explicit newlines. Used so a long label stays inside the photo instead of
+// running off the right edge.
+function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const out: string[] = [];
+  const paragraphs = String(text ?? "").split("\n");
+  for (const para of paragraphs) {
+    const words = para.split(" ");
+    let line = "";
+    for (let w of words) {
+      while (ctx.measureText(w).width > maxWidth && w.length > 1) {
+        let i = 1;
+        while (i < w.length && ctx.measureText(w.slice(0, i + 1)).width <= maxWidth) i++;
+        if (line) { out.push(line); line = ""; }
+        out.push(w.slice(0, i));
+        w = w.slice(i);
+      }
+      const test = line ? `${line} ${w}` : w;
+      if (!line || ctx.measureText(test).width <= maxWidth) line = test;
+      else { out.push(line); line = w; }
+    }
+    out.push(line);
+  }
+  return out.length ? out : [""];
+}
+
 export default function PhotoAnnotator({
   photoUrl,
   reportId,
@@ -279,7 +306,7 @@ export default function PhotoAnnotator({
   // While the user is using the text controls (grip / A− / A+), the input blurs;
   // this stops that blur from committing (clearing) the label being typed.
   const suppressCommitRef = useRef(false);
-  const textInputRef = useRef<HTMLInputElement | null>(null);
+  const textInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Advanced shapes (rectangles, stars, turn arrows…) are hidden behind "More"
   // so the everyday toolbar stays simple — the #1 "too many buttons" complaint.
@@ -379,12 +406,20 @@ export default function PhotoAnnotator({
     if (s.tool === "text") {
       ctx.setLineDash([]);
       ctx.textBaseline = "top";
-      ctx.font = `bold ${s.fontSize || 32}px system-ui, Segoe UI, Arial, sans-serif`;
-      ctx.lineWidth = Math.max(2, (s.fontSize || 32) * 0.06);
+      const fs = s.fontSize || 32;
+      ctx.font = `bold ${fs}px system-ui, Segoe UI, Arial, sans-serif`;
+      ctx.lineWidth = Math.max(2, fs * 0.06);
+      const x = pts[0].x;
+      const y = pts[0].y;
+      // Wrap within the remaining canvas width so a long label never runs off
+      // the right edge of the photo — it flows onto the next line instead.
+      const maxW = Math.max(40, ctx.canvas.width - x - 6);
+      const lines = wrapCanvasText(ctx, s.text || "", maxW);
+      const lh = fs * 1.2;
       ctx.strokeStyle = "rgba(0,0,0,0.55)";
-      ctx.strokeText(s.text || "", pts[0].x, pts[0].y);
+      lines.forEach((ln, i) => ctx.strokeText(ln, x, y + i * lh));
       ctx.fillStyle = s.color;
-      ctx.fillText(s.text || "", pts[0].x, pts[0].y);
+      lines.forEach((ln, i) => ctx.fillText(ln, x, y + i * lh));
       return;
     }
     if (s.tool === "pen" || s.tool === "carrow") {
@@ -520,8 +555,14 @@ export default function PhotoAnnotator({
   const strokeBBox = (s: Stroke) => {
     if (s.tool === "text") {
       const fs = s.fontSize || 32;
-      const w = Math.max(20, (s.text?.length || 1) * fs * 0.6);
-      return { minX: s.points[0].x, minY: s.points[0].y, maxX: s.points[0].x + w, maxY: s.points[0].y + fs * 1.2 };
+      const x = s.points[0].x;
+      const canvasW = canvasRef.current?.width || 1000;
+      const maxW = Math.max(40, canvasW - x - 6);
+      // Estimate the wrapped size (no ctx here): ~0.55*fs per character.
+      const estSingle = Math.max(20, (s.text?.length || 1) * fs * 0.55);
+      const lineCount = Math.max(1, Math.ceil(estSingle / maxW));
+      const w = Math.min(estSingle, maxW);
+      return { minX: x, minY: s.points[0].y, maxX: x + w, maxY: s.points[0].y + fs * 1.2 * lineCount };
     }
     const xs = s.points.map((p) => p.x);
     const ys = s.points.map((p) => p.y);
@@ -1369,18 +1410,23 @@ export default function PhotoAnnotator({
             onPointerLeave={onDrawUp}
           />
           {textDraft ? (
-            <input
+            <textarea
               ref={textInputRef}
               autoFocus
               value={textDraft.value}
               placeholder="Label…"
-              // No character limit — type as much text as you need.
-              // Box grows with the text (short when empty), capped so it can't
-              // run off a narrow photo.
-              size={Math.min(60, Math.max(5, (textDraft.value.length || 6) + 1))}
-              onChange={(e) => setTextDraft((d) => (d ? { ...d, value: e.target.value } : d))}
+              rows={1}
+              // No character limit — type as much as you need. The box wraps to
+              // the next line at the photo's edge (and grows taller) so the text
+              // never runs off the photo. Enter commits; Shift+Enter = new line.
+              onChange={(e) => {
+                const el = e.currentTarget;
+                setTextDraft((d) => (d ? { ...d, value: el.value } : d));
+                el.style.height = "auto";
+                el.style.height = `${el.scrollHeight}px`;
+              }}
               onKeyDown={(e) => {
-                if (e.key === "Enter") { e.preventDefault(); commitText(); }
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitText(); }
                 else if (e.key === "Escape") setTextDraft(null);
               }}
               onBlur={commitText}
@@ -1395,9 +1441,15 @@ export default function PhotoAnnotator({
                 outline: "none",
                 padding: "0 2px",
                 margin: 0,
-                lineHeight: 1.1,
-                width: "auto",
-                maxWidth: canvasRef.current?.style.width || "80%",
+                lineHeight: 1.2,
+                // Fixed width = the space left to the photo's right edge, so the
+                // text wraps instead of overflowing.
+                width: `${Math.max(60, (canvasRef.current?.clientWidth || 320) - textDraft.dispX - 8)}px`,
+                whiteSpace: "pre-wrap",
+                overflowWrap: "break-word",
+                wordBreak: "break-word",
+                resize: "none",
+                overflow: "hidden",
                 caretColor: drawColor,
                 zIndex: 5,
               }}
