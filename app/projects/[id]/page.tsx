@@ -4214,10 +4214,7 @@ export default function ProjectReportsPage() {
                       Category
                     </th>
                     <th className="col-desc" style={styles.th}>
-                      Description
-                    </th>
-                    <th className="col-remarks" style={styles.th}>
-                      Remarks / Action
+                      Description &amp; Remarks
                     </th>
                     <th className="col-photos" style={styles.th}>
                       Photos (tick = in Word)
@@ -4465,12 +4462,10 @@ export default function ProjectReportsPage() {
                             <div style={styles.descCell}>
                               {desc ? desc : <span style={{ color: "#98A2B3", fontWeight: 800 }}>No description</span>}
                             </div>
-                          </td>
-
-                          <td className="col-remarks" style={styles.td}>
                             <div
                               style={{
-                                fontSize: 12.5,
+                                marginTop: 6,
+                                fontSize: 12,
                                 fontWeight: 700,
                                 color: "#475467",
                                 lineHeight: 1.4,
@@ -4478,6 +4473,7 @@ export default function ProjectReportsPage() {
                                 wordBreak: "break-word",
                               }}
                             >
+                              <span style={{ fontWeight: 900, color: "#B54708" }}>Remarks / Action: </span>
                               {remarksForList(r)}
                             </div>
                           </td>
@@ -4496,8 +4492,8 @@ export default function ProjectReportsPage() {
                                       key={p.id}
                                       style={{
                                         position: "relative",
-                                        width: 56,
-                                        height: 56,
+                                        width: 92,
+                                        height: 92,
                                         borderRadius: 8,
                                         overflow: "hidden",
                                         border: included ? "2px solid #12B76A" : "2px solid #D0D5DD",
@@ -4831,7 +4827,6 @@ export default function ProjectReportsPage() {
               .col-desc,
               .col-created,
               .col-id,
-              .col-remarks,
               .col-vm {
                 word-break: break-word;
               }
@@ -4845,19 +4840,16 @@ export default function ProjectReportsPage() {
                 width: 150px;
               }
               .col-desc {
-                width: 200px;
+                width: 240px;
               }
               .col-photos {
-                width: 148px;
+                width: 210px;
               }
               .col-created {
                 width: 96px;
               }
               .col-id {
                 width: 132px;
-              }
-              .col-remarks {
-                width: 140px;
               }
               .col-vm {
                 width: 124px;
