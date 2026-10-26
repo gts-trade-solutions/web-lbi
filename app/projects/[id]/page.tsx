@@ -4367,6 +4367,22 @@ export default function ProjectReportsPage() {
                             <div style={styles.descCell}>
                               {desc ? desc : <span style={{ color: "#98A2B3", fontWeight: 800 }}>No description</span>}
                             </div>
+                            {r.remarks_action && String(r.remarks_action).trim() ? (
+                              <div
+                                style={{
+                                  marginTop: 6,
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                  color: "#475467",
+                                  lineHeight: 1.4,
+                                  whiteSpace: "normal",
+                                  wordBreak: "break-word",
+                                }}
+                              >
+                                <span style={{ fontWeight: 900, color: "#B54708" }}>Remarks / Action: </span>
+                                {String(r.remarks_action).trim()}
+                              </div>
+                            ) : null}
                           </td>
 
                           <td className="col-photos" style={styles.td}>
