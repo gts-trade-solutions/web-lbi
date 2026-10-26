@@ -8,6 +8,7 @@ import pool from "./db";
 import { getReadSignedUrl, s3KeyFromUrl } from "./s3";
 import { injectDifficultyThemeColors } from "./wordThemeColors";
 import { composeObservation } from "./observationTemplates";
+import { formatNeLat, formatNeLon } from "./coordFormat";
 import { getCategoryDisplayName, normalizeCategory, type StageSummaryRow } from "./categoryDisplay";
 
 // docxtemplater-image-module-free has no TypeScript types shipped.
@@ -1261,27 +1262,15 @@ function formatSurveyDate(reports: Row[], sep: "." | "-"): string {
   return `${dd}${sep}${mm}${sep}${ist.getUTCFullYear()}`;
 }
 
-function formatLatLine(prefix: "N" | "S" | "E" | "W", v: unknown): string {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "-";
-  const abs = Math.abs(n);
-  const deg = Math.floor(abs);
-  const minutes = ((abs - deg) * 60).toFixed(3);
-  // Non-breaking space (U+00A0) between degrees and minutes so Word never
-  // splits a coordinate mid-value ("N22 46.051" -> "N22" / "46.051").
-  return `${prefix}${deg}\u00A0${minutes}`;
-}
-
+// NE coordinates use ONE shared format across the whole app (list, Edit form,
+// route map and this report): decimal degrees with a direction letter, e.g.
+// "N 14.2633142" \u2014 the exact value the user typed, not degrees/minutes.
 function formatGpsLat(lat: unknown): string {
-  const n = Number(lat);
-  if (!Number.isFinite(n)) return "-";
-  return formatLatLine(n >= 0 ? "N" : "S", lat);
+  return formatNeLat(lat, true);
 }
 
 function formatGpsLon(lng: unknown): string {
-  const n = Number(lng);
-  if (!Number.isFinite(n)) return "-";
-  return formatLatLine(n >= 0 ? "E" : "W", lng);
+  return formatNeLon(lng, true);
 }
 
 function valueOrDash(v: unknown): string {

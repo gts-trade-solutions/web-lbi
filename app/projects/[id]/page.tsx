@@ -4,6 +4,7 @@ import { toast } from "../../../components/Toast";
 import { confirmDialog } from "../../../components/ConfirmDialog";
 import PhotoAnnotator from "../../../components/PhotoAnnotator";
 import PhotoCropper from "../../../components/PhotoCropper";
+import { formatNeLat, formatNeLon, formatNePair } from "../../../lib/coordFormat";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -4497,7 +4498,7 @@ export default function ProjectReportsPage() {
                                     onClick={(e) => e.stopPropagation()}
                                   >
                                     <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                                      <span style={{ fontSize: 11, fontWeight: 800, color: "#475467", width: 26 }}>Lat</span>
+                                      <span style={{ fontSize: 11, fontWeight: 800, color: "#475467", width: 26 }}>N</span>
                                       <input
                                         autoFocus
                                         value={coordLatVal}
@@ -4512,7 +4513,7 @@ export default function ProjectReportsPage() {
                                       />
                                     </div>
                                     <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                                      <span style={{ fontSize: 11, fontWeight: 800, color: "#475467", width: 26 }}>Lon</span>
+                                      <span style={{ fontSize: 11, fontWeight: 800, color: "#475467", width: 26 }}>E</span>
                                       <input
                                         value={coordLonVal}
                                         inputMode="decimal"
@@ -4559,8 +4560,8 @@ export default function ProjectReportsPage() {
                                   title="Click to edit the NE coordinates"
                                   style={{ cursor: "pointer", display: "inline-flex", flexDirection: "column", gap: 1, fontSize: 12, fontWeight: 700, color: "#475467", lineHeight: 1.3 }}
                                 >
-                                  <span>Lat: {lat == null ? "—" : lat.toFixed(6)}</span>
-                                  <span>Lon: {lon == null ? "—" : lon.toFixed(6)}</span>
+                                  <span>{lat == null ? "N —" : formatNeLat(lat)}</span>
+                                  <span>{lon == null ? "E —" : formatNeLon(lon)}</span>
                                   <span style={{ fontSize: 11, color: "#1570EF", fontWeight: 800 }}>✏️ edit</span>
                                 </div>
                               );
@@ -6017,6 +6018,16 @@ function EditReportModal({
               placeholder="E — longitude (e.g. 81.860966)"
               style={{ height: 44, borderRadius: 14, border: "1px solid #D0D5DD", padding: "0 14px", fontWeight: 900, outline: "none", background: "#fff" }}
             />
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#667085" }}>
+            {(() => {
+              const la = latStr.trim() === "" ? null : Number(latStr);
+              const lo = lonStr.trim() === "" ? null : Number(lonStr);
+              const laOk = la != null && Number.isFinite(la);
+              const loOk = lo != null && Number.isFinite(lo);
+              if (!laOk && !loOk) return "Shown everywhere as: N …, E …";
+              return `Shown everywhere as: ${formatNePair(laOk ? la : null, loOk ? lo : null)}`;
+            })()}
           </div>
         </div>
 

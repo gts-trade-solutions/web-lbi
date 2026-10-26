@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { loadCanvasSafeImage } from "../../../../lib/authedImage";
+import { formatNePair } from "../../../../lib/coordFormat";
 
 type ReportPoint = {
   id: string;
@@ -1336,7 +1337,7 @@ export default function RouteMapPage() {
         </div>
         ${p.description ? `<div style="font-size:13px;font-weight:700;color:#0f172a;margin-top:6px"><b>Observation:</b> ${escapeHtml(p.description)}</div>` : ""}
         ${p.remarks ? `<div style="font-size:13px;font-weight:700;color:#0f172a;margin-top:4px"><b>Remarks / Action:</b> ${escapeHtml(p.remarks)}</div>` : ""}
-        <div style="font-size:11px;color:#64748b;margin-top:6px">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</div>
+        <div style="font-size:11px;color:#64748b;margin-top:6px">${formatNePair(p.lat, p.lng)}</div>
         ${img}
       </div>`;
   };
@@ -2007,7 +2008,7 @@ export default function RouteMapPage() {
                   ) : null}
                   {lp ? (
                     <div style={styles.lightboxCoords}>
-                      📍 {lp.lat.toFixed(5)}, {lp.lng.toFixed(5)}
+                      📍 {formatNePair(lp.lat, lp.lng)}
                     </div>
                   ) : null}
                 </div>
