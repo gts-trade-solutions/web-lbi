@@ -1036,10 +1036,16 @@ export default function PhotoAnnotator({
       return;
     }
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+    // Scale the line thickness to the PHOTO size. The width is measured in the
+    // photo's own pixels, so a fixed value looks tiny on a big/high-res photo.
+    // Scaling by the image width keeps Thin/Medium/Thick clearly visible on any
+    // photo (and the same in the saved image + report).
+    const imgW = canvasRef.current?.width || 900;
+    const lineScale = Math.max(1, imgW / 900);
     drawingRef.current = {
       tool: drawTool as Stroke["tool"],
       color: drawColor,
-      width: drawWidth,
+      width: Math.round(drawWidth * lineScale),
       points: [p, p],
       fill: drawFill && CLOSED_SHAPES.has(drawTool),
       dash: drawDash,
