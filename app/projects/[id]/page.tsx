@@ -4836,31 +4836,34 @@ export default function ProjectReportsPage() {
                 word-break: break-word;
               }
               .col-idx {
-                width: 44px;
+                width: 40px;
               }
               .col-sel {
-                width: 72px;
+                width: 56px;
               }
               .col-cat {
-                width: 180px;
+                width: 150px;
+              }
+              .col-desc {
+                width: 200px;
               }
               .col-photos {
-                width: 210px;
-              }
-              .col-created {
-                width: 120px;
-              }
-              .col-id {
                 width: 160px;
               }
-              .col-remarks {
-                width: 220px;
+              .col-created {
+                width: 96px;
               }
-              .col-vm {
+              .col-id {
+                width: 132px;
+              }
+              .col-remarks {
                 width: 140px;
               }
+              .col-vm {
+                width: 124px;
+              }
               .col-act {
-                width: 360px;
+                width: 300px;
               }
               @media (max-width: 1200px) {
                 .col-desc {
