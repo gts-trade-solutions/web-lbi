@@ -1374,10 +1374,10 @@ export default function PhotoAnnotator({
               autoFocus
               value={textDraft.value}
               placeholder="Label…"
-              maxLength={40}
-              // Box only as wide as the text (short when empty) so it can't run
-              // off a narrow photo.
-              size={Math.max(5, (textDraft.value.length || 6) + 1)}
+              // No character limit — type as much text as you need.
+              // Box grows with the text (short when empty), capped so it can't
+              // run off a narrow photo.
+              size={Math.min(60, Math.max(5, (textDraft.value.length || 6) + 1))}
               onChange={(e) => setTextDraft((d) => (d ? { ...d, value: e.target.value } : d))}
               onKeyDown={(e) => {
                 if (e.key === "Enter") { e.preventDefault(); commitText(); }

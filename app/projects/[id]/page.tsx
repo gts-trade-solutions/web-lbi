@@ -942,6 +942,15 @@ export default function ProjectReportsPage() {
   // report + photo index is open; the photo list itself is derived from the
   // live `reports` state so the Word checkbox inside stays in sync.
   const [photoPreview, setPhotoPreview] = useState<{ reportId: string; index: number } | null>(null);
+  // Drag position of the photo-preview modal (so it can be moved out of the
+  // way). Reset to centre each time the modal opens.
+  const [previewOffset, setPreviewOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const previewDragRef = useRef<{ sx: number; sy: number; bx: number; by: number } | null>(null);
+  useEffect(() => {
+    // Re-centre whenever the preview opens (or closes); keep the user's drag
+    // while they page Prev/Next within the same report.
+    setPreviewOffset({ x: 0, y: 0 });
+  }, [photoPreview != null, photoPreview?.reportId]);
   // Draw-on-photo editor: which photo is being annotated (arrows / text labels).
   const [annotatePhoto, setAnnotatePhoto] = useState<{ url: string; reportId: string; photoId: string } | null>(null);
   const [cropPhoto, setCropPhoto] = useState<{ url: string; reportId: string; photoId: string } | null>(null);
@@ -2698,13 +2707,33 @@ export default function ProjectReportsPage() {
                     width: "min(880px, 96vw)",
                     display: "grid",
                     gap: 10,
+                    transform: `translate(${previewOffset.x}px, ${previewOffset.y}px)`,
                   }}
                   onMouseDown={(e) => e.stopPropagation()}
                   role="dialog"
                   aria-modal="true"
                   aria-label="Photo preview"
                 >
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  {/* Drag the header to move this window out of the way. */}
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: 10, cursor: "move", touchAction: "none" }}
+                    onPointerDown={(e) => {
+                      // Don't start a drag from a button (e.g. the ✕ close).
+                      if ((e.target as HTMLElement).closest("button")) return;
+                      previewDragRef.current = { sx: e.clientX, sy: e.clientY, bx: previewOffset.x, by: previewOffset.y };
+                      try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch {}
+                    }}
+                    onPointerMove={(e) => {
+                      const d = previewDragRef.current;
+                      if (!d) return;
+                      setPreviewOffset({ x: d.bx + (e.clientX - d.sx), y: d.by + (e.clientY - d.sy) });
+                    }}
+                    onPointerUp={(e) => {
+                      previewDragRef.current = null;
+                      try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
+                    }}
+                    title="Drag to move this window"
+                  >
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div style={{ fontWeight: 950, color: "#101828", fontSize: 15 }}>
                         {rep?.category || "Report photo"}
