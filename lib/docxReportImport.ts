@@ -263,6 +263,27 @@ function difficultyFromXml(xml: string): string | null {
   return votes.red ? "red" : votes.yellow ? "yellow" : votes.green ? "green" : null;
 }
 
+// Difficulty from the recommendation / remarks WORDING. Many old reports carry
+// the route colour in the words ("to be removed", "shut down and lifted",
+// "Go ahead with caution") rather than a coloured cell. Priority matters:
+//   1) an outright block                         -> RED
+//   2) an explicit "Normal pass / No obstacle"   -> GREEN (even if the same line
+//      also says e.g. "diversion" — "Diversion End, Normal Pass" stays green)
+//   3) "caution" / an action that must be taken  -> YELLOW. Checked BEFORE the
+//      plain "go ahead" so "Go ahead WITH CAUTION" stays yellow.
+//   4) a plain "go ahead / clear"                -> GREEN
+// Returns null when the text carries no colour signal.
+function difficultyFromText(text: string): string | null {
+  const t = String(text || "").toLowerCase();
+  if (/(don'?t|do not)\s*go|not\s*(feasible|possible)|cannot|\bstop\b|blocked|no\s*movement|dead\s*end|road\s*closed/.test(t))
+    return "red";
+  if (/normal\s*pass|no\s*obstacle|no\s*obstruction/.test(t)) return "green";
+  if (/caution|careful|go\s*slow|with\s*care|shut\s*down|shutdown|\blift(ed|ing)?\b|remove|removal|restrict|diversion|detour|\bshift\b|opposite\s*(lane|road|side)|height\s*restrict|escort|puller|\bbypass\b|obstruct|digging|permission/.test(t))
+    return "yellow";
+  if (/go\s*ahead|clear|feasible|no\s*issue/.test(t)) return "green";
+  return null;
+}
+
 // Slice a block of XML into chunks that each start at one occurrence of a tag.
 function sliceByTag(text: string, tagRe: RegExp): string[] {
   const re = new RegExp(tagRe.source, tagRe.flags.includes("g") ? tagRe.flags : tagRe.flags + "g");
@@ -426,14 +447,7 @@ function parseGpsBlockReport(buffer: Buffer): DocxReport {
     // colour — these reports highlight photo labels yellow, which would wrongly
     // paint "Normal Pass" points yellow. Green wins first so "Diversion End,
     // Normal Pass" stays green.
-    const rt = `${observation} ${remarks}`.toLowerCase();
-    const difficulty = /normal\s*pass|go\s*ahead|no\s*obstacle/.test(rt)
-      ? "green"
-      : /(don'?t|do not)\s*go|not\s*possible|cannot|\bstop\b|blocked|no\s*movement/.test(rt)
-        ? "red"
-        : /remove|caution|careful|restrict|diversion|shift|\blift\b|opposite\s*(lane|road|side)/.test(rt)
-          ? "yellow"
-          : "green";
+    const difficulty = difficultyFromText(`${observation} ${remarks}`) || "green";
 
     // Category — the label row under the metadata (row 1); ignore it if it's
     // actually the sub-table header, and fall back to inferring from the text.
@@ -645,7 +659,15 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
         : vmCols.length
           ? vmCols.map((ci) => dataCells[ci] || "").join("")
           : rows[ri];
-      const difficulty = difficultyFromXml(diffXml) || "green";
+      // Prefer a definite coloured square (yellow/red) when the report has one;
+      // otherwise read the colour from the recommendation wording, so reports
+      // that convey the route colour in words (e.g. "to be removed",
+      // "Go ahead with caution") import with the right colour instead of all
+      // defaulting to green.
+      const colorDiff = difficultyFromXml(diffXml);
+      const textDiff = difficultyFromText(`${observation} ${get("remarks")}`);
+      const difficulty =
+        colorDiff && colorDiff !== "green" ? colorDiff : textDiff || colorDiff || "green";
 
       points.push({
         point_key: String(points.length + 1),
