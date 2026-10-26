@@ -4284,7 +4284,7 @@ export default function ProjectReportsPage() {
                               : {}),
                           }}
                         >
-                          <td className="col-idx" style={{ ...styles.td, cursor: savingOrder ? "wait" : "grab" }}>
+                          <td className="col-idx" style={{ ...styles.td, cursor: savingOrder ? "wait" : "grab", whiteSpace: "nowrap" }}>
                             <span
                               title="Drag the row to reorder this point"
                               style={{ color: "#98A2B3", fontSize: 16, marginRight: 4, userSelect: "none" }}
@@ -4836,7 +4836,7 @@ export default function ProjectReportsPage() {
                 word-break: break-word;
               }
               .col-idx {
-                width: 40px;
+                width: 66px;
               }
               .col-sel {
                 width: 56px;
@@ -4848,7 +4848,7 @@ export default function ProjectReportsPage() {
                 width: 200px;
               }
               .col-photos {
-                width: 160px;
+                width: 148px;
               }
               .col-created {
                 width: 96px;
