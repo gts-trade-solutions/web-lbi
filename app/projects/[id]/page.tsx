@@ -4533,7 +4533,7 @@ export default function ProjectReportsPage() {
                           </td>
 
                           <td className="col-created" style={styles.td}>
-                            <span style={styles.mutedWrap}>{created}</span>
+                            <span style={{ ...styles.mutedWrap, fontSize: 12 }}>{created}</span>
                           </td>
 
                           <td className="col-id" style={styles.td}>
@@ -4660,19 +4660,19 @@ export default function ProjectReportsPage() {
                           </td>
 
                           <td className="col-act" style={{ ...styles.td, textAlign: "right" }}>
-                            <div style={{ display: "inline-flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+                            <div style={{ display: "inline-flex", gap: 5, justifyContent: "flex-end", flexWrap: "wrap" }}>
                               <button
                                 type="button"
                                 onClick={() => openEditReport(r)}
                                 style={{
-                                  padding: "9px 12px",
-                                  borderRadius: 12,
+                                  padding: "5px 9px",
+                                  borderRadius: 9,
                                   border: "1px solid #D0D5DD",
                                   background: "#111",
                                   color: "#fff",
                                   fontWeight: 900,
-                                  fontSize: 12,
-                                  height: 36,
+                                  fontSize: 11,
+                                  height: 30,
                                   cursor: "pointer",
                                   whiteSpace: "nowrap",
                                 }}
@@ -4685,14 +4685,14 @@ export default function ProjectReportsPage() {
                                 type="button"
                                 onClick={() => openManualPoints(r.id)}
                                 style={{
-                                  padding: "9px 12px",
-                                  borderRadius: 12,
+                                  padding: "5px 9px",
+                                  borderRadius: 9,
                                   border: "1px solid #EAECF0",
                                   background: "#fff",
                                   color: "#344054",
                                   fontWeight: 900,
-                                  fontSize: 12,
-                                  height: 36,
+                                  fontSize: 11,
+                                  height: 30,
                                   cursor: "pointer",
                                   whiteSpace: "nowrap",
                                 }}
@@ -4707,14 +4707,14 @@ export default function ProjectReportsPage() {
                                   onClick={() => extractDrawings(r.id)}
                                   disabled={!!extractingDrawings[r.id]}
                                   style={{
-                                    padding: "9px 12px",
-                                    borderRadius: 12,
+                                    padding: "5px 9px",
+                                    borderRadius: 9,
                                     border: "1px solid #C6B6F0",
                                     background: "#F4F0FF",
                                     color: "#5B2AB3",
                                     fontWeight: 900,
-                                    fontSize: 12,
-                                    height: 36,
+                                    fontSize: 11,
+                                    height: 30,
                                     cursor: extractingDrawings[r.id] ? "not-allowed" : "pointer",
                                     whiteSpace: "nowrap",
                                     opacity: extractingDrawings[r.id] ? 0.6 : 1,
@@ -4731,14 +4731,14 @@ export default function ProjectReportsPage() {
                                   onClick={() => splitPhotos(r.id)}
                                   disabled={!!splittingPhotos[r.id]}
                                   style={{
-                                    padding: "9px 12px",
-                                    borderRadius: 12,
+                                    padding: "5px 9px",
+                                    borderRadius: 9,
                                     border: "1px solid #A6E7CE",
                                     background: "#ECFDF3",
                                     color: "#067647",
                                     fontWeight: 900,
-                                    fontSize: 12,
-                                    height: 36,
+                                    fontSize: 11,
+                                    height: 30,
                                     cursor: splittingPhotos[r.id] ? "not-allowed" : "pointer",
                                     whiteSpace: "nowrap",
                                     opacity: splittingPhotos[r.id] ? 0.6 : 1,
@@ -4758,14 +4758,14 @@ export default function ProjectReportsPage() {
                                 onClick={() => deleteReport(r.id)}
                                 disabled={!!deletingReport[r.id]}
                                 style={{
-                                  padding: "9px 12px",
-                                  borderRadius: 12,
+                                  padding: "5px 9px",
+                                  borderRadius: 9,
                                   border: "1px solid #FDA29B",
                                   background: "#FEF3F2",
                                   color: "#B42318",
                                   fontWeight: 900,
-                                  fontSize: 12,
-                                  height: 36,
+                                  fontSize: 11,
+                                  height: 30,
                                   cursor: deletingReport[r.id] ? "not-allowed" : "pointer",
                                   whiteSpace: "nowrap",
                                   opacity: deletingReport[r.id] ? 0.6 : 1,
@@ -4832,16 +4832,16 @@ export default function ProjectReportsPage() {
                 width: 210px;
               }
               .col-created {
-                width: 190px;
+                width: 120px;
               }
               .col-id {
-                width: 172px;
+                width: 160px;
               }
               .col-vm {
-                width: 150px;
+                width: 140px;
               }
               .col-act {
-                width: 220px;
+                width: 360px;
               }
               @media (max-width: 1200px) {
                 .col-desc {
@@ -8031,14 +8031,14 @@ const styles: Record<string, React.CSSProperties> = {
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
-    padding: "9px 12px",
-    borderRadius: 12,
+    padding: "5px 9px",
+    borderRadius: 9,
     border: "1px solid #B2DDFF",
     background: "#EFF8FF",
     color: "#175CD3",
     fontWeight: 900,
-    fontSize: 12,
-    height: 36,
+    fontSize: 11,
+    height: 30,
     whiteSpace: "nowrap",
   },
 
