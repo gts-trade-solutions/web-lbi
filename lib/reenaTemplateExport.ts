@@ -6406,14 +6406,28 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         }
 
         // Build a borderless grid of ALL the point's photos, laid out TWO PER
-        // ROW (side by side) at the SAME smaller size — so a pair of photos
-        // sits together on one page. An odd final photo takes the left of its
-        // own row, still the identical size. (A single-photo point never
-        // reaches here: it renders big in place at OBSERVATION_PHOTO_SIZE.)
-        const gridCellSize = (n: number): { cx: number; cy: number } =>
-          n > 1
-            ? { cx: SIDE_BY_SIDE_EMU_WIDTH, cy: SIDE_BY_SIDE_EMU_HEIGHT }
-            : { cx: MULTI_PHOTO_EMU_WIDTH, cy: MULTI_PHOTO_EMU_HEIGHT };
+        // ROW (side by side). Every photo in a point is the SAME size, but the
+        // size SHRINKS as the number of rows grows so the whole grid + the
+        // observation table fit on ONE page — otherwise the photos spill onto
+        // the next page and both pages are left mostly empty. (A single-photo
+        // point never reaches here: it renders big in place.)
+        const GRID_ASPECT = SIDE_BY_SIDE_PHOTO_SIZE[0] / SIDE_BY_SIDE_PHOTO_SIZE[1]; // w/h
+        const gridCellSize = (n: number): { cx: number; cy: number } => {
+          if (n <= 1) return { cx: MULTI_PHOTO_EMU_WIDTH, cy: MULTI_PHOTO_EMU_HEIGHT };
+          const rows = Math.max(1, Math.ceil(n / 2));
+          // ~7.5in of page height is left for photos after the observation
+          // table. Keep a single row reasonably tall, then divide the budget
+          // across the rows so the whole grid still fits under the table.
+          const heightIn = Math.min(4.8, 7.5 / rows);
+          let hpx = Math.round(heightIn * 96); // 96 px per inch
+          let wpx = Math.round(hpx * GRID_ASPECT);
+          const maxWpx = Math.round(6.9 * 96); // keep inside the 50%-width cell
+          if (wpx > maxWpx) {
+            wpx = maxWpx;
+            hpx = Math.round(wpx / GRID_ASPECT);
+          }
+          return { cx: wpx * PX_TO_EMU, cy: hpx * PX_TO_EMU };
+        };
         const NO_BORDER =
           `<w:tcBorders>` +
             `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
