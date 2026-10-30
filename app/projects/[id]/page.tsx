@@ -112,6 +112,26 @@ function ownKm(r: ReportRow): number {
   return Number.isFinite(n) ? n : NaN;
 }
 
+// Great-circle distance in km (same formula the Word export uses for KM).
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+function reportLat(r: ReportRow): number | null {
+  const v = r.latitude ?? r.loc_lat;
+  return v == null || !Number.isFinite(Number(v)) ? null : Number(v);
+}
+function reportLon(r: ReportRow): number | null {
+  const v = r.longitude ?? r.loc_lon;
+  return v == null || !Number.isFinite(Number(v)) ? null : Number(v);
+}
+
 // Scan points in display order and flag every point whose own KM is NOT greater
 // than the previous point that had a KM — i.e. the chainage goes flat or
 // backwards there (typically the "restart at 0" after combining projects).
@@ -931,6 +951,38 @@ export default function ProjectReportsPage() {
   }, [selMenuOpen]);
 
   const filteredSortedReports = useMemo(() => reports, [reports]);
+
+  // Cumulative KM from the GPS points (first point = 0), exactly like the Word
+  // export. Used to SHOW a KM when the point has no surveyed KM of its own, so
+  // the list matches the report instead of showing a blank "—".
+  const cumulativeKmById = useMemo(() => {
+    const map = new Map<string, number>();
+    let total = 0;
+    filteredSortedReports.forEach((r, i) => {
+      if (i === 0) {
+        map.set(r.id, 0);
+        return;
+      }
+      const prev = filteredSortedReports[i - 1];
+      const lat = reportLat(r);
+      const lon = reportLon(r);
+      const plat = reportLat(prev);
+      const plon = reportLon(prev);
+      if (lat != null && lon != null && plat != null && plon != null) {
+        total += haversineKm(plat, plon, lat, lon);
+      }
+      map.set(r.id, total);
+    });
+    return map;
+  }, [filteredSortedReports]);
+  // The KM to SHOW for a point: its own stored KM, else the cumulative GPS
+  // distance (rounded) — same as the exported report.
+  const displayKm = (r: ReportRow): number => {
+    const own = ownKm(r);
+    if (Number.isFinite(own)) return own;
+    const c = cumulativeKmById.get(r.id);
+    return c == null ? NaN : Math.round(c * 100) / 100;
+  };
 
   // Points whose KM is not greater than the previous point's KM (chainage goes
   // flat/backwards). Drives the warning banner and the red KM highlight.
@@ -4440,7 +4492,7 @@ export default function ProjectReportsPage() {
                                     setKmEditId(r.id);
                                     setKmEditVal(Number.isFinite(k) ? String(k) : "");
                                   }}
-                                  title="Click to change the KM"
+                                  title="KM for this point. A value with ~ is estimated from the GPS distance (same as the report); click to set the exact KM."
                                   style={{
                                     ...styles.subtle,
                                     color: bad ? "#B42318" : "#475467",
@@ -4451,7 +4503,12 @@ export default function ProjectReportsPage() {
                                     gap: 4,
                                   }}
                                 >
-                                  {bad ? "⚠ " : ""}KM: {Number.isFinite(k) ? k : "—"}
+                                  {bad ? "⚠ " : ""}KM:{" "}
+                                  {Number.isFinite(k)
+                                    ? k
+                                    : Number.isFinite(displayKm(r))
+                                      ? `~${displayKm(r)}`
+                                      : "—"}
                                   <span style={{ fontSize: 11, opacity: 0.6 }}>✏️</span>
                                 </div>
                               );
