@@ -7058,6 +7058,9 @@ function RouteSetupModal({
   >([]);
   const removeExistingGaAt = (idx: number) =>
     setExistingGaImages((p) => p.filter((_, i) => i !== idx));
+  // The route-page id discovered when loading existing GA (used so a save
+  // targets the SAME page even when no pageId was passed into the editor).
+  const [loadedPageId, setLoadedPageId] = useState<string | null>(null);
 
   const isPdfFile = (file: File) => {
     const name = String(file?.name || "").toLowerCase();
@@ -7153,10 +7156,11 @@ function RouteSetupModal({
   }
 
 
-  // ✅ Load existing setup when editing (best-effort)
+  // ✅ Load existing setup when editing (best-effort). Always fetch — even when
+  // no pageId was passed — because the GET falls back to this project's latest
+  // route page, so the "🖼 GA Drawing" button always shows the saved GA to edit
+  // instead of opening a blank form.
   useEffect(() => {
-    if (!existingPageId) return;
-
     (async () => {
       setLoadingExisting(true);
       setErr(null);
@@ -7164,8 +7168,9 @@ function RouteSetupModal({
       try {
         const token =
           typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+        const qs = existingPageId ? `?pageId=${encodeURIComponent(existingPageId)}` : "";
         const res = await fetch(
-          `/api/projects/${encodeURIComponent(projectId)}/ga-drawing?pageId=${encodeURIComponent(existingPageId)}`,
+          `/api/projects/${encodeURIComponent(projectId)}/ga-drawing${qs}`,
           {
             method: "GET",
             credentials: "include",
@@ -7177,6 +7182,7 @@ function RouteSetupModal({
         const page = data?.page || null;
 
         if (page) {
+          if ((page as any).id) setLoadedPageId(String((page as any).id));
           setObjective((page as any).objective || "");
           setMapPickMode(((page as any).map_mode as PickMode) || "preset");
           setSelectedPresetMapId((page as any).preset_map_key || presetMaps[0]?.id || "");
@@ -7329,7 +7335,7 @@ function RouteSetupModal({
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
-          pageId: existingPageId || null,
+          pageId: existingPageId || loadedPageId || null,
           objective,
           mapMode: mapPickMode,
           presetMapKey: preset_map_key,
