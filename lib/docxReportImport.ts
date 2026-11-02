@@ -184,14 +184,31 @@ export function parseCoord(v: string): number | null {
 // Split a coordinate cell into [lat, lon]. Copes with:
 //   • lat & lon run together, dir-first: "N12 59.312E80 10.350"
 //   • space-separated dir-first: "N12 53.397 E79 54.775"
+//   • plain decimal degrees, dir-first with a space: "N 21.7986333 E 73.0357"
 //   • DMS dir-last: "12°55'21.5\"N 79°52'29.2\"E"
 export function splitCoordPair(raw: string): [string, string] | null {
   const s0 = String(raw || "").trim();
   if (!s0) return null;
-  // A: break BEFORE a hemisphere letter that follows a digit (start of 2nd coord).
-  let a = s0.replace(/(\d)\s*([EWNS])/gi, "$1|$2");
-  // B: break AFTER a hemisphere letter that precedes a digit (dir-last style).
-  a = a.replace(/([NSEW])\s+(?=\d)/gi, "$1|");
+
+  // Dir-first: the whole cell starts with the latitude's hemisphere letter
+  // (N/S), so the longitude begins at its own hemisphere letter (E/W). Split
+  // right BEFORE that E/W — this is the only reliable break point and it works
+  // whether a digit or a space sits before it. Doing this first avoids the
+  // old bug where "N 21.79 E 73.03" got chopped into 4 pieces (N|21.79|E|73.03)
+  // because the latitude's leading "N " looked like a dir-last break.
+  if (/^[NS]/i.test(s0)) {
+    const m = s0.slice(1).match(/[EW]/i);
+    if (m && m.index != null) {
+      const cut = m.index + 1; // +1 for the slice(1) offset
+      const lat = s0.slice(0, cut).trim();
+      const lon = s0.slice(cut).trim();
+      if (lat && lon) return [lat, lon];
+    }
+  }
+
+  // Dir-last (letter trails the number): "12°55'21.5\"N 79°52'29.2\"E".
+  // Break AFTER a hemisphere letter that is followed by whitespace + a digit.
+  let a = s0.replace(/([NSEW])\s+(?=\d)/gi, "$1|");
   let parts = a.split("|").map((x) => x.trim()).filter(Boolean);
   if (parts.length !== 2) parts = s0.split(/[,;]+/).map((x) => x.trim()).filter(Boolean);
   return parts.length === 2 ? [parts[0], parts[1]] : null;
