@@ -189,6 +189,9 @@ export default function RouteMapPage() {
   const [editShareId, setEditShareId] = useState<string>("");
   const [editShareSel, setEditShareSel] = useState<Set<string>>(new Set());
   const [editShareBusy, setEditShareBusy] = useState(false);
+  // Change an existing link's password in place (blank = keep current one).
+  const [editSharePw, setEditSharePw] = useState("");
+  const [editSharePwShow, setEditSharePwShow] = useState(false);
 
   // Fetch road-following geometry for a batch of stops via our server proxy
   // (OpenRouteService). Sends the auth header when logged in, or the share
@@ -1568,6 +1571,8 @@ export default function RouteMapPage() {
     const base = s.selectedIds && s.selectedIds.length ? s.selectedIds : points.map((p) => p.id);
     setEditShareSel(new Set(base));
     setEditShareId(s.id);
+    setEditSharePw("");
+    setEditSharePwShow(false);
     setShareErr(null);
   };
   const toggleEditPointR = (id: string) =>
@@ -1584,6 +1589,11 @@ export default function RouteMapPage() {
       setShareErr("Tick at least one point for the link.");
       return;
     }
+    const pw = editSharePw.trim();
+    if (pw && pw.length < 4) {
+      setShareErr("New password must be at least 4 characters.");
+      return;
+    }
     setEditShareBusy(true);
     setShareErr(null);
     try {
@@ -1593,12 +1603,14 @@ export default function RouteMapPage() {
           method: "PATCH",
           headers: { "Content-Type": "application/json", ...authHeaders() },
           credentials: "include",
-          body: JSON.stringify({ selectedIds: ids }),
+          // Only send a password when one was typed — blank keeps the current one.
+          body: JSON.stringify({ selectedIds: ids, ...(pw ? { password: pw } : {}) }),
         }
       );
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(data?.error || "Failed to update the link");
       setExistingShares((prev) => prev.map((s) => (s.id === id ? { ...s, selectedIds: ids } : s)));
+      setEditSharePw("");
       setEditShareId("");
     } catch (e: any) {
       setShareErr(e?.message || "Failed to update the link");
@@ -2292,9 +2304,9 @@ export default function RouteMapPage() {
                             <button
                               style={styles.copyBtn}
                               onClick={() => (editShareId === s.id ? setEditShareId("") : startEditShareR(s))}
-                              title="Change which points this link shows (keeps the same link)"
+                              title="Change this link's password and/or which points it shows (keeps the same link)"
                             >
-                              {editShareId === s.id ? "Close" : "✏️ Edit points"}
+                              {editShareId === s.id ? "Close" : "✏️ Edit"}
                             </button>
                           </div>
 
@@ -2332,12 +2344,38 @@ export default function RouteMapPage() {
                                   </label>
                                 ))}
                               </div>
+                              <div style={{ borderTop: "1px dashed #EAECF0", marginTop: 10, paddingTop: 10 }}>
+                                <div style={{ fontWeight: 800, color: "#101828", fontSize: 12.5, marginBottom: 6 }}>
+                                  Change link password
+                                </div>
+                                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                  <input
+                                    style={{ ...styles.linkInput, maxWidth: 240 }}
+                                    type={editSharePwShow ? "text" : "password"}
+                                    value={editSharePw}
+                                    onChange={(e) => setEditSharePw(e.target.value)}
+                                    placeholder="New password (leave blank to keep current)"
+                                    autoComplete="new-password"
+                                  />
+                                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#475467", cursor: "pointer" }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={editSharePwShow}
+                                      onChange={(e) => setEditSharePwShow(e.target.checked)}
+                                    />
+                                    Show
+                                  </label>
+                                </div>
+                                <div style={{ fontSize: 11.5, color: "#98A2B3", marginTop: 4 }}>
+                                  The link URL stays the same — only the password people type to open it changes.
+                                </div>
+                              </div>
                               <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
                                 <button style={styles.modalCancel} onClick={() => setEditShareId("")} disabled={editShareBusy}>
                                   Cancel
                                 </button>
                                 <button style={styles.modalCreate} onClick={() => saveEditShareR(s.id)} disabled={editShareBusy}>
-                                  {editShareBusy ? "Saving…" : "Save points"}
+                                  {editShareBusy ? "Saving…" : "Save changes"}
                                 </button>
                               </div>
                             </div>
@@ -2346,8 +2384,8 @@ export default function RouteMapPage() {
                       );
                     })}
                     <div style={{ fontSize: 12, color: "#98A2B3", marginTop: 4 }}>
-                      Only create a new link below if you want a different password or a different
-                      set of points.
+                      Use ✏️ Edit above to change a link&apos;s password or points while keeping the
+                      same URL. Create a new link below only if you want a separate, additional link.
                     </div>
                   </div>
                 )}

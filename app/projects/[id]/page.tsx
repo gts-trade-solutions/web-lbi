@@ -1481,8 +1481,13 @@ export default function ProjectReportsPage() {
   const [editShareId, setEditShareId] = useState<string>("");
   const [editShareSel, setEditShareSel] = useState<Set<string>>(new Set());
   const [savingShareEdit, setSavingShareEdit] = useState(false);
+  // Change an existing link's password in place (blank = keep current one).
+  const [editSharePw, setEditSharePw] = useState("");
+  const [editSharePwShow, setEditSharePwShow] = useState(false);
   const startEditShare = (s: ShareLinkRow) => {
     setEditShareId(s.id);
+    setEditSharePw("");
+    setEditSharePwShow(false);
     // Start PRE-TICKED with the link's current points so updating one point is
     // a single toggle (not re-picking from scratch). Empty = "all points".
     const base = s.selectedIds && s.selectedIds.length ? s.selectedIds : reports.map((r) => r.id);
@@ -1504,17 +1509,28 @@ export default function ProjectReportsPage() {
       toast("Select at least one point for the shared summary.");
       return;
     }
+    const pw = editSharePw.trim();
+    if (pw && pw.length < 4) {
+      toast("New password must be at least 4 characters.");
+      return;
+    }
     try {
       setSavingShareEdit(true);
       await apiRequestJson(
         `/api/projects/${encodeURIComponent(projectId)}/share?shareId=${encodeURIComponent(id)}`,
-        { method: "PATCH", body: JSON.stringify({ selectedIds: ids }) }
+        // Only send a password when one was typed — blank keeps the current one.
+        { method: "PATCH", body: JSON.stringify({ selectedIds: ids, ...(pw ? { password: pw } : {}) }) }
       );
       setShareLinks((prev) =>
         prev.map((s) => (s.id === id ? { ...s, selectedIds: ids, reportCount: ids.length } : s))
       );
+      setEditSharePw("");
       setEditShareId("");
-      toast(`Shared summary updated to ${ids.length} point(s) — same link.`);
+      toast(
+        pw
+          ? `Shared summary updated to ${ids.length} point(s) and password changed — same link.`
+          : `Shared summary updated to ${ids.length} point(s) — same link.`
+      );
     } catch (e: any) {
       toast(e?.message || "Could not update the link");
     } finally {
@@ -3576,7 +3592,33 @@ export default function ProjectReportsPage() {
                                 </label>
                               ))}
                             </div>
-                            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                            <div style={{ borderTop: "1px dashed #EAECF0", marginTop: 10, paddingTop: 10 }}>
+                              <div style={{ fontWeight: 800, color: "#101828", fontSize: 13, marginBottom: 6 }}>
+                                🔑 Change link password
+                              </div>
+                              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                <input
+                                  style={{ ...styles.input, maxWidth: 280, height: 34 }}
+                                  type={editSharePwShow ? "text" : "password"}
+                                  value={editSharePw}
+                                  onChange={(e) => setEditSharePw(e.target.value)}
+                                  placeholder="New password (leave blank to keep current)"
+                                  autoComplete="new-password"
+                                />
+                                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#475467", cursor: "pointer" }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={editSharePwShow}
+                                    onChange={(e) => setEditSharePwShow(e.target.checked)}
+                                  />
+                                  Show
+                                </label>
+                              </div>
+                              <div style={{ fontSize: 11.5, color: "#98A2B3", marginTop: 4 }}>
+                                The link URL stays the same — only the password people type to open it changes.
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10 }}>
                               <button style={{ ...styles.btnGhost, height: 34 }} onClick={() => setEditShareId("")} disabled={savingShareEdit}>
                                 Cancel
                               </button>
@@ -3585,7 +3627,7 @@ export default function ProjectReportsPage() {
                                 onClick={() => saveShareEdit(s.id)}
                                 disabled={savingShareEdit}
                               >
-                                {savingShareEdit ? "Saving…" : "Save points"}
+                                {savingShareEdit ? "Saving…" : "Save changes"}
                               </button>
                             </div>
                           </div>
