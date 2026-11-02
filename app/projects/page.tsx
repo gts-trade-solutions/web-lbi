@@ -946,6 +946,16 @@ export default function ProjectsPage() {
   const [newDesc, setNewDesc] = useState("");
   const [creating, setCreating] = useState(false);
 
+  // Change-password dialog.
+  const [pwOpen, setPwOpen] = useState(false);
+  const [pwCurrent, setPwCurrent] = useState("");
+  const [pwNew, setPwNew] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [pwShow, setPwShow] = useState(false);
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwErr, setPwErr] = useState<string | null>(null);
+  const [pwOk, setPwOk] = useState(false);
+
   const [editOpen, setEditOpen] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<string>("");
   const [editName, setEditName] = useState("");
@@ -1365,6 +1375,56 @@ export default function ProjectsPage() {
       localStorage.removeItem("auth_token");
     }
     redirectToLogin();
+  };
+
+  const openChangePassword = () => {
+    setPwCurrent("");
+    setPwNew("");
+    setPwConfirm("");
+    setPwShow(false);
+    setPwErr(null);
+    setPwOk(false);
+    setPwBusy(false);
+    setPwOpen(true);
+  };
+
+  const submitChangePassword = async () => {
+    setPwErr(null);
+    setPwOk(false);
+    if (!pwCurrent || !pwNew) {
+      setPwErr("Please fill in your current and new password.");
+      return;
+    }
+    if (pwNew.length < 6) {
+      setPwErr("New password must be at least 6 characters.");
+      return;
+    }
+    if (pwNew !== pwConfirm) {
+      setPwErr("New password and confirmation do not match.");
+      return;
+    }
+    try {
+      setPwBusy(true);
+      const res = await fetch("/api/auth/change-password", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword: pwCurrent, newPassword: pwNew }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setPwErr(data?.error || "Could not change password.");
+        return;
+      }
+      setPwOk(true);
+      setPwCurrent("");
+      setPwNew("");
+      setPwConfirm("");
+    } catch {
+      setPwErr("Network error. Please try again.");
+    } finally {
+      setPwBusy(false);
+    }
   };
 
   const exportCSV = async () => {
@@ -2686,6 +2746,14 @@ export default function ProjectsPage() {
             </button>
           </div>
 
+          <button
+            style={styles.btnGhost}
+            onClick={openChangePassword}
+            title="Change your login password"
+          >
+            🔑 Change password
+          </button>
+
           <button style={styles.btnDanger} onClick={logout}>
             Logout
           </button>
@@ -2908,6 +2976,138 @@ export default function ProjectsPage() {
                   );
                 })}
               </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {pwOpen && (
+        <div
+          style={styles.modalOverlay}
+          onClick={() => {
+            if (!pwBusy) setPwOpen(false);
+          }}
+        >
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 10 }}>
+              Change password
+            </div>
+
+            {pwOk ? (
+              <>
+                <div
+                  style={{
+                    background: "#dcfce7",
+                    border: "1px solid #86efac",
+                    color: "#166534",
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    fontSize: 14,
+                    marginBottom: 12,
+                  }}
+                >
+                  ✓ Your password has been changed. Use the new password next
+                  time you log in.
+                </div>
+                <div style={styles.modalActions}>
+                  <button style={styles.btnPrimary} onClick={() => setPwOpen(false)}>
+                    Done
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={styles.formRow}>
+                  <div style={styles.formLabel}>Current password *</div>
+                  <input
+                    style={styles.input}
+                    type={pwShow ? "text" : "password"}
+                    value={pwCurrent}
+                    onChange={(e) => setPwCurrent(e.target.value)}
+                    placeholder="Your current password"
+                    autoComplete="current-password"
+                  />
+                </div>
+
+                <div style={styles.formRow}>
+                  <div style={styles.formLabel}>New password *</div>
+                  <input
+                    style={styles.input}
+                    type={pwShow ? "text" : "password"}
+                    value={pwNew}
+                    onChange={(e) => setPwNew(e.target.value)}
+                    placeholder="At least 6 characters"
+                    autoComplete="new-password"
+                  />
+                </div>
+
+                <div style={styles.formRow}>
+                  <div style={styles.formLabel}>Confirm new password *</div>
+                  <input
+                    style={styles.input}
+                    type={pwShow ? "text" : "password"}
+                    value={pwConfirm}
+                    onChange={(e) => setPwConfirm(e.target.value)}
+                    placeholder="Re-type the new password"
+                    autoComplete="new-password"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !pwBusy) submitChangePassword();
+                    }}
+                  />
+                </div>
+
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    fontSize: 13,
+                    color: "#475569",
+                    marginTop: 4,
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={pwShow}
+                    onChange={(e) => setPwShow(e.target.checked)}
+                  />
+                  Show passwords
+                </label>
+
+                {pwErr ? (
+                  <div
+                    style={{
+                      background: "#fee2e2",
+                      border: "1px solid #fca5a5",
+                      color: "#991b1b",
+                      borderRadius: 8,
+                      padding: "10px 12px",
+                      fontSize: 14,
+                      marginTop: 12,
+                    }}
+                  >
+                    {pwErr}
+                  </div>
+                ) : null}
+
+                <div style={styles.modalActions}>
+                  <button
+                    style={styles.btnGhost}
+                    onClick={() => setPwOpen(false)}
+                    disabled={pwBusy}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    style={{ ...styles.btnPrimary, opacity: pwBusy ? 0.7 : 1 }}
+                    onClick={submitChangePassword}
+                    disabled={pwBusy}
+                  >
+                    {pwBusy ? "Saving…" : "Change password"}
+                  </button>
+                </div>
+              </>
             )}
           </div>
         </div>
