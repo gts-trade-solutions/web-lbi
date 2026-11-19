@@ -304,7 +304,6 @@ export default function RouteMapPage() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const markersRef = useRef<any[]>([]);
-  const dateMarkersRef = useRef<any[]>([]);
   const infoRef = useRef<any>(null);
   const photoCacheRef = useRef<Record<string, string | null>>({});
   const focusRef = useRef<((i: number) => void) | null>(null);
@@ -1460,13 +1459,48 @@ export default function RouteMapPage() {
         };
         focusLocationRef.current = focusLocation;
 
-        // Numbered markers.
+        // Numbered markers — a custom SVG icon per pin: coloured circle with the
+        // point number, and the survey DATE baked in as a small chip right below
+        // it, so the date is ALWAYS visible on the map at every zoom level.
+        const pinIcon = (n: number, color: string, big: boolean, date: string) => {
+          const r = big ? 13 : 11;
+          const cy = r + 2;
+          const chipH = 15;
+          const safeDate = String(date || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+          const dateW = date ? Math.max(42, Math.round(safeDate.length * 6) + 10) : 0;
+          const W = Math.max(dateW, (r + 2) * 2);
+          const H = cy + r + (date ? chipH + 4 : 2);
+          const stroke = big ? "#111827" : "#ffffff";
+          const sw = big ? 3 : 1.5;
+          const parts = [
+            `<circle cx="${W / 2}" cy="${cy}" r="${r}" fill="${color}" stroke="${stroke}" stroke-width="${sw}"/>`,
+            `<text x="${W / 2}" y="${cy + 4}" text-anchor="middle" font-family="Arial,Segoe UI,sans-serif" font-size="11" font-weight="800" fill="#ffffff">${n}</text>`,
+          ];
+          if (date) {
+            const chipY = cy + r + 3;
+            parts.push(
+              `<rect x="${(W - dateW) / 2}" y="${chipY}" width="${dateW}" height="${chipH}" rx="7" fill="#111827" fill-opacity="0.92"/>`
+            );
+            parts.push(
+              `<text x="${W / 2}" y="${chipY + 11}" text-anchor="middle" font-family="Arial,Segoe UI,sans-serif" font-size="9.5" font-weight="700" fill="#ffffff">${safeDate}</text>`
+            );
+          }
+          const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${parts.join("")}</svg>`;
+          return {
+            url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
+            size: new g.maps.Size(W, H),
+            scaledSize: new g.maps.Size(W, H),
+            anchor: new g.maps.Point(W / 2, cy),
+          };
+        };
         markersRef.current = points.map((p, i) => {
           const isStart = i === 0;
           const isEnd = i === points.length - 1;
           // Colour each pin by its ROUTE DIFFICULTY (green / yellow / red; grey
-          // when not set). Start & end are drawn larger with a dark ring so the
-          // route ends stay obvious.
+          // when not set). Start & end are drawn larger with a dark ring.
           const diffColor =
             p.difficulty === "green"
               ? "#16a34a"
@@ -1479,19 +1513,11 @@ export default function RouteMapPage() {
           const opts: any = {
             position: { lat: p.lat, lng: p.lng },
             map,
-            label: { text: String(p.n), color: "#fff", fontWeight: "800", fontSize: "11px" },
             title:
               (isStart ? `START — ${p.category}` : isEnd ? `END — ${p.category}` : p.category) +
               (p.difficulty ? ` (${p.difficulty})` : "") +
               (p.date ? ` · ${p.date}` : ""),
-            icon: {
-              path: g.maps.SymbolPath.CIRCLE,
-              scale: big ? 15 : 12,
-              fillColor: diffColor,
-              fillOpacity: 1,
-              strokeColor: big ? "#111827" : "#ffffff",
-              strokeWeight: big ? 3.5 : 1.5,
-            },
+            icon: pinIcon(p.n, diffColor, big, p.date),
             zIndex: big ? 1000 : undefined,
           };
           const marker = new g.maps.Marker(opts);
@@ -1501,35 +1527,6 @@ export default function RouteMapPage() {
           });
           return marker;
         });
-
-        // Little always-visible SURVEY-DATE chip under each pin. Only shown when
-        // zoomed in (>= DATE_BADGE_ZOOM) so the whole-route view isn't cluttered.
-        if (typeof document !== "undefined" && !document.getElementById("r3d-date-badge-css")) {
-          const st = document.createElement("style");
-          st.id = "r3d-date-badge-css";
-          st.textContent =
-            ".r3d-date-badge{transform:translateY(22px);background:#111827;padding:1px 6px;border-radius:8px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.45)}";
-          document.head.appendChild(st);
-        }
-        const DATE_BADGE_ZOOM = 9;
-        dateMarkersRef.current = points.map((p) =>
-          p.date
-            ? new g.maps.Marker({
-                position: { lat: p.lat, lng: p.lng },
-                icon: { path: g.maps.SymbolPath.CIRCLE, scale: 0.01, fillOpacity: 0, strokeOpacity: 0 },
-                label: { text: p.date, className: "r3d-date-badge", color: "#ffffff", fontSize: "10px", fontWeight: "700" },
-                clickable: false,
-                optimized: false,
-                zIndex: 2,
-              })
-            : null
-        );
-        const applyDateBadgeZoom = () => {
-          const show = (map.getZoom() || 0) >= DATE_BADGE_ZOOM;
-          dateMarkersRef.current.forEach((dm) => dm && dm.setMap(show ? map : null));
-        };
-        applyDateBadgeZoom();
-        map.addListener("zoom_changed", applyDateBadgeZoom);
 
         // Route line through the points — road-following via Directions when
         // possible. Store g/path/lines so the line can be redrawn slowly
