@@ -3215,7 +3215,10 @@ export default function ProjectsPage() {
             if (!combining) setCombineOpen(false);
           }}
         >
-          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+          <div
+            style={{ ...styles.modal, maxHeight: "90vh", overflowY: "auto" }}
+            onClick={(e) => e.stopPropagation()}
+          >
             <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 4 }}>
               🔗 Combine Projects
             </div>

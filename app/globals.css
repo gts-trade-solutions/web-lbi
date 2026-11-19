@@ -3,15 +3,13 @@
 @tailwind utilities;
 
 :root {
+  /* This app is designed light-only: every surface hard-codes a white/light
+     background with dark text. Pin it to light so a device's dark theme can
+     never flip the default text colour to white and make un-coloured headings
+     (e.g. in the GA Drawing area) invisible on the white popups. */
+  color-scheme: light;
   --background: #ffffff;
   --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {

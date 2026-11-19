@@ -312,8 +312,9 @@ async function renderAndRespond(args: {
   requestedFileName: string;
   sort?: "asc" | "desc";
   format?: "docx" | "pdf";
+  summaryMode?: boolean;
 }) {
-  const { projectId, reportIds, includePhotos, includeGa, requestedFileName, sort } = args;
+  const { projectId, reportIds, includePhotos, includeGa, requestedFileName, sort, summaryMode } = args;
   const format = args.format === "pdf" ? "pdf" : "docx";
   let stage: string = "started";
   try {
@@ -338,6 +339,7 @@ async function renderAndRespond(args: {
       includePhotos,
       includeGa: includeGa !== false,
       sort,
+      summaryMode: summaryMode === true,
     });
 
     // Same report, PDF format: convert the just-rendered DOCX with LibreOffice.
@@ -487,6 +489,7 @@ export async function POST(request: Request, context: Ctx) {
   const requestedFileName = String(body.fileName || "").trim();
   const sort = (body as { sort?: unknown }).sort === "desc" ? "desc" : "asc";
   const format = (body as { format?: unknown }).format === "pdf" ? "pdf" : "docx";
+  const summaryMode = (body as { summaryMode?: unknown }).summaryMode === true;
 
-  return renderAndRespond({ projectId, reportIds, includePhotos, includeGa, requestedFileName, sort, format });
+  return renderAndRespond({ projectId, reportIds, includePhotos, includeGa, requestedFileName, sort, format, summaryMode });
 }

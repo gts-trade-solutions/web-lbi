@@ -18,6 +18,7 @@ import {
 import { descriptionForCategory } from "../../../lib/observationTemplates";
 import { fetchPhotoBlob, loadCanvasSafeImage } from "../../../lib/authedImage";
 import { replacePhotoImage } from "../../../lib/replacePhoto";
+import { buildStandardConclusionHtml, STANDARD_OBJECTIVE_DEFAULT } from "../../../lib/standardReportText";
 import PizZip from "pizzip";
 
 type VehicleMovement = "green" | "yellow" | "red" | "";
@@ -461,6 +462,7 @@ async function fetchProjectExportDocx(params: {
   fileName?: string;
   sort?: "asc" | "desc";
   format?: "docx" | "pdf";
+  summaryMode?: boolean;
 }): Promise<ExportDocxResult> {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
@@ -516,6 +518,7 @@ async function fetchProjectExportDocx(params: {
           fileName: params.fileName?.trim() || undefined,
           sort: params.sort,
           format: params.format,
+          summaryMode: params.summaryMode === true,
         }),
       });
     }
@@ -1702,6 +1705,73 @@ export default function ProjectReportsPage() {
   const [dragRow, setDragRow] = useState<number | null>(null);
   const [dragOverRow, setDragOverRow] = useState<number | null>(null);
   const [savingOrder, setSavingOrder] = useState(false);
+
+  // Pinned points — a per-project highlight the user toggles to keep track of
+  // points. Stored in localStorage so it survives a refresh (no DB change).
+  const [pinnedIds, setPinnedIds] = useState<Record<string, boolean>>({});
+  const pinStorageKey = useMemo(
+    () => (projectId ? `lbi_pinned_points_${projectId}` : ""),
+    [projectId]
+  );
+  useEffect(() => {
+    if (!pinStorageKey || typeof window === "undefined") return;
+    try {
+      const raw = localStorage.getItem(pinStorageKey);
+      const arr = raw ? (JSON.parse(raw) as unknown) : null;
+      if (Array.isArray(arr)) {
+        const map: Record<string, boolean> = {};
+        for (const id of arr) map[String(id)] = true;
+        setPinnedIds(map);
+      }
+    } catch {
+      /* ignore bad/missing storage */
+    }
+  }, [pinStorageKey]);
+  const togglePinned = (id: string) => {
+    setPinnedIds((prev) => {
+      const next = { ...prev };
+      if (next[id]) delete next[id];
+      else next[id] = true;
+      if (pinStorageKey && typeof window !== "undefined") {
+        try {
+          localStorage.setItem(
+            pinStorageKey,
+            JSON.stringify(Object.keys(next).filter((k) => next[k]))
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+      return next;
+    });
+  };
+
+  // Export a Summary report from the PINNED points only (reuses the Word
+  // engine with summaryMode: adds the category + key-obstacle summary tables).
+  const [summaryBusy, setSummaryBusy] = useState(false);
+  const exportPinnedSummary = async () => {
+    const ids = filteredSortedReports.filter((r) => pinnedIds[r.id]).map((r) => String(r.id));
+    if (!ids.length) {
+      alert("Pin at least one point (📌) first — the Summary report includes only pinned points.");
+      return;
+    }
+    setSummaryBusy(true);
+    try {
+      await fetchProjectExportDocx({
+        projectId,
+        reportIds: ids,
+        includePhotos,
+        includeGa: true,
+        fileName: `${projectName} Summary`,
+        summaryMode: true,
+      });
+    } catch (e: any) {
+      alert("Summary report failed: " + (e?.message || "unknown error"));
+    } finally {
+      setSummaryBusy(false);
+    }
+  };
+
   const reorderByDrag = async (from: number, to: number) => {
     if (from == null || to == null || from === to) return;
     const arr = [...filteredSortedReports];
@@ -4274,6 +4344,35 @@ export default function ProjectReportsPage() {
               <span style={{ fontSize: 15, color: "#98A2B3" }}>⠿</span>
               Drag any row up or down to reorder the points — grab it anywhere except the
               buttons, tick-boxes and photos.
+              {(() => {
+                const pinnedCount = filteredSortedReports.filter((r) => pinnedIds[r.id]).length;
+                return (
+                  <button
+                    type="button"
+                    onClick={exportPinnedSummary}
+                    disabled={summaryBusy || pinnedCount === 0}
+                    title={
+                      pinnedCount === 0
+                        ? "Pin points (📌) to build a Summary report from them"
+                        : `Build a Summary report from the ${pinnedCount} pinned point(s)`
+                    }
+                    style={{
+                      marginLeft: "auto",
+                      padding: "8px 14px",
+                      borderRadius: 10,
+                      border: "1px solid " + (pinnedCount ? "#1D4ED8" : "#E4E7EC"),
+                      background: pinnedCount && !summaryBusy ? "#2563EB" : "#F2F4F7",
+                      color: pinnedCount && !summaryBusy ? "#fff" : "#98A2B3",
+                      fontWeight: 900,
+                      fontSize: 13,
+                      cursor: summaryBusy || pinnedCount === 0 ? "not-allowed" : "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {summaryBusy ? "Building…" : `📋 Summary report${pinnedCount ? ` (${pinnedCount} pinned)` : ""}`}
+                  </button>
+                );
+              })()}
             </div>
             <div style={styles.tableWrapNoScroll}>
               <table style={styles.table}>
@@ -4370,6 +4469,7 @@ export default function ProjectReportsPage() {
                           }}
                           style={{
                             cursor: savingOrder ? "wait" : "grab",
+                            ...(pinnedIds[r.id] ? { background: "#DBEAFE" } : {}),
                             ...(dragOverRow === i && dragRow != null && dragRow !== i
                               ? { outline: "2px dashed #2563EB", outlineOffset: -2, background: "#EFF6FF" }
                               : {}),
@@ -4383,6 +4483,30 @@ export default function ProjectReportsPage() {
                               ⠿
                             </span>
                             {i + 1}
+                            <button
+                              type="button"
+                              data-no-drag
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                togglePinned(r.id);
+                              }}
+                              title={pinnedIds[r.id] ? "Unpin this point" : "Pin this point to highlight it"}
+                              aria-pressed={!!pinnedIds[r.id]}
+                              style={{
+                                marginLeft: 6,
+                                padding: 0,
+                                border: "none",
+                                background: "transparent",
+                                cursor: "pointer",
+                                fontSize: 16,
+                                lineHeight: 1,
+                                verticalAlign: "middle",
+                                opacity: pinnedIds[r.id] ? 1 : 0.4,
+                                filter: pinnedIds[r.id] ? "none" : "grayscale(1)",
+                              }}
+                            >
+                              📌
+                            </button>
                           </td>
 
                           <td className="col-sel" style={styles.td}>
@@ -5143,6 +5267,8 @@ function InsertReportModal({
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="Optional description..."
+            spellCheck
+            lang="en"
             style={{
               width: "100%",
               minHeight: 90,
@@ -5164,6 +5290,8 @@ function InsertReportModal({
             value={remarksAction}
             onChange={(e) => setRemarksAction(e.target.value)}
             placeholder="Type remarks / action"
+            spellCheck
+            lang="en"
             style={{
               width: "100%",
               minHeight: 90,
@@ -6216,6 +6344,8 @@ function EditReportModal({
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="Optional description..."
+            spellCheck
+            lang="en"
             style={{
               width: "100%",
               minHeight: 90,
@@ -6236,6 +6366,8 @@ function EditReportModal({
             value={remarksAction}
             onChange={(e) => setRemarksAction(e.target.value)}
             placeholder="Type remarks / action"
+            spellCheck
+            lang="en"
             style={{
               width: "100%",
               minHeight: 90,
@@ -7016,13 +7148,20 @@ function RouteSetupModal({
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const [objective, setObjective] = useState("");
+  // Step-by-step wizard: 0 Route(From→To) · 1 Map · 2 Diagrams · 3 Texts · 4 Review
+  const [step, setStep] = useState(0);
+  const WIZARD_STEPS = ["Route", "Map", "Diagrams", "Texts", "Review"];
+
+  // Objective keeps the fixed standard sentence as a starting point.
+  const [objective, setObjective] = useState(STANDARD_OBJECTIVE_DEFAULT);
 
   const [loadingExisting, setLoadingExisting] = useState(false);
   const [existingMapUrl, setExistingMapUrl] = useState<string>("");
 
-  // ✅ Conclusion HTML (TinyMCE)
-  const [conclusionHtml, setConclusionHtml] = useState<string>("");
+  // ✅ Conclusion HTML — generated from From→To (locked standard wording)
+  const [conclusionHtml, setConclusionHtml] = useState<string>(() =>
+    buildStandardConclusionHtml("", "")
+  );
   const conclusionRef = useRef<any>(null);
 
   // ✅ Locations — dynamic, no fixed limit. Starts with 4 (typical
@@ -7046,6 +7185,15 @@ function RouteSetupModal({
     });
   };
 
+  // From = first location, To = last location. These are the ONLY things that
+  // change the standard Conclusion text — it is regenerated whenever either
+  // endpoint changes.
+  const fromLabel = (routeLocations[0] || "").trim();
+  const toLabel = (routeLocations[routeLocations.length - 1] || "").trim();
+  useEffect(() => {
+    setConclusionHtml(buildStandardConclusionHtml(fromLabel, toLabel));
+  }, [fromLabel, toLabel]);
+
   const presetMaps: PresetMap[] = useMemo(
     () => [
       // If you want preset maps, add here:
@@ -7054,7 +7202,7 @@ function RouteSetupModal({
     []
   );
 
-  const [mapPickMode, setMapPickMode] = useState<PickMode>("preset");
+  const [mapPickMode, setMapPickMode] = useState<PickMode>("upload");
   const [selectedPresetMapId, setSelectedPresetMapId] = useState(presetMaps[0]?.id || "");
   const [uploadedMapFile, setUploadedMapFile] = useState<File | null>(null);
   const mapInputRef = useRef<HTMLInputElement | null>(null);
@@ -7071,7 +7219,12 @@ function RouteSetupModal({
   const finalMapPreview = mapPickMode === "upload" ? (uploadedMapPreview || existingMapUrl) : selectedPresetMap?.src || "";
 
   const [gaFiles, setGaFiles] = useState<File[]>([]);
+  // Each GA file is tagged with the diagram slot it was added to, so each
+  // diagram can be uploaded separately under its own heading.
+  const [gaLabels, setGaLabels] = useState<string[]>([]);
   const gaInputRef = useRef<HTMLInputElement | null>(null);
+  // Which diagram slot the next file picked belongs to.
+  const pendingGaLabelRef = useRef<string>("Other");
 
   const gaPreviews = useMemo(() => {
     return gaFiles.map((f) => ({
@@ -7081,15 +7234,20 @@ function RouteSetupModal({
     }));
   }, [gaFiles]);
 
-  const addGaFiles = (files: FileList | null) => {
+  const addGaFilesWithLabel = (files: FileList | null, label: string) => {
     if (!files?.length) return;
     const next = Array.from(files);
     const existingKeys = new Set(gaFiles.map((f) => `${f.name}__${f.size}`));
     const filtered = next.filter((f) => !existingKeys.has(`${f.name}__${f.size}`));
+    if (!filtered.length) return;
     setGaFiles((p) => [...p, ...filtered]);
+    setGaLabels((p) => [...p, ...filtered.map(() => label)]);
   };
 
-  const removeGaAt = (idx: number) => setGaFiles((p) => p.filter((_, i) => i !== idx));
+  const removeGaAt = (idx: number) => {
+    setGaFiles((p) => p.filter((_, i) => i !== idx));
+    setGaLabels((p) => p.filter((_, i) => i !== idx));
+  };
 
   // GA drawing images already saved for this page (when editing). Kept so the
   // user can ADD a new point / location WITHOUT re-uploading the GA drawing
@@ -7225,7 +7383,7 @@ function RouteSetupModal({
 
         if (page) {
           if ((page as any).id) setLoadedPageId(String((page as any).id));
-          setObjective((page as any).objective || "");
+          setObjective((page as any).objective || STANDARD_OBJECTIVE_DEFAULT);
           setMapPickMode(((page as any).map_mode as PickMode) || "preset");
           setSelectedPresetMapId((page as any).preset_map_key || presetMaps[0]?.id || "");
           setExistingMapUrl((page as any).map_file_url || "");
@@ -7345,7 +7503,19 @@ function RouteSetupModal({
           fileSize: ex.file_size,
         });
       }
-      for (const originalFile of gaFiles) {
+      // Upload the diagrams in a stable slot order so the Word export shows
+      // Without Load → With Load → Turning Circle → Other.
+      const gaSlotOrder = [
+        "GA Drawing — Without Load",
+        "GA Drawing — With Load",
+        "Turning Circle Drawing",
+        "Other diagram",
+      ];
+      const orderedGaFiles = gaFiles
+        .map((f, i) => ({ f, pri: gaSlotOrder.indexOf(gaLabels[i] || "Other diagram") }))
+        .sort((a, b) => (a.pri === -1 ? 99 : a.pri) - (b.pri === -1 ? 99 : b.pri))
+        .map((x) => x.f);
+      for (const originalFile of orderedGaFiles) {
         const storageFile = isPdfFile(originalFile)
           ? await convertPdfFirstPageToPngFile(originalFile)
           : originalFile;
@@ -7413,23 +7583,160 @@ function RouteSetupModal({
         aria-modal="true"
         aria-label="GA Drawing Setup"
       >
-        <div style={styles.modalTitle}>GA Drawing Setup Required</div>
+        <div style={styles.modalTitle}>Report Setup — Step by Step</div>
 
-        <div style={{ ...styles.modalHint, color: "#b42318", fontWeight: 900 }}>
-          {reason || "Please complete GA Drawing setup to export."}
+        {/* Stepper */}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "6px 0 2px" }}>
+          {WIZARD_STEPS.map((label, i) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => setStep(i)}
+              disabled={saving}
+              style={{
+                height: 30,
+                padding: "0 12px",
+                borderRadius: 999,
+                border: "1px solid " + (i === step ? "#111" : "#E4E7EC"),
+                background: i === step ? "#111" : i < step ? "#EEF2FF" : "#fff",
+                color: i === step ? "#fff" : "#344054",
+                fontWeight: 900,
+                fontSize: 12,
+                cursor: "pointer",
+              }}
+            >
+              {i + 1}. {label}
+            </button>
+          ))}
         </div>
+
+        {reason ? (
+          <div style={{ ...styles.modalHint, color: "#b42318", fontWeight: 900 }}>
+            {reason}
+          </div>
+        ) : null}
 
         {loadingExisting ? <div style={styles.modalHint}>Loading existing setup…</div> : null}
 
         {err ? <div style={{ ...styles.modalHint, color: "#b42318", fontWeight: 900 }}>{err}</div> : null}
 
-        {/* Objective */}
+        {/* ===== STEP 0 · Route (From → To) ===== */}
+        {step === 0 && (
+          <div style={{ display: "grid", gap: 8 }}>
+            <div style={styles.routeLabel}>Route — From → To</div>
+            <div style={styles.modalNote}>
+              The <b>first</b> location is the start (<b>From</b>) and the <b>last</b> is the
+              destination (<b>To</b>). These two names fill the report&apos;s standard Conclusion
+              automatically. Add stops in between if the route has them.
+            </div>
+
+            {/* Locations — dynamic add/remove (no fixed limit) */}
+            <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "36px 1fr 36px", gap: 12, alignItems: "start" }}>
+                <div style={{ display: "grid", gap: 0, paddingTop: 8, justifyItems: "center", alignContent: "start" }}>
+                  {routeLocations.map((_, idx) => {
+                    const isLast = idx === routeLocations.length - 1;
+                    return (
+                      <div key={`marker-${idx}`} style={{ display: "grid", gap: 0, justifyItems: "center" }}>
+                        {isLast ? (
+                          <div style={{ ...locStyles.pin, marginBottom: 30 }}>📍</div>
+                        ) : (
+                          <>
+                            <div style={locStyles.circle} />
+                            <div style={locStyles.dots} />
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ display: "grid", gap: 12 }}>
+                  {routeLocations.map((val, idx) => {
+                    const isLast = idx === routeLocations.length - 1;
+                    const placeholder =
+                      idx === 0 ? "From (start location)" : isLast ? "To (destination)" : "Stop location";
+                    return (
+                      <input
+                        key={idx}
+                        value={val}
+                        onChange={(e) => updateLoc(idx, e.target.value)}
+                        placeholder={placeholder}
+                        style={{
+                          height: 44,
+                          borderRadius: 14,
+                          border: "1px solid #D0D5DD",
+                          padding: "0 14px",
+                          fontWeight: 900,
+                          outline: "none",
+                          background: "#fff",
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+
+                <div style={{ display: "grid", gap: 12 }}>
+                  {routeLocations.map((_, idx) => (
+                    <button
+                      key={`rm-${idx}`}
+                      type="button"
+                      onClick={() => removeLocationRow(idx)}
+                      disabled={routeLocations.length <= 2}
+                      title="Remove this location"
+                      style={{
+                        height: 44,
+                        width: 36,
+                        borderRadius: 12,
+                        border: "1px solid #E4E7EC",
+                        background: "#fff",
+                        color: routeLocations.length <= 2 ? "#D0D5DD" : "#B91C2A",
+                        fontSize: 22,
+                        fontWeight: 700,
+                        cursor: routeLocations.length <= 2 ? "not-allowed" : "pointer",
+                        lineHeight: 1,
+                      }}
+                    >
+                      ×
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={addLocationRow}
+                style={{
+                  marginTop: 4,
+                  alignSelf: "start",
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 10,
+                  border: "1px dashed #6F7A8F",
+                  background: "#F8FAFC",
+                  color: "#1F2937",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                + Add a stop in between
+              </button>
+
+              <div style={styles.modalNote}>Example: Sameep Engineering, Navsari → … → Mundra Port</div>
+            </div>
+          </div>
+        )}
+
+        {/* ===== STEP 3 · Texts: Objective ===== */}
+        {step === 3 && (
         <div style={{ display: "grid", gap: 8 }}>
-          <div style={styles.routeLabel}>Objective</div>
+          <div style={styles.routeLabel}>Objective (edit the cargo size as needed)</div>
           <textarea
             value={objective}
             onChange={(e) => setObjective(e.target.value)}
             placeholder="Type objective..."
+            spellCheck
+            lang="en"
             style={{
               width: "100%",
               minHeight: 90,
@@ -7442,7 +7749,11 @@ function RouteSetupModal({
             }}
           />
         </div>
+        )}
 
+        {/* ===== STEP 1 · Route Map ===== */}
+        {step === 1 && (
+        <>
         {/* Map picker */}
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <div style={styles.routeLabel}>Route Map</div>
@@ -7529,114 +7840,6 @@ function RouteSetupModal({
                 ) : null}
               </>
             )}
-
-            {/* ✅ Locations — dynamic add/remove (no fixed limit) */}
-            <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-              <div style={styles.routeLabel}>Locations</div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "36px 1fr 36px", gap: 12, alignItems: "start" }}>
-                {/* Marker column — circles connected by dots, with a final pin.
-                    Renders one marker (and a connector below it, if not last)
-                    per location row, so the visual stepper grows with the
-                    number of inputs. */}
-                <div style={{ display: "grid", gap: 0, paddingTop: 8, justifyItems: "center", alignContent: "start" }}>
-                  {routeLocations.map((_, idx) => {
-                    const isLast = idx === routeLocations.length - 1;
-                    return (
-                      <div key={`marker-${idx}`} style={{ display: "grid", gap: 0, justifyItems: "center" }}>
-                        {isLast ? (
-                          <div style={{ ...locStyles.pin, marginBottom: 30 }}>📍</div>
-                        ) : (
-                          <>
-                            <div style={locStyles.circle} />
-                            <div style={locStyles.dots} />
-                          </>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Input column */}
-                <div style={{ display: "grid", gap: 12 }}>
-                  {routeLocations.map((val, idx) => {
-                    const isLast = idx === routeLocations.length - 1;
-                    const placeholder =
-                      idx === 0
-                        ? "Start location"
-                        : isLast
-                          ? "End location"
-                          : "Stop location";
-                    return (
-                      <input
-                        key={idx}
-                        value={val}
-                        onChange={(e) => updateLoc(idx, e.target.value)}
-                        placeholder={placeholder}
-                        style={{
-                          height: 44,
-                          borderRadius: 14,
-                          border: "1px solid #D0D5DD",
-                          padding: "0 14px",
-                          fontWeight: 900,
-                          outline: "none",
-                          background: "#fff",
-                        }}
-                      />
-                    );
-                  })}
-                </div>
-
-                {/* Remove-row column — × button on each row except when only 2 left */}
-                <div style={{ display: "grid", gap: 12 }}>
-                  {routeLocations.map((_, idx) => (
-                    <button
-                      key={`rm-${idx}`}
-                      type="button"
-                      onClick={() => removeLocationRow(idx)}
-                      disabled={routeLocations.length <= 2}
-                      title="Remove this location"
-                      style={{
-                        height: 44,
-                        width: 36,
-                        borderRadius: 12,
-                        border: "1px solid #E4E7EC",
-                        background: "#fff",
-                        color: routeLocations.length <= 2 ? "#D0D5DD" : "#B91C2A",
-                        fontSize: 22,
-                        fontWeight: 700,
-                        cursor: routeLocations.length <= 2 ? "not-allowed" : "pointer",
-                        lineHeight: 1,
-                      }}
-                    >
-                      ×
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Add-row button */}
-              <button
-                type="button"
-                onClick={addLocationRow}
-                style={{
-                  marginTop: 4,
-                  alignSelf: "start",
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 10,
-                  border: "1px dashed #6F7A8F",
-                  background: "#F8FAFC",
-                  color: "#1F2937",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-              >
-                + Add another location
-              </button>
-
-              <div style={styles.modalNote}>Example: Kappalur → Salem → Krishnagiri → Hosur</div>
-            </div>
           </div>
 
           <div style={{ border: "1px solid #EAECF0", borderRadius: 16, padding: 12, background: "#F9FAFB" }}>
@@ -7675,10 +7878,16 @@ function RouteSetupModal({
             </div>
           </div>
         </div>
+        </>
+        )}
 
-        {/* GA files */}
+        {/* ===== STEP 2 · Diagrams (each uploaded separately, under its heading) ===== */}
+        {step === 2 && (
         <div style={{ display: "grid", gap: 8 }}>
-          <div style={styles.routeLabel}>GA Drawing Files (required)</div>
+          <div style={styles.routeLabel}>Diagrams — upload each separately</div>
+          <div style={styles.modalNote}>
+            Upload each drawing under its own heading. At least one is required. Images or PDF.
+          </div>
 
           <input
             ref={gaInputRef}
@@ -7689,18 +7898,58 @@ function RouteSetupModal({
             onChange={(e) => {
               const files = e.target.files;
               if (!files?.length) return;
-              addGaFiles(files);
+              addGaFilesWithLabel(files, pendingGaLabelRef.current || "Other");
               if (gaInputRef.current) gaInputRef.current.value = "";
             }}
           />
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button type="button" style={styles.btnPrimary} onClick={() => gaInputRef.current?.click()}>
-              Add GA files
-            </button>
-            <button type="button" style={styles.btnGhost} onClick={() => setGaFiles([])} disabled={!gaFiles.length}>
-              Clear
-            </button>
+          <div style={{ display: "grid", gap: 10 }}>
+            {["GA Drawing — Without Load", "GA Drawing — With Load", "Turning Circle Drawing", "Other diagram"].map((slot) => {
+              const slotFiles = gaFiles
+                .map((f, i) => ({ f, i }))
+                .filter(({ i }) => (gaLabels[i] || "Other") === slot);
+              return (
+                <div key={slot} style={{ border: "1px solid #EAECF0", borderRadius: 14, padding: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <div style={{ fontWeight: 900, color: "#101828" }}>{slot}</div>
+                    <button
+                      type="button"
+                      style={{ ...styles.btnPrimary, height: 34 }}
+                      onClick={() => {
+                        pendingGaLabelRef.current = slot;
+                        gaInputRef.current?.click();
+                      }}
+                    >
+                      + Add file
+                    </button>
+                  </div>
+                  {slotFiles.length ? (
+                    <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+                      {slotFiles.map(({ f, i }) => (
+                        <div
+                          key={`${f.name}-${i}`}
+                          style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, fontSize: 13, fontWeight: 800, color: "#344054" }}
+                        >
+                          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {isPdfFile(f) ? "📄 " : "🖼 "}
+                            {f.name}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => removeGaAt(i)}
+                            style={{ padding: "4px 8px", borderRadius: 8, border: "1px solid #FECDD6", background: "#FFF1F3", color: "#B42318", fontWeight: 900, cursor: "pointer" }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, color: "#98A2B3" }}>No file yet.</div>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
           {existingGaImages.length > 0 && (
@@ -7736,152 +7985,102 @@ function RouteSetupModal({
             </div>
           )}
 
-          {!gaFiles.length ? (
+        </div>
+        )}
+
+        {/* ===== STEP 3 · Texts: Conclusion (locked, From→To only) ===== */}
+        {step === 3 && (
+          <div style={{ display: "grid", gap: 8 }}>
+            <div style={styles.routeLabel}>Conclusion &amp; Certification (standard — auto-filled)</div>
+            <div style={styles.modalNote}>
+              This is the fixed RACE standard certification. You don&apos;t type it — it
+              fills in the <b>From → To</b> from step 1 ({fromLabel || "[From]"} → {toLabel || "[To]"}).
+              To change the names, go <b>Back</b> to Route.
+            </div>
             <div
               style={{
-                padding: 14,
-                borderRadius: 14,
-                border: "1px dashed #D0D5DD",
+                border: "1px solid #EAECF0",
+                borderRadius: 16,
                 background: "#F9FAFB",
-                fontWeight: 800,
-                color: "#667085",
+                padding: 16,
+                maxHeight: 320,
+                overflow: "auto",
+                fontSize: 13,
+                lineHeight: 1.5,
+                color: "#1F2937",
               }}
-            >
-              {existingGaImages.length ? "No new GA files added (the saved ones above are kept)." : "No GA files selected."}
-            </div>
-          ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              {gaPreviews.map((p, idx) => {
-                const file = gaFiles[idx];
-                const isPdf = file ? isPdfFile(file) : false;
-
-                return (
-                  <div key={`${p.name}-${idx}`} style={{ border: "1px solid #EAECF0", borderRadius: 16, padding: 12 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <div style={{ minWidth: 0 }}>
-                        <div
-                          style={{
-                            fontWeight: 950,
-                            color: "#101828",
-                            whiteSpace: "nowrap",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                          }}
-                        >
-                          {p.name}
-                        </div>
-                        <div style={{ fontSize: 12, fontWeight: 800, color: "#667085" }}>
-                          {(p.size / 1024).toFixed(1)} KB {isPdf ? "• PDF" : "• Image"}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => removeGaAt(idx)}
-                        style={{
-                          padding: "8px 10px",
-                          borderRadius: 12,
-                          border: "1px solid #FECDD6",
-                          background: "#FFF1F3",
-                          color: "#B42318",
-                          fontWeight: 900,
-                          cursor: "pointer",
-                        }}
-                      >
-                        Remove
-                      </button>
-                    </div>
-
-                    <div
-                      style={{
-                        marginTop: 10,
-                        borderRadius: 14,
-                        overflow: "hidden",
-                        border: "1px solid #EAECF0",
-                        background: "#F9FAFB",
-                        height: GA_PREVIEW_HEIGHT,
-                      }}
-                    >
-                      {isPdf ? (
-                        <div
-                          style={{
-                            width: "100%",
-                            height: "100%",
-                            display: "grid",
-                            placeItems: "center",
-                            padding: 16,
-                            textAlign: "center",
-                            gap: 10,
-                          }}
-                        >
-                          <div style={{ fontSize: 44 }}>📄</div>
-                          <div style={{ fontWeight: 900, color: "#101828" }}>PDF selected</div>
-                          <a
-                            href={p.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={{
-                              textDecoration: "none",
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              border: "1px solid #D0D5DD",
-                              color: "#344054",
-                              fontWeight: 900,
-                              background: "#fff",
-                            }}
-                          >
-                            Open PDF Preview
-                          </a>
-                        </div>
-                      ) : (
-                        <>
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={p.url} alt="GA preview" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
-                        </>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* Conclusion */}
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={styles.routeLabel}>Conclusion & Certification</div>
-
-          <div style={{ border: "1px solid #EAECF0", borderRadius: 16, overflow: "hidden", background: "#fff" }}>
-            <Editor
-              apiKey="3fr142nwyhd2jop9d509ekq6i2ks2u6dmrbgm8c74gu5xrml"
-              onInit={(_evt, editor) => (conclusionRef.current = editor)}
-              value={conclusionHtml}
-              onEditorChange={(v) => setConclusionHtml(v)}
-              init={{
-                height: 260,
-                menubar: false,
-                branding: false,
-                statusbar: false,
-                plugins: "lists",
-                toolbar:
-                  "undo redo | fontfamily fontsize | bold italic underline | alignleft aligncenter alignright | bullist numlist | removeformat",
-                fontsize_formats: "10pt 12pt 14pt 16pt 18pt 20pt 24pt 30pt 36pt 48pt",
-                content_style:
-                  "body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; font-size: 14pt; }",
-              }}
+              dangerouslySetInnerHTML={{ __html: conclusionHtml }}
             />
           </div>
-        </div>
+        )}
+
+        {/* ===== STEP 4 · Review & Save ===== */}
+        {step === 4 && (
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={styles.routeLabel}>Review</div>
+            <div
+              style={{
+                border: "1px solid #EAECF0",
+                borderRadius: 14,
+                padding: 14,
+                background: "#F9FAFB",
+                display: "grid",
+                gap: 8,
+                fontWeight: 800,
+                color: "#344054",
+                fontSize: 13,
+              }}
+            >
+              <div>🧭 <b>From:</b> {fromLabel || <span style={{ color: "#B42318" }}>not set</span>}</div>
+              <div>🏁 <b>To:</b> {toLabel || <span style={{ color: "#B42318" }}>not set</span>}</div>
+              <div>🗺 <b>Map:</b> {uploadedMapFile ? uploadedMapFile.name : existingMapUrl ? "kept (already uploaded)" : <span style={{ color: "#B42318" }}>none</span>}</div>
+              <div>📐 <b>Diagrams:</b> {gaFiles.length + existingGaImages.length} file(s)</div>
+              <div>📝 <b>Objective:</b> {objective?.trim() ? "set" : "empty"}</div>
+              <div>📄 <b>Conclusion:</b> standard (auto-filled with From → To)</div>
+            </div>
+            <div style={styles.modalNote}>Press <b>Save</b> to store this setup. Export opens automatically.</div>
+          </div>
+        )}
 
         <div style={styles.modalActions}>
           <button style={styles.btnGhost} onClick={onClose} disabled={saving}>
             Cancel
           </button>
-          <button style={styles.btnPrimary} onClick={saveAll} disabled={saving}>
-            {saving ? "Saving..." : "Save GA Drawing"}
-          </button>
+          <div style={{ display: "flex", gap: 10, marginLeft: "auto" }}>
+            {step > 0 && (
+              <button
+                type="button"
+                style={styles.btnGhost}
+                onClick={() => setStep((s) => Math.max(0, s - 1))}
+                disabled={saving}
+              >
+                ← Back
+              </button>
+            )}
+            {step < WIZARD_STEPS.length - 1 ? (
+              <button
+                type="button"
+                style={styles.btnPrimary}
+                onClick={() => setStep((s) => Math.min(WIZARD_STEPS.length - 1, s + 1))}
+                disabled={saving || (step === 0 && (!fromLabel || !toLabel))}
+              >
+                Next →
+              </button>
+            ) : (
+              <button style={styles.btnPrimary} onClick={saveAll} disabled={saving}>
+                {saving ? "Saving..." : "Save GA Drawing"}
+              </button>
+            )}
+          </div>
         </div>
 
-        <div style={styles.modalNote}>After saving, Export will open automatically.</div>
+        <div style={styles.modalNote}>
+          {step === 0 && (!fromLabel || !toLabel)
+            ? "Enter the Start (From) and End (To) to continue."
+            : step < WIZARD_STEPS.length - 1
+              ? `Step ${step + 1} of ${WIZARD_STEPS.length} — ${WIZARD_STEPS[step]}.`
+              : "After saving, Export will open automatically."}
+        </div>
       </div>
     </div>
   );

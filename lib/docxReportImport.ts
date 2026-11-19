@@ -301,6 +301,27 @@ function difficultyFromText(text: string): string | null {
   return null;
 }
 
+// The AUTHORITATIVE per-point difficulty colour. In these survey reports each
+// point is its own little table and the whole HEADER row of that table (the
+// "GPS LOCATION / KM / LOCATION / CATEGORY / OBSERVATION …" cells) is shaded
+// with the point's route colour: green / yellow(EABD0D) / red(F05052). Header
+// rows never contain photos, so — unlike the data row — there is no coloured
+// arrow/annotation to confuse the reading. We read ONLY cell shading + text
+// highlight here (never shape fills or font colour) so borders and decorative
+// bits can't leak in. Returns null when the header carries no colour.
+function difficultyFromHeaderShading(headerRowXml: string): string | null {
+  const votes: Record<string, boolean> = {};
+  for (const m of Array.from(headerRowXml.matchAll(/<w:highlight w:val="([^"]+)"/g))) {
+    const v = m[1].toLowerCase();
+    if (v === "yellow" || v === "red" || v === "green") votes[v] = true;
+  }
+  for (const m of Array.from(headerRowXml.matchAll(/<w:shd\b[^>]*w:fill="([0-9A-Fa-f]{6})"/g))) {
+    const d = hexToDifficulty(m[1]);
+    if (d) votes[d] = true;
+  }
+  return votes.red ? "red" : votes.yellow ? "yellow" : votes.green ? "green" : null;
+}
+
 // Slice a block of XML into chunks that each start at one occurrence of a tag.
 function sliceByTag(text: string, tagRe: RegExp): string[] {
   const re = new RegExp(tagRe.source, tagRe.flags.includes("g") ? tagRe.flags : tagRe.flags + "g");
@@ -601,6 +622,13 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
       points[points.length - 1].photoNames.push(...imagesIn(xml.slice(lastPointEnd, t.start)));
     }
 
+    // The point's route colour from its table HEADER shading (see
+    // difficultyFromHeaderShading). Only trust it for a PER-POINT table (header
+    // + a handful of data rows); a single big shared-header table (TPI) would
+    // otherwise paint every row with one header colour, so there we fall back
+    // to the VM square / wording instead.
+    const headerColor = rows.length <= 4 ? difficultyFromHeaderShading(rows[0]) : null;
+
     // Emit one point PER data row (handles TPI's single big table with many
     // rows AND Tambaram's 2-row tables alike).
     for (let ri = 1; ri < rows.length; ri++) {
@@ -683,8 +711,17 @@ export function parseDocxReport(buffer: Buffer): DocxReport {
       // defaulting to green.
       const colorDiff = difficultyFromXml(diffXml);
       const textDiff = difficultyFromText(`${observation} ${get("remarks")}`);
+      // Priority:
+      //   1) the point table's HEADER shading — the real colour the surveyor set
+      //      (authoritative; fixes e.g. "Footpath bridge to be removed" = RED
+      //      that the wording alone would read as yellow);
+      //   2) a coloured VEHICLE-MOVEMENT square (red/yellow) where the template
+      //      has one;
+      //   3) the recommendation WORDING;
+      //   4) green ("normal pass") as the last resort.
       const difficulty =
-        colorDiff && colorDiff !== "green" ? colorDiff : textDiff || colorDiff || "green";
+        headerColor ||
+        (colorDiff && colorDiff !== "green" ? colorDiff : textDiff || colorDiff || "green");
 
       points.push({
         point_key: String(points.length + 1),

@@ -850,6 +850,10 @@ export type ExportOptions = {
   // Report order in the document. "desc" reverses the route (and the
   // cumulative KMs recompute for that direction). Defaults to "asc".
   sort?: "asc" | "desc";
+  // Summary report: keeps the "SUMMARY REPORT" title and injects the two
+  // summary tables (category counts + key-obstacle list) before the first
+  // point table. Meant to be combined with a pinned-points reportIds filter.
+  summaryMode?: boolean;
 };
 
 export type ExportResult = {
@@ -2875,6 +2879,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const projectId = options.projectId;
   const includePhotos = options.includePhotos !== false;
   const includeGa = options.includeGa !== false; // default true; false = skip GA drawing
+  const summaryMode = options.summaryMode === true;
   const reportIdsFilter = (options.reportIds || []).filter(Boolean);
 
   console.log("[export actual] started", {
@@ -5322,6 +5327,196 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.error("[difficulty table shading] patch failed - leaving default fills:", err);
   }
 
+  // ----- Step 10b-1b (summary report only): insert two summary tables before
+  // the first point table — a Category/Work-Item count table and a Key Obstacle
+  // Summary table (Sl No · Location · GPS · Km · Obstruction · Score · Recommendation).
+  // The Obstruction / Score / Recommendation columns are AUTO-DERIVED from each
+  // point's category, route difficulty and observation, and are fully editable
+  // in Word. Only runs for the summary export; never touches the detail report.
+  if (summaryMode) {
+    try {
+      const renderedZip = doc.getZip();
+      const docFile = renderedZip.file("word/document.xml");
+      if (docFile) {
+        let xml = docFile.asText();
+        const alreadyHasSummary = xml.includes("Mitigation Recommendations for major obstacles");
+
+        const gpsIdx = xml.indexOf("GPS LOCATION");
+        let tblStart = -1;
+        if (gpsIdx !== -1) {
+          // Anchor on the TABLE OPEN tag ("<w:tbl>" or "<w:tbl " with
+          // attributes) nearest before the "GPS LOCATION" header — NOT a child
+          // tag like <w:tblPr>/<w:tblGrid>/<w:tblHeader> (those also start with
+          // "<w:tbl" and previously made this return -1, so nothing injected).
+          tblStart = Math.max(
+            xml.lastIndexOf("<w:tbl>", gpsIdx),
+            xml.lastIndexOf("<w:tbl ", gpsIdx)
+          );
+        }
+
+        if (!alreadyHasSummary && tblStart !== -1) {
+          const esc = (s: unknown) =>
+            String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+          const cell = (
+            text: string,
+            opt: { w: number; bold?: boolean; fill?: string | null; color?: string; align?: string; size?: number } = { w: 1000 }
+          ) => {
+            const color = opt.color || "1F2937";
+            const align = opt.align || "left";
+            const size = opt.size || 18;
+            return (
+              "<w:tc><w:tcPr>" +
+              `<w:tcW w:w="${opt.w}" w:type="dxa"/>` +
+              (opt.fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${opt.fill}"/>` : "") +
+              '<w:vAlign w:val="center"/></w:tcPr>' +
+              `<w:p><w:pPr><w:jc w:val="${align}"/><w:spacing w:before="20" w:after="20"/></w:pPr>` +
+              `<w:r><w:rPr>${opt.bold ? "<w:b/>" : ""}<w:color w:val="${color}"/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr>` +
+              `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p></w:tc>`
+            );
+          };
+          const tableWrap = (totalW: number, cols: number[], rowsXml: string) =>
+            "<w:tbl><w:tblPr>" +
+            `<w:tblW w:w="${totalW}" w:type="dxa"/>` +
+            "<w:tblBorders>" +
+            ["top", "left", "bottom", "right", "insideH", "insideV"]
+              .map((s) => `<w:${s} w:val="single" w:sz="6" w:space="0" w:color="BFC7D2"/>`)
+              .join("") +
+            "</w:tblBorders></w:tblPr>" +
+            "<w:tblGrid>" +
+            cols.map((w) => `<w:gridCol w:w="${w}"/>`).join("") +
+            "</w:tblGrid>" +
+            rowsXml +
+            "</w:tbl>";
+          const headingP = (text: string) =>
+            '<w:p><w:pPr><w:spacing w:before="200" w:after="80"/></w:pPr>' +
+            `<w:r><w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/><w:color w:val="1F2937"/></w:rPr>` +
+            `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p>`;
+          const spacer = '<w:p><w:pPr><w:spacing w:before="0" w:after="120"/></w:pPr></w:p>';
+          const bodyP = (text: string, opt: { bold?: boolean; size?: number } = {}) =>
+            '<w:p><w:pPr><w:spacing w:before="20" w:after="20"/></w:pPr>' +
+            `<w:r><w:rPr>${opt.bold ? "<w:b/>" : ""}<w:sz w:val="${opt.size || 20}"/><w:szCs w:val="${opt.size || 20}"/><w:color w:val="1F2937"/></w:rPr>` +
+            `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p>`;
+
+          const deriveObstruction = (category: string, diff: string) => {
+            const base = String(category || "Obstacle").trim() || "Obstacle";
+            const tail = diff === "red" ? "Major Civil Work" : diff === "yellow" ? "Clearance Check" : "Review";
+            return `${base} – ${tail}`;
+          };
+          const deriveScore = (diff: string) =>
+            diff === "red"
+              ? "High risk; significant clearance / civil work required."
+              : diff === "yellow"
+                ? "Moderate risk; pass with caution / minor works."
+                : "Low risk; normal passage.";
+
+          // Table 1 — category / work-item counts. Green header + striped
+          // light-green rows (matches the reference summary report).
+          const t1cols = [4200, 1200, 3600];
+          const t1Head =
+            "<w:tr>" +
+            cell("Category / Work Item", { w: t1cols[0], bold: true, fill: "2E7D32", color: "FFFFFF", align: "center" }) +
+            cell("Count", { w: t1cols[1], bold: true, fill: "2E7D32", color: "FFFFFF", align: "center" }) +
+            cell("Key Note", { w: t1cols[2], bold: true, fill: "2E7D32", color: "FFFFFF", align: "center" }) +
+            "</w:tr>";
+          const t1Body = (categorySummary || [])
+            .map((c, ri) => {
+              const f = ri % 2 === 0 ? "E6F4E6" : null;
+              return (
+                "<w:tr>" +
+                cell(String(c.categoryLabel || "-"), { w: t1cols[0], fill: f }) +
+                cell(String(c.count ?? 0), { w: t1cols[1], align: "center", fill: f }) +
+                cell("-", { w: t1cols[2], fill: f }) +
+                "</w:tr>"
+              );
+            })
+            .join("");
+          const table1 = tableWrap(9000, t1cols, t1Head + t1Body);
+
+          // Table 2 — key obstacle summary, one row per point.
+          const t2cols = [600, 2200, 2000, 900, 2400, 2600, 3300];
+          const t2Head =
+            "<w:tr>" +
+            cell("Sl No", { w: t2cols[0], bold: true, fill: "1F3864", color: "FFFFFF", align: "center" }) +
+            cell("Route / Location", { w: t2cols[1], bold: true, fill: "1F3864", color: "FFFFFF" }) +
+            cell("GPS Coordinates", { w: t2cols[2], bold: true, fill: "1F3864", color: "FFFFFF" }) +
+            cell("Kms", { w: t2cols[3], bold: true, fill: "1F3864", color: "FFFFFF", align: "center" }) +
+            cell("Obstruction", { w: t2cols[4], bold: true, fill: "1F3864", color: "FFFFFF" }) +
+            cell("Score Parameter", { w: t2cols[5], bold: true, fill: "1F3864", color: "FFFFFF" }) +
+            cell("Recommendation", { w: t2cols[6], bold: true, fill: "1F3864", color: "FFFFFF" }) +
+            "</w:tr>";
+          const t2Body = (observations || [])
+            .map((o: any, i: number) => {
+              const diff = String(o.difficultyKey || "green");
+              const f = i % 2 === 0 ? "DDEBF7" : null; // striped light-blue rows
+              const gps = [o.gpsLat, o.gpsLon].filter((x) => x && x !== "-").join(" ");
+              const rec =
+                String(o.observation || "")
+                  .replace(/<[^>]+>/g, " ")
+                  .replace(/\s+/g, " ")
+                  .trim() || String(o.remarks || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+              return (
+                "<w:tr>" +
+                cell(String(i + 1), { w: t2cols[0], align: "center", fill: f }) +
+                cell(String(o.location || "-"), { w: t2cols[1], fill: f }) +
+                cell(gps || "-", { w: t2cols[2], fill: f }) +
+                cell(String(o.km || "-"), { w: t2cols[3], align: "center", fill: f }) +
+                cell(deriveObstruction(o.category, diff), { w: t2cols[4], fill: f }) +
+                cell(deriveScore(diff), { w: t2cols[5], fill: f }) +
+                cell(rec || "-", { w: t2cols[6], fill: f }) +
+                "</w:tr>"
+              );
+            })
+            .join("");
+          const table2 = tableWrap(14000, t2cols, t2Head + t2Body);
+
+          // Observations summary block (A. Surveyed Route / Distance / B. Key
+          // Locations) derived from the included points.
+          const routeName = String(projectName || "").toUpperCase();
+          const maxKm = (observations || []).reduce((m: number, o: any) => {
+            const v = parseFloat(String(o.km || "").replace(/[^\d.]/g, ""));
+            return Number.isFinite(v) && v > m ? v : m;
+          }, 0);
+          const keyLocs = Array.from(
+            new Set((observations || []).map((o: any) => String(o.location || "").trim()).filter(Boolean))
+          ).join(" - ");
+          const observationsBlock =
+            headingP("OBSERVATIONS:") +
+            bodyP("Summary of Observations", { bold: true }) +
+            bodyP("A. Surveyed Route:", { bold: true }) +
+            bodyP(routeName ? `From ${routeName}` : "-") +
+            bodyP(maxKm > 0 ? `Distance: ${maxKm.toFixed(2)} km` : "Distance: -") +
+            bodyP("B. Key Locations:", { bold: true }) +
+            bodyP(keyLocs || "-") +
+            spacer;
+
+          const summaryXml =
+            headingP("TURNING CIRCLE DRAWING:") +
+            spacer +
+            headingP("STABILITY DRAWING:") +
+            spacer +
+            observationsBlock +
+            table1 +
+            spacer +
+            headingP("Mitigation Recommendations for major obstacles with coordinates – proposed recommendation") +
+            table2 +
+            spacer;
+
+          xml = xml.slice(0, tblStart) + summaryXml + xml.slice(tblStart);
+          renderedZip.file("word/document.xml", xml);
+          console.log("[summary tables] inserted", {
+            categories: (categorySummary || []).length,
+            points: (observations || []).length,
+          });
+        } else {
+          console.log("[summary tables] skipped", { alreadyHasSummary, anchorFound: tblStart !== -1 });
+        }
+      }
+    } catch (err) {
+      console.error("[summary tables] insert failed - leaving document untouched:", err);
+    }
+  }
+
   // ----- Step 10b-2: Insert a "difficulty colour key" legend before the
   // first observation table so the exported file is self-explanatory and
   // user-friendly. The legend uses the SAME 6 colours as the observation
@@ -5425,7 +5620,30 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     const docFile = renderedZip.file("word/document.xml");
     if (docFile) {
       let xml = docFile.asText();
-      if (xml.includes("SUMMARY REPORT")) {
+      if (summaryMode) {
+        // Summary report: first title paragraph (the one with "SUMMARY REPORT")
+        // becomes the fixed Risk Mitigation Plan heading; the route name stays
+        // on the line below (rendered separately by the template). Also rename
+        // the single GA heading to "GA VEHICLE DRAWING:".
+        const titlePhrase = "RISK MITIGATION PLAN FOR TRANSPORTATION OF OVER DIMENSION CARGO (ODC)";
+        const escT = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        let titleDone = false;
+        xml = xml.replace(/<w:p\b[\s\S]*?<\/w:p>/g, (p) => {
+          if (titleDone || !p.includes("SUMMARY REPORT")) return p;
+          titleDone = true;
+          let firstRun = true;
+          return p.replace(/(<w:t\b[^>]*>)([\s\S]*?)(<\/w:t>)/g, (_m, open, _t, close) => {
+            if (firstRun) {
+              firstRun = false;
+              return `${open}${escT(titlePhrase)}${close}`;
+            }
+            return `${open}${close}`;
+          });
+        });
+        xml = xml.replace(/GA DRAWING FOR 50 FEET TRAILER WITHOUT LOAD:/g, "GA VEHICLE DRAWING:");
+        renderedZip.file("word/document.xml", xml);
+        console.log("[summary title] applied Risk Mitigation Plan title + GA heading");
+      } else if (xml.includes("SUMMARY REPORT")) {
         xml = xml.replace(/SUMMARY REPORT/g, "DETAIL REPORT");
         renderedZip.file("word/document.xml", xml);
         console.log("[title wording] replaced 'SUMMARY REPORT' with 'DETAIL REPORT'");
@@ -5533,7 +5751,11 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       const OTHER_DXA = OTHER_PCTS.map((p) =>
         Math.round(REMAINING_DXA * (p / OTHER_SUM))
       );
+      // Narrow leading "#" serial-number column (mirrors the website's point
+      // list). ~0.4 in — just wide enough for a 2-3 digit number.
+      const SERIAL_COL_DXA = 560;
       const OBS_COL_DXA = [
+        SERIAL_COL_DXA, // # (serial number)
         OTHER_DXA[0], // GPS LOCATION
         OTHER_DXA[1], // KM
         OTHER_DXA[2], // LOCATION
@@ -5553,6 +5775,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       let obsTablesRestyled = 0;
       let obsCellsResized = 0;
       let obsHeadersRecolored = 0;
+      let obsSerial = 0; // running point number for the "#" column
 
       /**
        * Recolour every text run in the given row to white (#FFFFFF) so
@@ -5596,9 +5819,48 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         (tblXml: string) => {
           if (!tblXml.includes("GPS LOCATION")) return tblXml;
           obsTablesRestyled += 1;
+          obsSerial += 1;
 
-          // 1. Replace <w:tblGrid>...</w:tblGrid> with our 6-col grid.
+          // 0. Inject a leading "#" serial-number column so each point is
+          //    numbered like the website's point list. The header (1st) row
+          //    gets a white "#" label; the data (2nd) row gets this point's
+          //    running number. Both clone the existing first cell's <w:tcPr>
+          //    (so they inherit the difficulty shading + borders), only the
+          //    width and the text differ. Only the standard 6-column header
+          //    and data rows are touched; any other row (e.g. a photo row) is
+          //    left alone.
+          let injected = 0;
           let out = tblXml.replace(
+            /<w:tr\b[\s\S]*?<\/w:tr>/g,
+            (trXml: string) => {
+              if (injected >= 2) return trXml;
+              const cells = trXml.match(/<w:tc\b[\s\S]*?<\/w:tc>/g);
+              if (!cells || cells.length !== 6) return trXml;
+              const firstCell = cells[0];
+              const tcPrMatch = firstCell.match(/<w:tcPr>[\s\S]*?<\/w:tcPr>/);
+              let newTcPr: string;
+              if (tcPrMatch) {
+                newTcPr = tcPrMatch[0];
+                const widthXml = `<w:tcW w:w="${SERIAL_COL_DXA}" w:type="dxa"/>`;
+                newTcPr = newTcPr.includes("<w:tcW")
+                  ? newTcPr.replace(/<w:tcW\b[^/]*\/>/, widthXml)
+                  : newTcPr.replace("<w:tcPr>", `<w:tcPr>${widthXml}`);
+              } else {
+                const shd = (firstCell.match(/<w:shd\b[^>]*\/>/) || [""])[0];
+                newTcPr = `<w:tcPr><w:tcW w:w="${SERIAL_COL_DXA}" w:type="dxa"/>${shd}</w:tcPr>`;
+              }
+              const isHeaderRow = injected === 0;
+              const para = isHeaderRow
+                ? `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/><w:color w:val="FFFFFF"/></w:rPr><w:t>#</w:t></w:r></w:p>`
+                : `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>${obsSerial}</w:t></w:r></w:p>`;
+              const serialCell = `<w:tc>${newTcPr}${para}</w:tc>`;
+              injected += 1;
+              return trXml.replace(firstCell, serialCell + firstCell);
+            }
+          );
+
+          // 1. Replace <w:tblGrid>...</w:tblGrid> with our 7-col grid.
+          out = out.replace(
             /<w:tblGrid>[\s\S]*?<\/w:tblGrid>/,
             OBS_GRID_XML
           );
