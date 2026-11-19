@@ -29,8 +29,6 @@ function isUnauthorizedError(e: unknown) {
 
 // ---- Query parsing -------------------------------------------------------
 
-// Words that carry no place meaning in a query like
-// "i need reports for chennai to bangalore".
 const STOPWORDS = new Set([
   "i", "need", "want", "reports", "report", "for", "the", "a", "an", "of",
   "route", "routes", "show", "me", "find", "get", "give", "please", "road",
@@ -38,7 +36,6 @@ const STOPWORDS = new Set([
   "which", "what", "where", "has", "map", "between", "from", "near", "around",
 ]);
 
-// Split a query into route endpoints when it reads like "X to Y".
 function splitEndpoints(raw: string): { from: string; to: string } | null {
   const seps = [" to ", " - ", " – ", " — ", " → ", "->", " towards ", " till "];
   const lower = raw.toLowerCase();
@@ -53,13 +50,8 @@ function splitEndpoints(raw: string): { from: string; to: string } | null {
   return null;
 }
 
-// Strip leading filler ("i need reports for chennai") down to the place part.
 function cleanPlace(s: string): string {
-  const words = s
-    .split(/\s+/)
-    .map((w) => w.trim())
-    .filter(Boolean);
-  // Drop leading stopwords only (keep internal words so "new delhi" survives).
+  const words = s.split(/\s+/).map((w) => w.trim()).filter(Boolean);
   while (words.length && STOPWORDS.has(words[0].toLowerCase())) words.shift();
   while (words.length && STOPWORDS.has(words[words.length - 1].toLowerCase())) words.pop();
   return words.join(" ").trim();
@@ -73,8 +65,6 @@ function placeTokens(s: string): string[] {
     .filter((w) => w.length >= 2 && !STOPWORDS.has(w));
 }
 
-// Does `place` (e.g. "new delhi") appear inside `text`? Match the whole
-// phrase first, then fall back to "all words present".
 function placeInText(place: string, text: string): boolean {
   if (!place || !text) return false;
   const p = place.toLowerCase().trim();
@@ -86,7 +76,11 @@ function placeInText(place: string, text: string): boolean {
   return words.every((w) => t.includes(w));
 }
 
-// ---- Place-name labelling (compact form of summaryRouteMap.parseLocation) --
+function titleCase(s: string): string {
+  return s.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// ---- Place-name labelling ------------------------------------------------
 
 const INDIAN_STATES = new Set([
   "andhra pradesh", "arunachal pradesh", "assam", "bihar", "chhattisgarh",
@@ -105,13 +99,13 @@ function placeLabel(value: unknown): string {
   const cleaned = parts.filter((p) => !/^\d{4,6}$/.test(p) && p.toLowerCase() !== "india");
   const first = cleaned[0] || parts[0] || "";
   const state = cleaned.find((p) => INDIAN_STATES.has(p.toLowerCase())) || "";
-  if (first && state && first.toLowerCase() !== state.toLowerCase()) {
-    return `${first}, ${state}`;
-  }
+  if (first && state && first.toLowerCase() !== state.toLowerCase()) return `${first}, ${state}`;
   return first || state;
 }
 
-function bestLoc(r: Record<string, unknown>): string {
+type Pt = Record<string, unknown>;
+
+function bestLoc(r: Pt): string {
   return (
     String(r.resolved_location || "").trim() ||
     String(r.location || "").trim() ||
@@ -119,6 +113,13 @@ function bestLoc(r: Record<string, unknown>): string {
     String((r as any).location_name || "").trim() ||
     ""
   );
+}
+
+function coordOf(r: Pt): { lat: number; lng: number } | null {
+  const lat = Number(r.latitude ?? r.loc_lat);
+  const lng = Number(r.longitude ?? r.loc_lon);
+  if (Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0)) return { lat, lng };
+  return null;
 }
 
 function diffBucket(value: unknown): "red" | "amber" | "green" | "" {
@@ -130,7 +131,69 @@ function diffBucket(value: unknown): "red" | "amber" | "green" | "" {
   return "";
 }
 
-type ProjectHit = {
+// ---- Geometry (offline corridor test, km) --------------------------------
+
+const DEG_KM = 111;
+
+function haversineKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const x =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(x)));
+}
+
+// Project point P onto corridor A→B. Returns t (0=at A, 1=at B) and the
+// perpendicular distance in km.
+function projectOnCorridor(
+  A: { lat: number; lng: number },
+  B: { lat: number; lng: number },
+  P: { lat: number; lng: number }
+): { t: number; dist: number } {
+  const lat0 = (A.lat + B.lat) / 2;
+  const kx = Math.cos((lat0 * Math.PI) / 180) * DEG_KM;
+  const Bx = (B.lng - A.lng) * kx;
+  const By = (B.lat - A.lat) * DEG_KM;
+  const Px = (P.lng - A.lng) * kx;
+  const Py = (P.lat - A.lat) * DEG_KM;
+  const len2 = Bx * Bx + By * By;
+  if (len2 === 0) return { t: 0, dist: Math.hypot(Px, Py) };
+  const t = (Px * Bx + Py * By) / len2;
+  const perpX = Px - t * Bx;
+  const perpY = Py - t * By;
+  return { t, dist: Math.hypot(perpX, perpY) };
+}
+
+const BUFFER_KM = 60; // how far off the straight A→B line a point can sit
+// (generous, because real roads bend away from the straight line — e.g. the
+// Bangalore–Chennai highway dips ~50 km south at Krishnagiri. Over-inclusion is
+// safe here: the user un-ticks any wrong report before combining.)
+const COVER_FRACTION = 0.5; // share of a report's points that must be on-route
+
+// ---- Types returned ------------------------------------------------------
+
+type Segment = {
+  id: string;
+  name: string;
+  source: string | null;
+  status: string | null;
+  from: string;
+  to: string;
+  points: number;
+  onRoutePoints: number;
+  tStart: number;
+  tEnd: number;
+  coveragePct: number;
+  years: string;
+  red: number;
+};
+
+type Gap = { pctStart: number; pctEnd: number; fromLabel: string; toLabel: string };
+
+type SmartHit = {
   id: string;
   name: string;
   source: string | null;
@@ -148,14 +211,49 @@ type ProjectHit = {
   summaryLine: string;
 };
 
+// ---- Per-project rollups (labels, years, difficulty) ---------------------
+
+function projectRollup(pts: Pt[]) {
+  const usable = pts.filter((r) => String(r.point_key || "") !== "__NO_GPS__");
+  const first = usable[0];
+  const last = usable[usable.length - 1];
+  const from = (first && placeLabel(bestLoc(first))) || "";
+  const to = (last && placeLabel(bestLoc(last))) || "";
+  let red = 0, amber = 0, green = 0;
+  const years = new Set<string>();
+  const catCount = new Map<string, number>();
+  const redCatCount = new Map<string, number>();
+  for (const r of usable) {
+    const b = diffBucket(r.difficulty);
+    if (b === "red") red++;
+    else if (b === "amber") amber++;
+    else if (b === "green") green++;
+    const cat = String(r.category || "").trim();
+    if (cat && !/^unknown$/i.test(cat)) {
+      catCount.set(cat, (catCount.get(cat) || 0) + 1);
+      if (b === "red") redCatCount.set(cat, (redCatCount.get(cat) || 0) + 1);
+    }
+    const d = r.created_at ? new Date(String(r.created_at)) : null;
+    if (d && !isNaN(d.getTime())) years.add(String(d.getFullYear()));
+  }
+  const keyObstacles = Array.from(
+    new Set([
+      ...Array.from(redCatCount.entries()).sort((a, b) => b[1] - a[1]).map((e) => e[0]),
+      ...Array.from(catCount.entries()).sort((a, b) => b[1] - a[1]).map((e) => e[0]),
+    ])
+  ).slice(0, 4);
+  const yl = Array.from(years).sort();
+  const yearStr = yl.length ? (yl.length === 1 ? yl[0] : `${yl[0]}–${yl[yl.length - 1]}`) : "";
+  return { usable, from, to, red, amber, green, keyObstacles, yearStr };
+}
+
 export async function GET(request: Request) {
   try {
     requireAuth(request);
-
     const url = new URL(request.url);
     const q = String(url.searchParams.get("q") || "").trim();
     if (!q || q.length < 2) {
-      return Response.json({ query: q, results: [], hint: "Type a place or a route like “Chennai to Bangalore”." });
+      return Response.json({ query: q, mode: "simple", results: [], hint: "Type a place or a route like “Chennai to Bangalore”." });
     }
 
     const projCols = await getColumns("projects");
@@ -164,147 +262,143 @@ export async function GET(request: Request) {
     const endpoints = splitEndpoints(q);
     const fromText = endpoints?.from || "";
     const toText = endpoints?.to || "";
-    // Every place token we care about (for free-text and candidate finding).
     const allTokens = Array.from(
-      new Set([
-        ...placeTokens(endpoints ? `${fromText} ${toText}` : cleanPlace(q)),
-      ])
+      new Set(placeTokens(endpoints ? `${fromText} ${toText}` : cleanPlace(q)))
     );
     if (!allTokens.length) {
-      return Response.json({ query: q, results: [], hint: "Could not find a place name in that. Try “Chennai to Bangalore”." });
+      return Response.json({ query: q, mode: "simple", results: [], hint: "Could not find a place name in that. Try “Chennai to Bangalore”." });
     }
 
-    // ---- 1. Load all live projects (exclude recycle bin only; keep finished
-    // so old/closed routes are still findable).
-    const pSelCols = [
-      "id", "name", "title", "project_name", "location", "description",
-      "client_name", "source", "status", "created_at",
-    ].filter((c) => has(projCols, c));
-    if (!pSelCols.includes("id")) {
-      return Response.json({ error: "Projects table has no id column" }, { status: 500 });
-    }
-    const pWhere: string[] = [];
-    if (has(projCols, "deleted_at")) pWhere.push("deleted_at IS NULL");
-    const [pRows] = await pool.query(
-      `SELECT ${pSelCols.join(", ")} FROM projects${pWhere.length ? ` WHERE ${pWhere.join(" AND ")}` : ""}`
-    );
-    const projects = (Array.isArray(pRows) ? pRows : []) as Record<string, unknown>[];
-    if (!projects.length) return Response.json({ query: q, results: [] });
-
-    const projById = new Map<string, Record<string, unknown>>();
+    // ---- Load all live projects.
+    const pSelCols = ["id", "name", "title", "project_name", "location", "description", "client_name", "source", "status", "created_at"]
+      .filter((c) => has(projCols, c));
+    if (!pSelCols.includes("id")) return Response.json({ error: "Projects table has no id column" }, { status: 500 });
+    const pWhere = has(projCols, "deleted_at") ? " WHERE deleted_at IS NULL" : "";
+    const [pRows] = await pool.query(`SELECT ${pSelCols.join(", ")} FROM projects${pWhere}`);
+    const projects = (Array.isArray(pRows) ? pRows : []) as Pt[];
+    if (!projects.length) return Response.json({ query: q, mode: "simple", results: [] });
+    const projById = new Map<string, Pt>();
     for (const p of projects) projById.set(String(p.id), p);
 
-    // ---- 2. Find candidate projects whose POINTS mention any token.
-    const repTextCols = [
-      "location", "resolved_location", "address", "location_name", "point_key",
-    ].filter((c) => has(repCols, c));
-    const candidateIds = new Set<string>();
-
-    if (repTextCols.length && has(repCols, "project_id")) {
-      const likeClauses: string[] = [];
-      const likeArgs: unknown[] = [];
-      for (const tok of allTokens) {
-        for (const col of repTextCols) {
-          likeClauses.push(`LOWER(${col}) LIKE ?`);
-          likeArgs.push(`%${tok}%`);
-        }
-      }
-      if (likeClauses.length) {
-        const [cRows] = await pool.query(
-          `SELECT DISTINCT project_id FROM reports WHERE ${likeClauses.join(" OR ")}`,
-          likeArgs
-        );
-        for (const r of Array.isArray(cRows) ? cRows : []) {
-          const pid = String((r as { project_id?: unknown }).project_id || "").trim();
-          if (pid && projById.has(pid)) candidateIds.add(pid);
-        }
-      }
-    }
-
-    // Projects whose OWN fields (name / location) match a token are candidates too.
-    for (const p of projects) {
-      const hay = [
-        p.name, p.title, p.project_name, p.location, p.description, p.client_name,
-      ]
-        .map((x) => String(x ?? "").toLowerCase())
-        .join(" | ");
-      if (allTokens.some((t) => hay.includes(t))) candidateIds.add(String(p.id));
-    }
-
-    if (!candidateIds.size) return Response.json({ query: q, results: [] });
-
-    // ---- 3. Pull the points of candidate projects (one query) for summaries.
-    const repSelCols = [
-      "project_id", "location", "resolved_location", "address", "location_name",
-      "category", "difficulty", "remarks_action", "description", "point_key",
-      "sort_order", "created_at",
-    ].filter((c) => has(repCols, c));
-    const idList = Array.from(candidateIds);
-    const placeholders = idList.map(() => "?").join(",");
-    const orderParts: string[] = ["project_id"];
-    if (has(repCols, "sort_order")) orderParts.push("sort_order");
-    if (has(repCols, "created_at")) orderParts.push("created_at");
-    const [rRows] = await pool.query(
-      `SELECT ${repSelCols.join(", ")} FROM reports WHERE project_id IN (${placeholders}) ORDER BY ${orderParts.join(", ")}`,
-      idList
-    );
-    const reports = (Array.isArray(rRows) ? rRows : []) as Record<string, unknown>[];
-    const byProject = new Map<string, Record<string, unknown>[]>();
+    // ---- Load the points of all live projects (one query).
+    const rSelCols = ["project_id", "location", "resolved_location", "address", "location_name",
+      "category", "difficulty", "point_key", "latitude", "longitude", "loc_lat", "loc_lon", "sort_order", "created_at"]
+      .filter((c) => has(repCols, c));
+    const orderParts = ["project_id", ...(has(repCols, "sort_order") ? ["sort_order"] : []), ...(has(repCols, "created_at") ? ["created_at"] : [])];
+    const [rRows] = await pool.query(`SELECT ${rSelCols.join(", ")} FROM reports ORDER BY ${orderParts.join(", ")}`);
+    const reports = (Array.isArray(rRows) ? rRows : []) as Pt[];
+    const byProject = new Map<string, Pt[]>();
     for (const r of reports) {
       const pid = String(r.project_id || "").trim();
-      if (!pid) continue;
+      if (!pid || !projById.has(pid)) continue;
       if (!byProject.has(pid)) byProject.set(pid, []);
       byProject.get(pid)!.push(r);
     }
 
-    // ---- 4. Score + summarise each candidate.
-    const hits: ProjectHit[] = [];
-    for (const pid of candidateIds) {
-      const p = projById.get(pid)!;
-      const pts = (byProject.get(pid) || []).filter(
-        (r) => String(r.point_key || "") !== "__NO_GPS__"
-      );
-      const name = String(p.name || p.title || p.project_name || "Untitled Project");
-
-      const first = pts[0];
-      const last = pts[pts.length - 1];
-      const fromLabel = (first && placeLabel(bestLoc(first))) || "";
-      const toLabel = (last && placeLabel(bestLoc(last))) || "";
-
-      // All place text for this project (name + location + every point).
-      const projFieldText = [p.name, p.title, p.project_name, p.location, p.description]
-        .map((x) => String(x ?? ""))
-        .join(" | ");
-      const pointText = pts.map((r) => bestLoc(r)).join(" | ");
-      const allText = `${projFieldText} | ${pointText}`;
-
-      // Difficulty + category rollups.
-      let red = 0, amber = 0, green = 0;
-      const catCount = new Map<string, number>();
-      const redCatCount = new Map<string, number>();
-      const years = new Set<string>();
-      for (const r of pts) {
-        const b = diffBucket(r.difficulty);
-        if (b === "red") red++;
-        else if (b === "amber") amber++;
-        else if (b === "green") green++;
-        const cat = String(r.category || "").trim();
-        if (cat && !/^unknown$/i.test(cat)) {
-          catCount.set(cat, (catCount.get(cat) || 0) + 1);
-          if (b === "red") redCatCount.set(cat, (redCatCount.get(cat) || 0) + 1);
+    // ===== Route-coverage mode (needs two endpoints we can locate on the map) =====
+    if (endpoints) {
+      const anchor = (text: string): { lat: number; lng: number } | null => {
+        let sumLat = 0, sumLng = 0, n = 0;
+        for (const r of reports) {
+          const c = coordOf(r);
+          if (!c) continue;
+          if (placeInText(text, bestLoc(r))) { sumLat += c.lat; sumLng += c.lng; n++; }
         }
-        const d = r.created_at ? new Date(String(r.created_at)) : null;
-        if (d && !isNaN(d.getTime())) years.add(String(d.getFullYear()));
-      }
-      // Key obstacles: red categories first, then most common overall.
-      const keyObstacles = Array.from(
-        new Set([
-          ...Array.from(redCatCount.entries()).sort((a, b) => b[1] - a[1]).map((e) => e[0]),
-          ...Array.from(catCount.entries()).sort((a, b) => b[1] - a[1]).map((e) => e[0]),
-        ])
-      ).slice(0, 4);
+        return n ? { lat: sumLat / n, lng: sumLng / n } : null;
+      };
+      const A = anchor(fromText);
+      const B = anchor(toText);
 
-      // ---- scoring
+      if (A && B && haversineKm(A, B) > 1) {
+        const segments: Segment[] = [];
+        for (const [pid, pts] of byProject) {
+          const roll = projectRollup(pts);
+          const coords = roll.usable.map((r) => ({ r, c: coordOf(r) })).filter((x) => x.c) as { r: Pt; c: { lat: number; lng: number } }[];
+          if (coords.length < 2) continue;
+          let tMin = Infinity, tMax = -Infinity, onRoute = 0;
+          for (const { c } of coords) {
+            const { t, dist } = projectOnCorridor(A, B, c);
+            if (dist <= BUFFER_KM && t >= -0.05 && t <= 1.05) {
+              onRoute++;
+              if (t < tMin) tMin = t;
+              if (t > tMax) tMax = t;
+            }
+          }
+          const frac = onRoute / coords.length;
+          if (onRoute < 2 || frac < COVER_FRACTION) continue;
+          const tStart = Math.max(0, Math.min(1, tMin));
+          const tEnd = Math.max(0, Math.min(1, tMax));
+          if (tEnd - tStart < 0.01) continue;
+          const p = projById.get(pid)!;
+          segments.push({
+            id: pid,
+            name: String(p.name || p.title || p.project_name || "Untitled Project"),
+            source: (p.source as string) ?? null,
+            status: (p.status as string) ?? null,
+            from: roll.from, to: roll.to,
+            points: roll.usable.length,
+            onRoutePoints: onRoute,
+            tStart, tEnd,
+            coveragePct: Math.round((tEnd - tStart) * 100),
+            years: roll.yearStr, red: roll.red,
+          });
+        }
+
+        if (segments.length) {
+          segments.sort((a, b) => a.tStart - b.tStart || b.tEnd - a.tEnd);
+
+          // Merge covered intervals → find gaps on [0,1].
+          const merged: [number, number][] = [];
+          for (const s of [...segments].sort((a, b) => a.tStart - b.tStart)) {
+            if (!merged.length || s.tStart > merged[merged.length - 1][1] + 0.001) merged.push([s.tStart, s.tEnd]);
+            else merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], s.tEnd);
+          }
+          const fromLabel = titleCase(fromText);
+          const toLabel = titleCase(toText);
+          const anchors: { t: number; label: string }[] = [{ t: 0, label: fromLabel }, { t: 1, label: toLabel }];
+          for (const s of segments) {
+            if (s.from) anchors.push({ t: s.tStart, label: s.from });
+            if (s.to) anchors.push({ t: s.tEnd, label: s.to });
+          }
+          anchors.sort((a, b) => a.t - b.t);
+          const labelBefore = (t: number) => { let L = fromLabel; for (const a of anchors) if (a.t <= t + 0.02 && a.label) L = a.label; return L; };
+          const labelAfter = (t: number) => { for (const a of anchors) if (a.t >= t - 0.02 && a.label) return a.label; return toLabel; };
+
+          const gaps: Gap[] = [];
+          let cursor = 0;
+          for (const [s0, s1] of merged) {
+            if (s0 - cursor > 0.04) gaps.push({ pctStart: Math.round(cursor * 100), pctEnd: Math.round(s0 * 100), fromLabel: labelBefore(cursor), toLabel: labelAfter(s0) });
+            cursor = Math.max(cursor, s1);
+          }
+          if (1 - cursor > 0.04) gaps.push({ pctStart: Math.round(cursor * 100), pctEnd: 100, fromLabel: labelBefore(cursor), toLabel: toLabel });
+
+          const coveredPct = Math.round(merged.reduce((s, [a, b]) => s + (b - a), 0) * 100);
+
+          return Response.json({
+            query: q,
+            mode: "coverage",
+            from: fromText, to: toText,
+            corridor: { from: { label: fromLabel, lat: A.lat, lng: A.lng }, to: { label: toLabel, lat: B.lat, lng: B.lng }, km: Math.round(haversineKm(A, B)) },
+            coveredPct,
+            segments,
+            gaps,
+          });
+        }
+      }
+      // else: fall through to simple text search below (couldn't locate the
+      // endpoints on the map, or nothing lies along the corridor).
+    }
+
+    // ===== Simple text search (single place, or route we couldn't map) =====
+    const hits: SmartHit[] = [];
+    for (const [pid, pts] of byProject) {
+      const p = projById.get(pid)!;
+      const roll = projectRollup(pts);
+      const name = String(p.name || p.title || p.project_name || "Untitled Project");
+      const projFieldText = [p.name, p.title, p.project_name, p.location, p.description].map((x) => String(x ?? "")).join(" | ");
+      const pointText = roll.usable.map((r) => bestLoc(r)).join(" | ");
+      const allText = `${projFieldText} | ${pointText}`.toLowerCase();
+
       let score = 0;
       const matchedPlaces: string[] = [];
       if (endpoints) {
@@ -312,75 +406,30 @@ export async function GET(request: Request) {
         const toHit = placeInText(toText, allText);
         if (fromHit) matchedPlaces.push(fromText);
         if (toHit) matchedPlaces.push(toText);
-        if (fromHit && toHit) {
-          score += 100;
-          // Direction bonus: "from" shows up near the start, "to" near the end.
-          const headText = pts.slice(0, Math.max(1, Math.ceil(pts.length * 0.3)))
-            .map((r) => bestLoc(r)).join(" | ") + " | " + projFieldText;
-          const tailText = pts.slice(Math.floor(pts.length * 0.7))
-            .map((r) => bestLoc(r)).join(" | ") + " | " + projFieldText;
-          if (placeInText(fromText, headText) && placeInText(toText, tailText)) score += 25;
-        } else if (fromHit || toHit) {
-          score += 40;
-        }
+        if (fromHit && toHit) score += 100;
+        else if (fromHit || toHit) score += 40;
       } else {
         let matched = 0;
-        for (const tok of allTokens) {
-          if (allText.toLowerCase().includes(tok)) {
-            matched++;
-            matchedPlaces.push(tok);
-          }
-        }
+        for (const tok of allTokens) if (allText.includes(tok)) { matched++; matchedPlaces.push(tok); }
         score += allTokens.length ? Math.round((matched / allTokens.length) * 100) : 0;
       }
-      // Whole-query substring in the project name is a strong signal.
       if (name.toLowerCase().includes(q.toLowerCase())) score += 30;
       if (score <= 0) continue;
 
-      const yearList = Array.from(years).sort();
-      const yearStr = yearList.length
-        ? yearList.length === 1
-          ? yearList[0]
-          : `${yearList[0]}–${yearList[yearList.length - 1]}`
-        : "";
-
-      const routeStr = fromLabel && toLabel ? `${fromLabel} → ${toLabel}` : fromLabel || toLabel || name;
-      const summaryLine = [
-        routeStr,
-        `${pts.length} point${pts.length === 1 ? "" : "s"}`,
-        yearStr,
-        red ? `${red} difficult` : "",
-      ].filter(Boolean).join(" · ");
-
+      const routeStr = roll.from && roll.to ? `${roll.from} → ${roll.to}` : roll.from || roll.to || name;
+      const summaryLine = [routeStr, `${roll.usable.length} point${roll.usable.length === 1 ? "" : "s"}`, roll.yearStr, roll.red ? `${roll.red} difficult` : ""].filter(Boolean).join(" · ");
       hits.push({
-        id: pid,
-        name,
-        source: (p.source as string) ?? null,
-        status: (p.status as string) ?? null,
-        from: fromLabel,
-        to: toLabel,
-        points: pts.length,
-        years: yearStr,
-        red, amber, green,
-        keyObstacles,
-        matchedPlaces: Array.from(new Set(matchedPlaces)),
-        score,
-        summaryLine,
+        id: pid, name, source: (p.source as string) ?? null, status: (p.status as string) ?? null,
+        from: roll.from, to: roll.to, points: roll.usable.length, years: roll.yearStr,
+        red: roll.red, amber: roll.amber, green: roll.green, keyObstacles: roll.keyObstacles,
+        matchedPlaces: Array.from(new Set(matchedPlaces)), score, summaryLine,
       });
     }
-
     hits.sort((a, b) => b.score - a.score || b.points - a.points);
 
-    return Response.json({
-      query: q,
-      from: fromText || null,
-      to: toText || null,
-      results: hits.slice(0, 25),
-    });
+    return Response.json({ query: q, mode: "simple", from: fromText || null, to: toText || null, results: hits.slice(0, 25) });
   } catch (error) {
-    if (isUnauthorizedError(error)) {
-      return Response.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    if (isUnauthorizedError(error)) return Response.json({ error: "Unauthorized" }, { status: 401 });
     console.error("[api/search] GET error:", error);
     return Response.json({ error: "Search failed" }, { status: 500 });
   }

@@ -41,6 +41,30 @@ type SmartHit = {
   summaryLine: string;
 };
 
+// Route-coverage mode: a report that covers part of the searched corridor.
+type SmartSegment = {
+  id: string;
+  name: string;
+  source?: string | null;
+  status?: string | null;
+  from: string;
+  to: string;
+  points: number;
+  onRoutePoints: number;
+  tStart: number;
+  tEnd: number;
+  coveragePct: number;
+  years: string;
+  red: number;
+};
+// A stretch of the corridor with no survey yet.
+type SmartGap = { pctStart: number; pctEnd: number; fromLabel: string; toLabel: string };
+type SmartCorridor = {
+  from: { label: string; lat: number; lng: number };
+  to: { label: string; lat: number; lng: number };
+  km: number;
+};
+
 type ParsedPointRow = {
   point_key: string;
   latitude: number | null;
@@ -964,6 +988,15 @@ export default function ProjectsPage() {
   const [smartLoading, setSmartLoading] = useState(false);
   const [smartError, setSmartError] = useState<string | null>(null);
   const [smartSearched, setSmartSearched] = useState(false);
+  // Route-coverage mode (parts of a long route + combine into a new report).
+  const [smartMode, setSmartMode] = useState<"simple" | "coverage">("simple");
+  const [smartCorridor, setSmartCorridor] = useState<SmartCorridor | null>(null);
+  const [smartSegments, setSmartSegments] = useState<SmartSegment[]>([]);
+  const [smartGaps, setSmartGaps] = useState<SmartGap[]>([]);
+  const [smartCoveredPct, setSmartCoveredPct] = useState(0);
+  const [segSelected, setSegSelected] = useState<Record<string, boolean>>({});
+  const [combineRouteName, setCombineRouteName] = useState("");
+  const [combiningRoute, setCombiningRoute] = useState(false);
 
   const [lastModifiedMap, setLastModifiedMap] = useState<Record<string, string>>({});
 
@@ -1288,11 +1321,34 @@ export default function ProjectsPage() {
       });
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(data?.error || "Search failed");
-      setSmartResults(Array.isArray(data?.results) ? data.results : []);
+      if (data?.mode === "coverage") {
+        const segs: SmartSegment[] = Array.isArray(data?.segments) ? data.segments : [];
+        setSmartMode("coverage");
+        setSmartCorridor(data?.corridor || null);
+        setSmartSegments(segs);
+        setSmartGaps(Array.isArray(data?.gaps) ? data.gaps : []);
+        setSmartCoveredPct(Number(data?.coveredPct) || 0);
+        setSmartResults([]);
+        // Pre-select every covering report; prefill the combined name.
+        const sel: Record<string, boolean> = {};
+        segs.forEach((s) => (sel[s.id] = true));
+        setSegSelected(sel);
+        const cf = data?.corridor?.from?.label || data?.from || "";
+        const ct = data?.corridor?.to?.label || data?.to || "";
+        setCombineRouteName(cf && ct ? `${cf} to ${ct}` : "");
+      } else {
+        setSmartMode("simple");
+        setSmartResults(Array.isArray(data?.results) ? data.results : []);
+        setSmartCorridor(null);
+        setSmartSegments([]);
+        setSmartGaps([]);
+      }
       setSmartSearched(true);
     } catch (e) {
       setSmartError(e instanceof Error ? e.message : "Search failed");
       setSmartResults([]);
+      setSmartSegments([]);
+      setSmartCorridor(null);
       setSmartSearched(true);
     } finally {
       setSmartLoading(false);
@@ -1304,6 +1360,43 @@ export default function ProjectsPage() {
     setSmartResults([]);
     setSmartSearched(false);
     setSmartError(null);
+    setSmartMode("simple");
+    setSmartCorridor(null);
+    setSmartSegments([]);
+    setSmartGaps([]);
+    setSegSelected({});
+    setCombineRouteName("");
+  };
+
+  // Combine the ticked covering reports (in route order) into one new report.
+  const combineRouteSegments = async () => {
+    const ordered = smartSegments.filter((s) => segSelected[s.id]).map((s) => s.id);
+    if (ordered.length < 2) {
+      setSmartError("Tick at least 2 reports to combine into a new route.");
+      return;
+    }
+    const name = combineRouteName.trim();
+    if (!name) {
+      setSmartError("Give the new combined report a name.");
+      return;
+    }
+    setCombiningRoute(true);
+    setSmartError(null);
+    try {
+      const res = await fetch("/api/projects/combine", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ sourceProjectIds: ordered, name }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok || !data?.ok) throw new Error(data?.error || "Combine failed");
+      router.push(`/projects/${data.projectId}`);
+    } catch (e) {
+      setSmartError(e instanceof Error ? e.message : "Combine failed");
+    } finally {
+      setCombiningRoute(false);
+    }
   };
 
   // ---- Combine projects ----
@@ -2871,10 +2964,167 @@ export default function ProjectsPage() {
           ) : null}
         </div>
 
-        {smartError ? (
-          <div style={styles.smartError}>{smartError}</div>
-        ) : smartLoading ? (
+        {smartError ? <div style={styles.smartError}>{smartError}</div> : null}
+
+        {smartLoading ? (
           <div style={styles.smartState}>Looking through your reports…</div>
+        ) : smartMode === "coverage" ? (
+          <div style={styles.smartResults}>
+            <div style={styles.smartResultsCount}>
+              {smartCorridor ? `${smartCorridor.from.label} → ${smartCorridor.to.label}` : "Route coverage"}
+              {smartCorridor?.km ? ` · ~${smartCorridor.km} km` : ""} · {smartCoveredPct}% covered by{" "}
+              {smartSegments.length} report{smartSegments.length === 1 ? "" : "s"}
+            </div>
+
+            {/* Coverage bar: green = surveyed, red background = gap */}
+            <div
+              style={{
+                position: "relative",
+                height: 14,
+                borderRadius: 999,
+                background: "#FEE4E2",
+                overflow: "hidden",
+                border: "1px solid #FECACA",
+              }}
+            >
+              {smartSegments.map((s) => (
+                <div
+                  key={s.id}
+                  title={`${s.from} → ${s.to}`}
+                  style={{
+                    position: "absolute",
+                    left: `${s.tStart * 100}%`,
+                    width: `${Math.max(1, (s.tEnd - s.tStart) * 100)}%`,
+                    top: 0,
+                    bottom: 0,
+                    background: "#6CE9A6",
+                  }}
+                />
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontWeight: 700, color: "#6B7280" }}>
+              <span>{smartCorridor?.from.label}</span>
+              <span style={{ color: "#B42318" }}>red = no survey yet</span>
+              <span>{smartCorridor?.to.label}</span>
+            </div>
+
+            {/* Covering reports, in route order, each selectable */}
+            {smartSegments.map((s) => {
+              const checked = !!segSelected[s.id];
+              const isImported = s.source === "imported";
+              return (
+                <div key={s.id} style={styles.smartResult}>
+                  <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flex: 1, minWidth: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => setSegSelected((m) => ({ ...m, [s.id]: e.target.checked }))}
+                      style={{ marginTop: 4, width: 16, height: 16, cursor: "pointer" }}
+                    />
+                    <div style={styles.smartResultMain}>
+                      <div style={styles.smartRoute}>{s.from && s.to ? `${s.from} → ${s.to}` : s.name}</div>
+                      <div style={styles.smartResultName}>{s.name}</div>
+                      <div style={styles.smartSummaryLine}>
+                        covers ~{s.coveragePct}% of the route · {s.points} point{s.points === 1 ? "" : "s"}
+                        {s.years ? ` · ${s.years}` : ""}
+                        {s.red ? ` · ${s.red} difficult` : ""}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={styles.smartResultSide}>
+                    {isImported ? (
+                      <span style={{ ...styles.smartTag, background: "#FEF3C7", color: "#92400E" }}>📄 Imported</span>
+                    ) : (
+                      <span style={{ ...styles.smartTag, background: "#DCFCE7", color: "#166534" }}>📱 App</span>
+                    )}
+                    <span
+                      style={styles.smartOpenBtn}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => router.push(`/projects/${s.id}`)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          router.push(`/projects/${s.id}`);
+                        }
+                      }}
+                    >
+                      Open →
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Gaps that still need a new survey */}
+            {smartGaps.length ? (
+              <div style={{ display: "grid", gap: 6 }}>
+                {smartGaps.map((g, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      padding: "8px 12px",
+                      borderRadius: 10,
+                      background: "#FEF3F2",
+                      border: "1px solid #FECACA",
+                      fontSize: 13,
+                      color: "#B42318",
+                      fontWeight: 700,
+                    }}
+                  >
+                    ⚠ No survey yet: {g.fromLabel} → {g.toLabel}
+                    <span style={{ color: "#98A2B3", fontWeight: 600 }}>
+                      (~{g.pctStart}–{g.pctEnd}% of the route — needs a new survey)
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#067647" }}>
+                ✓ The whole route is covered by existing reports.
+              </div>
+            )}
+
+            {/* Combine the ticked reports into one new report */}
+            {smartSegments.length >= 2 ? (
+              <>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    marginTop: 4,
+                    paddingTop: 10,
+                    borderTop: "1px solid #E5E7EB",
+                  }}
+                >
+                  <input
+                    value={combineRouteName}
+                    onChange={(e) => setCombineRouteName(e.target.value)}
+                    placeholder="New combined report name"
+                    style={{ ...styles.smartInput, minWidth: 200 }}
+                  />
+                  <button
+                    onClick={combineRouteSegments}
+                    disabled={combiningRoute}
+                    style={{ ...styles.smartBtn, opacity: combiningRoute ? 0.7 : 1 }}
+                  >
+                    {combiningRoute
+                      ? "Combining…"
+                      : `Combine ${smartSegments.filter((s) => segSelected[s.id]).length} selected → new report`}
+                  </button>
+                </div>
+                <div style={{ fontSize: 12, color: "#6B7280" }}>
+                  Combining copies the ticked reports (in route order) into one new report with continuous KM. Any gaps above still need a fresh survey.
+                </div>
+              </>
+            ) : null}
+          </div>
         ) : smartSearched && smartResults.length === 0 ? (
           <div style={styles.smartState}>
             No reports found for that route. Try a different place name or spelling.
