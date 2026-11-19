@@ -16,7 +16,17 @@ type ReportPoint = {
   location: string;
   state: string;
   difficulty: "green" | "yellow" | "red" | "";
+  date: string; // survey date shown on the pin (e.g. "16 Oct 2026"); "" if none
 };
+
+// Format a report's created_at into a short survey date for the map pins.
+function fmtPointDate(raw: unknown): string {
+  if (!raw) return "";
+  const d = new Date(String(raw));
+  if (isNaN(d.getTime())) return "";
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${String(d.getDate()).padStart(2, "0")} ${months[d.getMonth()]} ${d.getFullYear()}`;
+}
 
 // Normalise a report's route-difficulty into green / yellow / red / "" (not set),
 // matching the project page's Difficulty filter.
@@ -709,6 +719,7 @@ export default function RouteMapPage() {
               r.resolved_location || r.location || r.location_name || r.address
             ),
             difficulty: normDiff(r.difficulty ?? r.vehicle_movement),
+            date: fmtPointDate(r.created_at ?? r.createdAt ?? r.created),
           });
         }
         setPoints(pts);
@@ -1343,6 +1354,7 @@ export default function RouteMapPage() {
           <span style="background:#d50000;color:#fff;border-radius:999px;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:12px">${p.n}</span>
           <b style="font-size:14px;color:#0f172a">${escapeHtml(p.category)}</b>
         </div>
+        ${p.date ? `<div style="font-size:12px;font-weight:800;color:#334155;margin-top:5px">📅 Surveyed: ${escapeHtml(p.date)}</div>` : ""}
         ${p.description ? `<div style="font-size:13px;font-weight:700;color:#0f172a;margin-top:6px"><b>Observation:</b> ${escapeHtml(p.description)}</div>` : ""}
         ${p.remarks ? `<div style="font-size:13px;font-weight:700;color:#0f172a;margin-top:4px"><b>Remarks / Action:</b> ${escapeHtml(p.remarks)}</div>` : ""}
         <div style="font-size:11px;color:#64748b;margin-top:6px">${formatNePair(p.lat, p.lng)}</div>
@@ -1469,7 +1481,8 @@ export default function RouteMapPage() {
             label: { text: String(p.n), color: "#fff", fontWeight: "800", fontSize: "11px" },
             title:
               (isStart ? `START — ${p.category}` : isEnd ? `END — ${p.category}` : p.category) +
-              (p.difficulty ? ` (${p.difficulty})` : ""),
+              (p.difficulty ? ` (${p.difficulty})` : "") +
+              (p.date ? ` · ${p.date}` : ""),
             icon: {
               path: g.maps.SymbolPath.CIRCLE,
               scale: big ? 15 : 12,

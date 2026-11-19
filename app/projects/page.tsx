@@ -1162,15 +1162,26 @@ export default function ProjectsPage() {
   const imagesInputRef = useRef<HTMLInputElement | null>(null);
   const importDocxRef = useRef<HTMLInputElement | null>(null);
   const [importingDocx, setImportingDocx] = useState(false);
+  // Old-report import must ask for the report's actual date/time — it drives the
+  // "Dated" footer and the survey date, which would otherwise be the import time.
+  const [pendingImportFile, setPendingImportFile] = useState<File | null>(null);
+  const [importDate, setImportDate] = useState<string>("");
+  const [importTime, setImportTime] = useState<string>("");
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  const todayStr = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  };
 
   // Convert an old survey report (Word .docx or PowerPoint .pptx) into a new
   // project. The server parses the report's tables + photos and creates the
   // project; then we open it so the user can review/fix in the grid.
-  const importOldDocx = async (file: File) => {
+  const importOldDocx = async (file: File, reportDate: string) => {
     setImportingDocx(true);
     try {
       const fd = new FormData();
       fd.append("file", file);
+      if (reportDate) fd.append("reportDate", reportDate);
       const res = await fetch("/api/projects/import-docx", {
         method: "POST",
         credentials: "include",
@@ -2723,7 +2734,11 @@ export default function ProjectsPage() {
             style={{ display: "none" }}
             onChange={(e) => {
               const f = e.target.files?.[0] || null;
-              if (f) importOldDocx(f);
+              if (f) {
+                setPendingImportFile(f);
+                setImportDate(todayStr());
+                setImportTime("09:00");
+              }
               if (importDocxRef.current) importDocxRef.current.value = "";
             }}
           />
@@ -2790,6 +2805,9 @@ export default function ProjectsPage() {
             const dt = p.created_at ? new Date(p.created_at).toLocaleString() : "";
             const modifiedBy = lastModifiedMap[p.id] || "—";
             const isDeleting = deletingProjectId === p.id;
+            const isImported =
+              (p as any).source === "imported" ||
+              /^imported from/i.test(String((p as any).description || ""));
 
             return (
               <div key={p.id} style={styles.cardWrap}>
@@ -2807,7 +2825,23 @@ export default function ProjectsPage() {
                 >
                   <div style={styles.cardTop}>
                     <div style={styles.cardTitle}>{name}</div>
-                    <span style={styles.badge}>Open</span>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <span
+                        title={isImported ? "Uploaded from an old report" : "Surveyed using the app"}
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 800,
+                          padding: "2px 8px",
+                          borderRadius: 999,
+                          whiteSpace: "nowrap",
+                          background: isImported ? "#FEF3C7" : "#DCFCE7",
+                          color: isImported ? "#92400E" : "#166534",
+                        }}
+                      >
+                        {isImported ? "📄 Imported" : "📱 App survey"}
+                      </span>
+                      <span style={styles.badge}>Open</span>
+                    </div>
                   </div>
 
                   <div style={styles.metaRow}>
@@ -2977,6 +3011,71 @@ export default function ProjectsPage() {
                 })}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {pendingImportFile && (
+        <div
+          style={styles.modalOverlay}
+          onClick={() => {
+            if (!importingDocx) setPendingImportFile(null);
+          }}
+        >
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>
+              Date of this report
+            </div>
+            <div style={{ fontSize: 13, color: "#667085", marginBottom: 12 }}>
+              Enter the date and time the survey was actually done. This sets the
+              report&apos;s &quot;Dated&quot; footer and survey date (otherwise it
+              would use today&apos;s import time). File:{" "}
+              <b>{pendingImportFile.name}</b>
+            </div>
+            <div style={styles.formRow}>
+              <div style={styles.formLabel}>Survey date *</div>
+              <input
+                style={styles.input}
+                type="date"
+                value={importDate}
+                max={todayStr()}
+                onChange={(e) => setImportDate(e.target.value)}
+              />
+            </div>
+            <div style={styles.formRow}>
+              <div style={styles.formLabel}>Time *</div>
+              <input
+                style={styles.input}
+                type="time"
+                value={importTime}
+                onChange={(e) => setImportTime(e.target.value)}
+              />
+            </div>
+            <div style={styles.modalActions}>
+              <button
+                style={styles.btnGhost}
+                onClick={() => setPendingImportFile(null)}
+                disabled={importingDocx}
+              >
+                Cancel
+              </button>
+              <button
+                style={styles.btnPrimary}
+                disabled={importingDocx || !importDate || !importTime}
+                onClick={() => {
+                  if (!importDate || !importTime) {
+                    toast("Please set the report date and time.");
+                    return;
+                  }
+                  const f = pendingImportFile;
+                  const dt = `${importDate}T${importTime}:00`;
+                  setPendingImportFile(null);
+                  if (f) importOldDocx(f, dt);
+                }}
+              >
+                {importingDocx ? "Importing…" : "Import report"}
+              </button>
+            </div>
           </div>
         </div>
       )}

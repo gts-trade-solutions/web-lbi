@@ -5370,7 +5370,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               `<w:tcW w:w="${opt.w}" w:type="dxa"/>` +
               (opt.fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${opt.fill}"/>` : "") +
               '<w:vAlign w:val="center"/></w:tcPr>' +
-              `<w:p><w:pPr><w:jc w:val="${align}"/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>` +
+              `<w:p><w:pPr><w:jc w:val="${align}"/><w:spacing w:before="20" w:after="20" w:line="288" w:lineRule="auto"/></w:pPr>` +
               `<w:r><w:rPr>${opt.bold ? "<w:b/>" : ""}<w:color w:val="${color}"/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr>` +
               `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p></w:tc>`
             );

@@ -100,6 +100,19 @@ export async function POST(request: Request) {
     }
     const isPdf = /\.pdf$/i.test(file.name);
 
+    // Report date/time entered at import. Stored as created_at so the exported
+    // "Dated" footer and survey date reflect the real survey date, not today's
+    // import time. Defaults the time to 09:00 if none given.
+    const reportDateRaw = String(form.get("reportDate") || "").trim();
+    let importCreatedAt: string | null = null;
+    {
+      const m = reportDateRaw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/);
+      if (m) {
+        importCreatedAt = `${m[1]}-${m[2]}-${m[3]} ${m[4] || "09"}:${m[5] || "00"}:00`;
+      }
+    }
+    const createdAtField = importCreatedAt ? { created_at: importCreatedAt } : {};
+
     const buffer = Buffer.from(await file.arrayBuffer());
 
     // Keep the raw uploaded file so server-side render tests / the
@@ -165,9 +178,11 @@ export async function POST(request: Request) {
         name: projectName,
         description: `Imported from ${file.name}`,
         status: "active",
+        source: "imported",
         created_by: authUser.id,
         last_modified_by: authUser.id,
         user_id: authUser.id,
+        ...createdAtField,
       },
       projectCols
     );
@@ -207,6 +222,8 @@ export async function POST(request: Request) {
           resolved_location: p.location || null,
           location: p.location || null,
           kms: Number.isFinite(kmNum) ? kmNum : null,
+          source: "imported",
+          ...createdAtField,
         },
         reportCols
       );
@@ -312,6 +329,8 @@ export async function POST(request: Request) {
             status: "active",
             sort_order: 1,
             point_key: "0",
+            source: "imported",
+            ...createdAtField,
           },
           reportCols
         );
