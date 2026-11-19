@@ -5523,6 +5523,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             bodyP(keyLocs || "-") +
             spacer;
 
+          // Page break so the per-point detail tables start on a fresh page,
+          // after the title / observations / two summary tables.
+          const pageBreak = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+
           const summaryXml =
             headingP("TURNING CIRCLE DRAWING:") +
             spacer +
@@ -5533,7 +5537,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             spacer +
             headingP("Mitigation Recommendations for major obstacles with coordinates – proposed recommendation") +
             table2 +
-            spacer;
+            spacer +
+            pageBreak;
 
           xml = xml.slice(0, tblStart) + summaryXml + xml.slice(tblStart);
           renderedZip.file("word/document.xml", xml);
