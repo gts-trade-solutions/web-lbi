@@ -22,6 +22,25 @@ type ProjectRow = {
   deleted_by?: string | null;
 };
 
+// One match returned by the smart "find a report" search (/api/search).
+type SmartHit = {
+  id: string;
+  name: string;
+  source?: string | null;
+  status?: string | null;
+  from: string;
+  to: string;
+  points: number;
+  years: string;
+  red: number;
+  amber: number;
+  green: number;
+  keyObstacles: string[];
+  matchedPlaces: string[];
+  score: number;
+  summaryLine: string;
+};
+
 type ParsedPointRow = {
   point_key: string;
   latitude: number | null;
@@ -939,6 +958,13 @@ export default function ProjectsPage() {
   const [q, setQ] = useState("");
   const [exporting, setExporting] = useState(false);
 
+  // ---- Smart "find a report" search (route-aware, searches inside points) ----
+  const [smartQuery, setSmartQuery] = useState("");
+  const [smartResults, setSmartResults] = useState<SmartHit[]>([]);
+  const [smartLoading, setSmartLoading] = useState(false);
+  const [smartError, setSmartError] = useState<string | null>(null);
+  const [smartSearched, setSmartSearched] = useState(false);
+
   const [lastModifiedMap, setLastModifiedMap] = useState<Record<string, string>>({});
 
   const [newOpen, setNewOpen] = useState(false);
@@ -1241,6 +1267,43 @@ export default function ProjectsPage() {
     const token =
       typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
     return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
+  // ---- Smart "find a report" search ----
+  const runSmartSearch = async (raw?: string) => {
+    const query = (typeof raw === "string" ? raw : smartQuery).trim();
+    if (query.length < 2) {
+      setSmartResults([]);
+      setSmartSearched(false);
+      setSmartError(null);
+      return;
+    }
+    setSmartLoading(true);
+    setSmartError(null);
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`, {
+        method: "GET",
+        credentials: "include",
+        headers: authHeaders(),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.error || "Search failed");
+      setSmartResults(Array.isArray(data?.results) ? data.results : []);
+      setSmartSearched(true);
+    } catch (e) {
+      setSmartError(e instanceof Error ? e.message : "Search failed");
+      setSmartResults([]);
+      setSmartSearched(true);
+    } finally {
+      setSmartLoading(false);
+    }
+  };
+
+  const clearSmartSearch = () => {
+    setSmartQuery("");
+    setSmartResults([]);
+    setSmartSearched(false);
+    setSmartError(null);
   };
 
   // ---- Combine projects ----
@@ -2773,6 +2836,118 @@ export default function ProjectsPage() {
         </div>
       </div>
 
+      {/* ---- Smart "find a report" (route-aware) search ---- */}
+      <div style={styles.smartCard}>
+        <div style={styles.smartHead}>
+          <span style={styles.smartTitle}>🔎 Find a report</span>
+          <span style={styles.smartHint}>
+            Ask for a route — e.g. <b>“Chennai to Bangalore”</b> — and it finds the reports that cover it.
+          </span>
+        </div>
+        <div style={styles.smartInputRow}>
+          <input
+            style={styles.smartInput}
+            placeholder="e.g. I need reports for Chennai to Bangalore"
+            value={smartQuery}
+            onChange={(e) => setSmartQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                runSmartSearch();
+              }
+            }}
+          />
+          <button
+            style={{ ...styles.smartBtn, opacity: smartLoading ? 0.7 : 1 }}
+            onClick={() => runSmartSearch()}
+            disabled={smartLoading || smartQuery.trim().length < 2}
+          >
+            {smartLoading ? "Searching…" : "Find"}
+          </button>
+          {smartSearched || smartQuery ? (
+            <button style={styles.smartClearBtn} onClick={clearSmartSearch}>
+              Clear
+            </button>
+          ) : null}
+        </div>
+
+        {smartError ? (
+          <div style={styles.smartError}>{smartError}</div>
+        ) : smartLoading ? (
+          <div style={styles.smartState}>Looking through your reports…</div>
+        ) : smartSearched && smartResults.length === 0 ? (
+          <div style={styles.smartState}>
+            No reports found for that route. Try a different place name or spelling.
+          </div>
+        ) : smartResults.length ? (
+          <div style={styles.smartResults}>
+            <div style={styles.smartResultsCount}>
+              {smartResults.length} matching report{smartResults.length === 1 ? "" : "s"} — best match first
+            </div>
+            {smartResults.map((h) => {
+              const route = h.from && h.to ? `${h.from} → ${h.to}` : h.from || h.to || h.name;
+              const isImported = h.source === "imported";
+              const isFinished = String(h.status || "").toLowerCase() === "finished";
+              return (
+                <div
+                  key={h.id}
+                  style={styles.smartResult}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => router.push(`/projects/${h.id}`)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      router.push(`/projects/${h.id}`);
+                    }
+                  }}
+                >
+                  <div style={styles.smartResultMain}>
+                    <div style={styles.smartRoute}>{route}</div>
+                    <div style={styles.smartResultName}>{h.name}</div>
+                    <div style={styles.smartSummaryLine}>
+                      {h.points} point{h.points === 1 ? "" : "s"}
+                      {h.years ? ` · ${h.years}` : ""}
+                      {h.red ? ` · ${h.red} difficult` : ""}
+                      {h.amber ? ` · ${h.amber} medium` : ""}
+                    </div>
+                    {h.keyObstacles.length ? (
+                      <div style={styles.smartObstacles}>
+                        <span style={styles.smartObstaclesLabel}>Key obstacles:</span>
+                        {h.keyObstacles.map((c) => (
+                          <span key={c} style={styles.smartChip}>{c}</span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {h.matchedPlaces.length ? (
+                      <div style={styles.smartMatched}>
+                        Matched:{" "}
+                        {h.matchedPlaces.map((m) => (
+                          <span key={m} style={styles.smartMatchChip}>{m}</span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div style={styles.smartResultSide}>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      {isImported ? (
+                        <span style={{ ...styles.smartTag, background: "#FEF3C7", color: "#92400E" }}>📄 Imported</span>
+                      ) : (
+                        <span style={{ ...styles.smartTag, background: "#DCFCE7", color: "#166534" }}>📱 App</span>
+                      )}
+                      {isFinished ? (
+                        <span style={{ ...styles.smartTag, background: "#E5E7EB", color: "#374151" }}>✓ Finished</span>
+                      ) : null}
+                    </div>
+                    <span style={styles.smartOpenBtn}>Open report →</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+
       <div style={styles.searchBar}>
         <div style={styles.searchWrap}>
           <span style={styles.searchIcon}>⌕</span>
@@ -4258,6 +4433,102 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     color: "#B42318",
   },
+  // ---- Smart "find a report" search ----
+  smartCard: {
+    marginTop: 16,
+    marginBottom: 6,
+    background: "linear-gradient(135deg, #EEF2FF 0%, #F5F3FF 100%)",
+    border: "1px solid #C7D2FE",
+    borderRadius: 16,
+    padding: 16,
+    boxShadow: "0 1px 3px rgba(16,24,40,0.08)",
+  },
+  smartHead: { display: "flex", flexDirection: "column", gap: 2, marginBottom: 10 },
+  smartTitle: { fontSize: 16, fontWeight: 800, color: "#3730A3" },
+  smartHint: { fontSize: 13, color: "#4B5563" },
+  smartInputRow: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" },
+  smartInput: {
+    flex: 1,
+    minWidth: 220,
+    border: "1px solid #C7D2FE",
+    outline: "none",
+    fontSize: 14,
+    color: "#101828",
+    background: "#fff",
+    borderRadius: 12,
+    padding: "11px 14px",
+  },
+  smartBtn: {
+    padding: "11px 22px",
+    borderRadius: 12,
+    border: "none",
+    background: "#4F46E5",
+    color: "#fff",
+    cursor: "pointer",
+    fontWeight: 800,
+    fontSize: 14,
+  },
+  smartClearBtn: {
+    padding: "11px 14px",
+    borderRadius: 12,
+    border: "1px solid #C7D2FE",
+    background: "#fff",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 13,
+    color: "#4338CA",
+  },
+  smartError: {
+    marginTop: 12,
+    padding: "10px 12px",
+    borderRadius: 10,
+    background: "#FEF2F2",
+    border: "1px solid #FECACA",
+    color: "#B91C1C",
+    fontSize: 13,
+  },
+  smartState: { marginTop: 12, fontSize: 13, color: "#4B5563" },
+  smartResults: { marginTop: 14, display: "flex", flexDirection: "column", gap: 10 },
+  smartResultsCount: { fontSize: 12, fontWeight: 700, color: "#6B7280", textTransform: "uppercase", letterSpacing: 0.3 },
+  smartResult: {
+    display: "flex",
+    gap: 12,
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    background: "#fff",
+    border: "1px solid #E5E7EB",
+    borderRadius: 12,
+    padding: "12px 14px",
+    cursor: "pointer",
+    boxShadow: "0 1px 2px rgba(16,24,40,0.05)",
+  },
+  smartResultMain: { display: "flex", flexDirection: "column", gap: 4, minWidth: 0, flex: 1 },
+  smartRoute: { fontSize: 15, fontWeight: 800, color: "#111827" },
+  smartResultName: { fontSize: 12, color: "#6B7280", wordBreak: "break-word" },
+  smartSummaryLine: { fontSize: 13, color: "#374151", marginTop: 2 },
+  smartObstacles: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 4 },
+  smartObstaclesLabel: { fontSize: 12, fontWeight: 700, color: "#6B7280" },
+  smartChip: {
+    fontSize: 11,
+    fontWeight: 700,
+    padding: "2px 8px",
+    borderRadius: 999,
+    background: "#FEF3C7",
+    color: "#92400E",
+  },
+  smartMatched: { fontSize: 12, color: "#6B7280", marginTop: 2, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" },
+  smartMatchChip: {
+    fontSize: 11,
+    fontWeight: 700,
+    padding: "1px 7px",
+    borderRadius: 999,
+    background: "#DBEAFE",
+    color: "#1E40AF",
+  },
+  smartResultSide: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8, whiteSpace: "nowrap" },
+  smartTag: { fontSize: 11, fontWeight: 800, padding: "2px 8px", borderRadius: 999 },
+  smartOpenBtn: { fontSize: 13, fontWeight: 800, color: "#4F46E5" },
+
   searchBar: { marginTop: 14, marginBottom: 14 },
   searchWrap: {
     display: "flex",

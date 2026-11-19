@@ -146,7 +146,7 @@ function resolveGs(): string | null {
   return null;
 }
 
-const RENDER_DPI = 130;
+const RENDER_DPI = 180;
 
 // Render the needed pages (in concurrent chunks) and crop each photo's rect,
 // filling photoMap. Returns the key assigned to each task (in task order).
@@ -184,7 +184,7 @@ async function renderAndCrop(
           "-dBATCH",
           "-dSAFER",
           "-sDEVICE=jpeg",
-          "-dJPEGQ=90",
+          "-dJPEGQ=95",
           `-r${RENDER_DPI}`,
           `-sPageList=${chunk.join(",")}`,
           "-o",
@@ -206,8 +206,12 @@ async function renderAndCrop(
         const mh = meta.height || 0;
         for (const ti of tasksByPage.get(page)!) {
           const { rect: d, pageH } = tasks[ti];
-          const padW = d.rw * 0.015;
-          const padH = d.rh * 0.02;
+          // Inset the crop slightly (NEGATIVE pad) instead of padding outward.
+          // The old outward pad caught adjacent page content, so each photo had
+          // stray coloured pixels in its corners/edges. Trimming ~0.6% removes
+          // that bleed without visibly cropping the photo.
+          const padW = -d.rw * 0.006;
+          const padH = -d.rh * 0.006;
           const x0 = d.cx - d.rw / 2 - padW;
           const x1 = d.cx + d.rw / 2 + padW;
           const yTop = pageH - (d.cy + d.rh / 2 + padH); // PDF y is bottom-up
@@ -222,7 +226,7 @@ async function renderAndCrop(
           try {
             const buf = await sharp(img)
               .extract({ left, top, width: w, height: h })
-              .jpeg({ quality: 85 })
+              .jpeg({ quality: 90, chromaSubsampling: "4:4:4" })
               .toBuffer();
             if (buf.length < 1200) continue;
             const key = `pdf-photo-p${page}-${ti}.jpg`;

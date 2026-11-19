@@ -2741,8 +2741,15 @@ async function routeBatch(
   }
   onStatus(r.status || "UNKNOWN");
 
-  // Too many stops for this account/plan — split the batch and try each half.
-  if (r.status === "MAX_WAYPOINTS_EXCEEDED" && batch.length > 2 && depth < 4) {
+  // Split-and-retry on the common failures so ONE un-routable pair (or too many
+  // stops) only makes its own tiny segment straight — not the whole 25-point
+  // batch. Previously only MAX_WAYPOINTS_EXCEEDED split, so a single ZERO_RESULTS
+  // point (e.g. slightly-off GPS) turned a long stretch into a straight line.
+  const splittable =
+    r.status === "MAX_WAYPOINTS_EXCEEDED" ||
+    r.status === "ZERO_RESULTS" ||
+    r.status === "NOT_FOUND";
+  if (splittable && batch.length > 2 && depth < 5) {
     const mid = Math.ceil(batch.length / 2);
     const left = await routeBatch(g, service, batch.slice(0, mid + 1), onStatus, depth + 1);
     const right = await routeBatch(g, service, batch.slice(mid), onStatus, depth + 1);

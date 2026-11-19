@@ -5960,6 +5960,68 @@ function EditReportModal({
   const [difficulty, setDifficulty] = useState<VehicleMovement>(normalizeVM(report.difficulty));
   const [saving, setSaving] = useState(false);
 
+  // ---- In-app spell check (offline, server-side dictionary) ----
+  type SpellMiss = { word: string; suggestions: string[]; count: number };
+  const [spellBusy, setSpellBusy] = useState(false);
+  const [spellRun, setSpellRun] = useState(false);
+  const [spellDesc, setSpellDesc] = useState<SpellMiss[]>([]);
+  const [spellRem, setSpellRem] = useState<SpellMiss[]>([]);
+
+  const runSpellCheck = async () => {
+    setSpellBusy(true);
+    try {
+      let ignore: string[] = [];
+      try { ignore = JSON.parse(localStorage.getItem("lbi_spell_ignore") || "[]"); } catch {}
+      const res = await fetch("/api/spellcheck", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ fields: { description, remarks: remarksAction }, ignore }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      setSpellDesc(Array.isArray(data?.results?.description) ? data.results.description : []);
+      setSpellRem(Array.isArray(data?.results?.remarks) ? data.results.remarks : []);
+      setSpellRun(true);
+    } catch {
+      setSpellDesc([]);
+      setSpellRem([]);
+      setSpellRun(true);
+    } finally {
+      setSpellBusy(false);
+    }
+  };
+
+  // Replace every whole-word occurrence of a misspelled token with the chosen
+  // fix, preserving the original capitalisation.
+  const applySpellFix = (field: "description" | "remarks", token: string, sug: string) => {
+    const replacement = /^[A-Z]/.test(token) ? sug.charAt(0).toUpperCase() + sug.slice(1) : sug;
+    const esc = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(^|[^A-Za-z'’])${esc}(?![A-Za-z'’])`, "g");
+    const doReplace = (s: string) => s.replace(re, (_m, p1) => `${p1}${replacement}`);
+    if (field === "description") {
+      setDescription((s) => doReplace(s));
+      setSpellDesc((l) => l.filter((x) => x.word !== token));
+    } else {
+      setRemarksAction((s) => doReplace(s));
+      setSpellRem((l) => l.filter((x) => x.word !== token));
+    }
+  };
+
+  // Teach the checker a word (persist in this browser) so it stops flagging it.
+  const ignoreSpellWord = (token: string) => {
+    const w = token.replace(/['’]/g, "").toLowerCase();
+    try {
+      const cur: string[] = JSON.parse(localStorage.getItem("lbi_spell_ignore") || "[]");
+      if (!cur.includes(w)) {
+        cur.push(w);
+        localStorage.setItem("lbi_spell_ignore", JSON.stringify(cur));
+      }
+    } catch {}
+    const strip = (t: string) => t.replace(/['’]/g, "").toLowerCase();
+    setSpellDesc((l) => l.filter((x) => strip(x.word) !== w));
+    setSpellRem((l) => l.filter((x) => strip(x.word) !== w));
+  };
+
   // NE Coordinates (editable). Prefer latitude/longitude, fall back to loc_*.
   const initLat =
     (report as { latitude?: number | null }).latitude ??
@@ -6419,6 +6481,130 @@ function EditReportModal({
             <option value="yellow">Yellow</option>
             <option value="red">Red</option>
           </select>
+        </div>
+
+        {/* ---- Spell check ---- */}
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={runSpellCheck}
+              disabled={spellBusy}
+              style={{
+                padding: "9px 16px",
+                borderRadius: 12,
+                border: "1px solid #C7D2FE",
+                background: "#EEF2FF",
+                color: "#3730A3",
+                fontWeight: 800,
+                fontSize: 13,
+                cursor: "pointer",
+                opacity: spellBusy ? 0.7 : 1,
+              }}
+              title="Check Description and Remarks for spelling mistakes"
+            >
+              {spellBusy ? "Checking…" : "🔤 Check spelling"}
+            </button>
+            {spellRun && !spellBusy && spellDesc.length === 0 && spellRem.length === 0 ? (
+              <span style={{ fontSize: 13, fontWeight: 800, color: "#067647" }}>
+                ✓ No spelling mistakes found
+              </span>
+            ) : null}
+          </div>
+
+          {spellDesc.length > 0 || spellRem.length > 0 ? (
+            <div
+              style={{
+                border: "1px solid #FECACA",
+                background: "#FFFBFA",
+                borderRadius: 12,
+                padding: 12,
+                display: "grid",
+                gap: 10,
+              }}
+            >
+              {(
+                [
+                  ["description", "In Description", spellDesc],
+                  ["remarks", "In Remarks / Action", spellRem],
+                ] as const
+              ).map(([field, label, list]) =>
+                list.length ? (
+                  <div key={field} style={{ display: "grid", gap: 6 }}>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 800,
+                        color: "#6B7280",
+                        textTransform: "uppercase",
+                        letterSpacing: 0.3,
+                      }}
+                    >
+                      {label}
+                    </div>
+                    {list.map((m) => (
+                      <div
+                        key={m.word}
+                        style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
+                      >
+                        <span
+                          style={{
+                            fontWeight: 800,
+                            color: "#B42318",
+                            textDecoration: "underline wavy #F97066",
+                          }}
+                        >
+                          {m.word}
+                        </span>
+                        <span style={{ color: "#98A2B3" }}>→</span>
+                        {m.suggestions.length ? (
+                          m.suggestions.map((s) => (
+                            <button
+                              key={s}
+                              type="button"
+                              onClick={() => applySpellFix(field, m.word, s)}
+                              style={{
+                                padding: "4px 10px",
+                                borderRadius: 999,
+                                border: "1px solid #A6F4C5",
+                                background: "#ECFDF3",
+                                color: "#067647",
+                                fontWeight: 800,
+                                fontSize: 13,
+                                cursor: "pointer",
+                              }}
+                            >
+                              {/^[A-Z]/.test(m.word) ? s.charAt(0).toUpperCase() + s.slice(1) : s}
+                            </button>
+                          ))
+                        ) : (
+                          <span style={{ fontSize: 12, color: "#98A2B3" }}>no suggestion</span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => ignoreSpellWord(m.word)}
+                          style={{
+                            padding: "4px 10px",
+                            borderRadius: 999,
+                            border: "1px solid #E5E7EB",
+                            background: "#fff",
+                            color: "#475467",
+                            fontWeight: 700,
+                            fontSize: 12,
+                            cursor: "pointer",
+                            marginLeft: "auto",
+                          }}
+                          title="Not a mistake — stop flagging this word on this computer"
+                        >
+                          Ignore
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null
+              )}
+            </div>
+          ) : null}
         </div>
 
         {/* ---- Photos ---- */}
