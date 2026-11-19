@@ -5362,7 +5362,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             text: string,
             opt: { w: number; bold?: boolean; fill?: string | null; color?: string; align?: string; size?: number } = { w: 1000 }
           ) => {
-            const color = opt.color || "1F2937";
+            const color = opt.color || "000000";
             const align = opt.align || "left";
             const size = opt.size || 18;
             return (
@@ -5410,45 +5410,68 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                 ? "Moderate risk; pass with caution / minor works."
                 : "Low risk; normal passage.";
 
-          // Table 1 — category / work-item counts. Green header + striped
-          // light-green rows (matches the reference summary report).
-          const t1cols = [4200, 1200, 3600];
+          // Table 1 — fixed Category / Work-Item taxonomy; counts derived from
+          // the points by category/keyword. Exact reference colours + widths:
+          // green header 196B24, striped light-green C1F0C8.
+          const WORK_ITEMS: { label: string; test: (cat: string, hay: string) => boolean }[] = [
+            { label: "Toll plaza modification / clearance", test: (c) => /toll/.test(c) },
+            { label: "Toll sensor pole removal", test: (_c, h) => /sensor pole/.test(h) },
+            { label: "Centre median modification / removal", test: (_c, h) => /median/.test(h) },
+            { label: "Land filling", test: (_c, h) => /land\s*fill|filling/.test(h) },
+            { label: "Digging / excavation", test: (_c, h) => /digging|excavat/.test(h) },
+            { label: "Road levelling", test: (_c, h) => /level+ing/.test(h) },
+            { label: "Footpath bridge obstruction", test: (c, h) => /footpath/.test(c) || /footpath/.test(h) },
+            { label: "Underpass bridge obstruction", test: (c, h) => /under\s*pass/.test(c) || /under\s*pass/.test(h) },
+            { label: "Port gate clearance", test: (c) => /gate/.test(c) },
+            { label: "Railway shutdown", test: (c, h) => /railway|level crossing/.test(c) || /railway/.test(h) },
+          ];
+          const workCounts = WORK_ITEMS.map(() => 0);
+          for (const o of observations || []) {
+            const cat = String((o as any).category || "").toLowerCase();
+            const hay = `${cat} ${String((o as any).observation || "")} ${String((o as any).remarks || "")}`
+              .replace(/<[^>]+>/g, " ")
+              .toLowerCase();
+            WORK_ITEMS.forEach((w, wi) => {
+              if (w.test(cat, hay)) workCounts[wi] += 1;
+            });
+          }
+          const t1cols = [5553, 1218, 10417];
           const t1Head =
             "<w:tr>" +
-            cell("Category / Work Item", { w: t1cols[0], bold: true, fill: "2E7D32", color: "FFFFFF", align: "center" }) +
-            cell("Count", { w: t1cols[1], bold: true, fill: "2E7D32", color: "FFFFFF", align: "center" }) +
-            cell("Key Note", { w: t1cols[2], bold: true, fill: "2E7D32", color: "FFFFFF", align: "center" }) +
+            cell("Category / Work Item", { w: t1cols[0], bold: true, fill: "196B24", color: "FFFFFF", align: "center" }) +
+            cell("Count", { w: t1cols[1], bold: true, fill: "196B24", color: "FFFFFF", align: "center" }) +
+            cell("Key Note", { w: t1cols[2], bold: true, fill: "196B24", color: "FFFFFF", align: "center" }) +
             "</w:tr>";
-          const t1Body = (categorySummary || [])
-            .map((c, ri) => {
-              const f = ri % 2 === 0 ? "E6F4E6" : null;
-              return (
-                "<w:tr>" +
-                cell(String(c.categoryLabel || "-"), { w: t1cols[0], fill: f }) +
-                cell(String(c.count ?? 0), { w: t1cols[1], align: "center", fill: f }) +
-                cell("-", { w: t1cols[2], fill: f }) +
-                "</w:tr>"
-              );
-            })
-            .join("");
-          const table1 = tableWrap(9000, t1cols, t1Head + t1Body);
+          const t1Body = WORK_ITEMS.map((w, ri) => {
+            const f = ri % 2 === 0 ? "C1F0C8" : null;
+            const count = workCounts[ri];
+            return (
+              "<w:tr>" +
+              cell(w.label, { w: t1cols[0], fill: f }) +
+              cell(String(count), { w: t1cols[1], align: "center", fill: f }) +
+              cell(count === 0 ? "Not specified" : "-", { w: t1cols[2], fill: f }) +
+              "</w:tr>"
+            );
+          }).join("");
+          const table1 = tableWrap(17188, t1cols, t1Head + t1Body);
 
-          // Table 2 — key obstacle summary, one row per point.
-          const t2cols = [600, 2200, 2000, 900, 2400, 2600, 3300];
+          // Table 2 — key obstacle summary, one row per point. Exact reference
+          // colours + widths: navy header 183153, striped light-blue CAEDFB.
+          const t2cols = [1362, 2358, 2376, 988, 2690, 5813, 7174];
           const t2Head =
             "<w:tr>" +
-            cell("Sl No", { w: t2cols[0], bold: true, fill: "1F3864", color: "FFFFFF", align: "center" }) +
-            cell("Route / Location", { w: t2cols[1], bold: true, fill: "1F3864", color: "FFFFFF" }) +
-            cell("GPS Coordinates", { w: t2cols[2], bold: true, fill: "1F3864", color: "FFFFFF" }) +
-            cell("Kms", { w: t2cols[3], bold: true, fill: "1F3864", color: "FFFFFF", align: "center" }) +
-            cell("Obstruction", { w: t2cols[4], bold: true, fill: "1F3864", color: "FFFFFF" }) +
-            cell("Score Parameter", { w: t2cols[5], bold: true, fill: "1F3864", color: "FFFFFF" }) +
-            cell("Recommendation", { w: t2cols[6], bold: true, fill: "1F3864", color: "FFFFFF" }) +
+            cell("Sl No", { w: t2cols[0], bold: true, fill: "183153", color: "FFFFFF", align: "center" }) +
+            cell("Route / Location", { w: t2cols[1], bold: true, fill: "183153", color: "FFFFFF" }) +
+            cell("GPS Coordinates", { w: t2cols[2], bold: true, fill: "183153", color: "FFFFFF" }) +
+            cell("Kms", { w: t2cols[3], bold: true, fill: "183153", color: "FFFFFF", align: "center" }) +
+            cell("Obstruction", { w: t2cols[4], bold: true, fill: "183153", color: "FFFFFF" }) +
+            cell("Score Parameter", { w: t2cols[5], bold: true, fill: "183153", color: "FFFFFF" }) +
+            cell("Recommendation", { w: t2cols[6], bold: true, fill: "183153", color: "FFFFFF" }) +
             "</w:tr>";
           const t2Body = (observations || [])
             .map((o: any, i: number) => {
               const diff = String(o.difficultyKey || "green");
-              const f = i % 2 === 0 ? "DDEBF7" : null; // striped light-blue rows
+              const f = i % 2 === 0 ? "CAEDFB" : null; // striped light-blue rows
               const gps = [o.gpsLat, o.gpsLon].filter((x) => x && x !== "-").join(" ");
               const rec =
                 String(o.observation || "")
@@ -5468,7 +5491,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               );
             })
             .join("");
-          const table2 = tableWrap(14000, t2cols, t2Head + t2Body);
+          const table2 = tableWrap(22761, t2cols, t2Head + t2Body);
 
           // Observations summary block (A. Surveyed Route / Distance / B. Key
           // Locations) derived from the included points.
