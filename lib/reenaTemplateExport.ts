@@ -5375,14 +5375,24 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p></w:tc>`
             );
           };
-          const tableWrap = (totalW: number, cols: number[], rowsXml: string) =>
+          const tableWrap = (_totalW: number, cols: number[], rowsXml: string) =>
             "<w:tbl><w:tblPr>" +
-            `<w:tblW w:w="${totalW}" w:type="dxa"/>` +
+            // OOXML order inside tblPr: tblW → tblBorders → tblLayout → tblCellMar.
+            // Fill 100% of the text width; columns keep their relative widths.
+            '<w:tblW w:w="5000" w:type="pct"/>' +
             "<w:tblBorders>" +
             ["top", "left", "bottom", "right", "insideH", "insideV"]
               .map((s) => `<w:${s} w:val="single" w:sz="6" w:space="0" w:color="BFC7D2"/>`)
               .join("") +
-            "</w:tblBorders></w:tblPr>" +
+            "</w:tblBorders>" +
+            '<w:tblLayout w:type="fixed"/>' +
+            // Comfortable cell padding so text does not hug the borders.
+            "<w:tblCellMar>" +
+            '<w:top w:w="60" w:type="dxa"/>' +
+            '<w:left w:w="130" w:type="dxa"/>' +
+            '<w:bottom w:w="60" w:type="dxa"/>' +
+            '<w:right w:w="130" w:type="dxa"/>' +
+            "</w:tblCellMar></w:tblPr>" +
             "<w:tblGrid>" +
             cols.map((w) => `<w:gridCol w:w="${w}"/>`).join("") +
             "</w:tblGrid>" +
