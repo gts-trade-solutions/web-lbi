@@ -1166,7 +1166,6 @@ export default function ProjectsPage() {
   // "Dated" footer and the survey date, which would otherwise be the import time.
   const [pendingImportFile, setPendingImportFile] = useState<File | null>(null);
   const [importDate, setImportDate] = useState<string>("");
-  const [importTime, setImportTime] = useState<string>("");
   const pad2 = (n: number) => String(n).padStart(2, "0");
   const todayStr = () => {
     const d = new Date();
@@ -2737,7 +2736,6 @@ export default function ProjectsPage() {
               if (f) {
                 setPendingImportFile(f);
                 setImportDate(todayStr());
-                setImportTime("09:00");
               }
               if (importDocxRef.current) importDocxRef.current.value = "";
             }}
@@ -3027,9 +3025,9 @@ export default function ProjectsPage() {
               Date of this report
             </div>
             <div style={{ fontSize: 13, color: "#667085", marginBottom: 12 }}>
-              Enter the date and time the survey was actually done. This sets the
+              Enter the date the survey was actually done. This sets the
               report&apos;s &quot;Dated&quot; footer and survey date (otherwise it
-              would use today&apos;s import time). File:{" "}
+              would use today&apos;s import date). File:{" "}
               <b>{pendingImportFile.name}</b>
             </div>
             <div style={styles.formRow}>
@@ -3042,15 +3040,6 @@ export default function ProjectsPage() {
                 onChange={(e) => setImportDate(e.target.value)}
               />
             </div>
-            <div style={styles.formRow}>
-              <div style={styles.formLabel}>Time *</div>
-              <input
-                style={styles.input}
-                type="time"
-                value={importTime}
-                onChange={(e) => setImportTime(e.target.value)}
-              />
-            </div>
             <div style={styles.modalActions}>
               <button
                 style={styles.btnGhost}
@@ -3061,16 +3050,15 @@ export default function ProjectsPage() {
               </button>
               <button
                 style={styles.btnPrimary}
-                disabled={importingDocx || !importDate || !importTime}
+                disabled={importingDocx || !importDate}
                 onClick={() => {
-                  if (!importDate || !importTime) {
-                    toast("Please set the report date and time.");
+                  if (!importDate) {
+                    toast("Please set the report date.");
                     return;
                   }
                   const f = pendingImportFile;
-                  const dt = `${importDate}T${importTime}:00`;
                   setPendingImportFile(null);
-                  if (f) importOldDocx(f, dt);
+                  if (f) importOldDocx(f, importDate);
                 }}
               >
                 {importingDocx ? "Importing…" : "Import report"}
