@@ -1,8 +1,36 @@
+import fs from "fs";
+import path from "path";
 import pool from "../../../lib/db";
 import { requireAuth } from "../../../lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// ---- Offline India place gazetteer (bundled; name -> [lat, lng]) ----------
+// Lets a city the user TYPES (e.g. "Bangalore"/"Bengaluru") be located even
+// when the reports' reverse-geocoded point names never say that city. Used
+// only as a FALLBACK — the reports' own GPS points are tried first, so the
+// user's real data always wins over an ambiguous gazetteer hit.
+let GAZ: Record<string, [number, number]> | null = null;
+function gazetteer(): Record<string, [number, number]> {
+  if (GAZ) return GAZ;
+  try {
+    GAZ = JSON.parse(fs.readFileSync(path.join(process.cwd(), "lib", "data", "in_cities.json"), "utf8"));
+  } catch (e) {
+    console.error("[api/search] gazetteer load failed:", e);
+    GAZ = {};
+  }
+  return GAZ!;
+}
+function gazLookup(name: string): { lat: number; lng: number } | null {
+  const g = gazetteer();
+  const key = String(name || "").toLowerCase().trim();
+  if (g[key]) return { lat: g[key][0], lng: g[key][1] };
+  // "bangalore city" / "greater chennai" -> try the longest word that is a key.
+  const words = key.split(/\s+/).filter((w) => w.length >= 4).sort((a, b) => b.length - a.length);
+  for (const w of words) if (g[w]) return { lat: g[w][0], lng: g[w][1] };
+  return null;
+}
 
 type DbColumnRow = { Field?: string };
 
@@ -306,8 +334,10 @@ export async function GET(request: Request) {
         }
         return n ? { lat: sumLat / n, lng: sumLng / n } : null;
       };
-      const A = anchor(fromText);
-      const B = anchor(toText);
+      // Reports' own GPS first (ground truth), then the offline gazetteer so a
+      // city the user types still resolves even if no point names it.
+      const A = anchor(fromText) || gazLookup(fromText);
+      const B = anchor(toText) || gazLookup(toText);
 
       if (A && B && haversineKm(A, B) > 1) {
         const segments: Segment[] = [];
