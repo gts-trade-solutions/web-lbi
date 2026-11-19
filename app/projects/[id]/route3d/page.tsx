@@ -304,6 +304,7 @@ export default function RouteMapPage() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const markersRef = useRef<any[]>([]);
+  const dateMarkersRef = useRef<any[]>([]);
   const infoRef = useRef<any>(null);
   const photoCacheRef = useRef<Record<string, string | null>>({});
   const focusRef = useRef<((i: number) => void) | null>(null);
@@ -1500,6 +1501,35 @@ export default function RouteMapPage() {
           });
           return marker;
         });
+
+        // Little always-visible SURVEY-DATE chip under each pin. Only shown when
+        // zoomed in (>= DATE_BADGE_ZOOM) so the whole-route view isn't cluttered.
+        if (typeof document !== "undefined" && !document.getElementById("r3d-date-badge-css")) {
+          const st = document.createElement("style");
+          st.id = "r3d-date-badge-css";
+          st.textContent =
+            ".r3d-date-badge{transform:translateY(22px);background:#111827;padding:1px 6px;border-radius:8px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.45)}";
+          document.head.appendChild(st);
+        }
+        const DATE_BADGE_ZOOM = 14;
+        dateMarkersRef.current = points.map((p) =>
+          p.date
+            ? new g.maps.Marker({
+                position: { lat: p.lat, lng: p.lng },
+                icon: { path: g.maps.SymbolPath.CIRCLE, scale: 0.01, fillOpacity: 0, strokeOpacity: 0 },
+                label: { text: p.date, className: "r3d-date-badge", color: "#ffffff", fontSize: "10px", fontWeight: "700" },
+                clickable: false,
+                optimized: false,
+                zIndex: 2,
+              })
+            : null
+        );
+        const applyDateBadgeZoom = () => {
+          const show = (map.getZoom() || 0) >= DATE_BADGE_ZOOM;
+          dateMarkersRef.current.forEach((dm) => dm && dm.setMap(show ? map : null));
+        };
+        applyDateBadgeZoom();
+        map.addListener("zoom_changed", applyDateBadgeZoom);
 
         // Route line through the points — road-following via Directions when
         // possible. Store g/path/lines so the line can be redrawn slowly
