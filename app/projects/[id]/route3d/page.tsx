@@ -1511,7 +1511,7 @@ export default function RouteMapPage() {
             ".r3d-date-badge{transform:translateY(22px);background:#111827;padding:1px 6px;border-radius:8px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.45)}";
           document.head.appendChild(st);
         }
-        const DATE_BADGE_ZOOM = 14;
+        const DATE_BADGE_ZOOM = 9;
         dateMarkersRef.current = points.map((p) =>
           p.date
             ? new g.maps.Marker({
