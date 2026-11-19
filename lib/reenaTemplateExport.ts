@@ -2460,9 +2460,22 @@ function getExistingLocation(r: Row): string | null {
   for (const c of candidates) {
     if (c === null || typeof c === "undefined") continue;
     const s = String(c).trim();
-    if (s) return s;
+    // Skip a name written in a non-Latin script (e.g. imported Hindi) so the
+    // resolver reverse-geocodes an English one and caches it in
+    // resolved_location (a later candidate, which IS returned once in Latin).
+    if (s && !hasNonLatinScript(s)) return s;
   }
   return null;
+}
+
+/**
+ * True when a place name contains a non-Latin (Indian-language) script, e.g.
+ * Devanagari "गोसाईगंज". Imported reports sometimes carry the place name in the
+ * local script; the export re-geocodes those in English instead of printing the
+ * Hindi/regional text. Covers Devanagari..Sinhala (U+0900–U+0DFF).
+ */
+function hasNonLatinScript(s: string | null | undefined): boolean {
+  return /[ऀ-෿]/.test(String(s || ""));
 }
 
 /**
@@ -2802,6 +2815,8 @@ async function resolveReportLocation(
   hasResolvedColumn: boolean,
   corridor: RouteCorridor | null
 ): Promise<string> {
+  // getExistingLocation already skips non-Latin (Hindi) names, so `existing` is
+  // either a usable Latin name or null → non-Latin stored names get re-geocoded.
   const existing = getExistingLocation(r);
   if (existing && !isCoordinateOnlyLocation(existing)) return existing;
   const lat = pickLat(r);
@@ -2812,7 +2827,7 @@ async function resolveReportLocation(
     return existing || "-";
   }
   const resolved = await reverseGeocodeLocation(lat, lng);
-  if (resolved) {
+  if (resolved && !hasNonLatinScript(resolved)) {
     if (hasResolvedColumn && r.id) {
       try {
         await pool.execute("UPDATE reports SET resolved_location = ? WHERE id = ?", [
