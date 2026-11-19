@@ -5987,6 +5987,28 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             }
           }
 
+          // 6. Keep each point together across page breaks: every row keeps its
+          //    content on one page (cantSplit — a tall text cell no longer
+          //    splits), and the LAST (data) row keeps with the next block so the
+          //    point's PHOTO stays on the SAME page as its table.
+          out = out.replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (trXml: string) => {
+            if (/<w:cantSplit\b/.test(trXml)) return trXml;
+            return /<w:trPr>/.test(trXml)
+              ? trXml.replace("<w:trPr>", "<w:trPr><w:cantSplit/>")
+              : trXml.replace(/(<w:tr\b[^>]*>)/, "$1<w:trPr><w:cantSplit/></w:trPr>");
+          });
+          const keepTrs = out.match(/<w:tr\b[\s\S]*?<\/w:tr>/g);
+          if (keepTrs && keepTrs.length) {
+            const lastTr = keepTrs[keepTrs.length - 1];
+            // keepNext goes right after <w:pPr> (after an optional <w:pStyle>),
+            // which is the correct OOXML position (before jc / spacing).
+            const keptTr = lastTr.replace(
+              /<w:pPr>(\s*<w:pStyle\b[^>]*\/>)?/g,
+              (_m, ps) => `<w:pPr>${ps || ""}<w:keepNext/>`
+            );
+            if (keptTr !== lastTr) out = out.replace(lastTr, keptTr);
+          }
+
           return out;
         }
       );
