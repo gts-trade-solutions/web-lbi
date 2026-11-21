@@ -3419,18 +3419,28 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // project_route_page_images keyed to the route page; the single-row
   // project_ga_drawings table only ever keeps the first one.
   let gaImageUrls: string[] = [];
+  // File names run parallel to gaImageUrls. Each diagram file name carries a
+  // short slot tag (e.g. "GAWOL__…") written by the Diagrams wizard, so the
+  // export can print every diagram under its OWN heading (GA DRAWING WITHOUT
+  // LOAD / WITH LOAD / TURNING CIRCLE / STABILITY) instead of stacking them.
+  let gaImageNames: string[] = [];
   if (includeGa) {
     const gaPageId = String(routePageRow?.id || "").trim();
     // 1) The GA images on the route page (the expected place).
     if (gaPageId) {
       try {
         const imgRows = await safeQuery(
-          "SELECT file_url FROM project_route_page_images WHERE project_id = ? AND project_page_id = ? ORDER BY created_at ASC",
+          "SELECT file_url, file_name FROM project_route_page_images WHERE project_id = ? AND project_page_id = ? ORDER BY created_at ASC",
           [projectId, gaPageId]
         );
-        gaImageUrls = imgRows
-          .map((x) => String((x as Row).file_url || "").trim())
-          .filter(Boolean);
+        const pairs = imgRows
+          .map((x) => ({
+            url: String((x as Row).file_url || "").trim(),
+            name: String((x as Row).file_name || "").trim(),
+          }))
+          .filter((p) => p.url);
+        gaImageUrls = pairs.map((p) => p.url);
+        gaImageNames = pairs.map((p) => p.name);
       } catch (err) {
         console.error("[export actual] ga images (page) query failed:", err);
       }
@@ -3442,19 +3452,53 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     if (!gaImageUrls.length) {
       try {
         const imgRows = await safeQuery(
-          "SELECT file_url FROM project_route_page_images WHERE project_id = ? ORDER BY created_at ASC",
+          "SELECT file_url, file_name FROM project_route_page_images WHERE project_id = ? ORDER BY created_at ASC",
           [projectId]
         );
-        gaImageUrls = Array.from(
-          new Set(imgRows.map((x) => String((x as Row).file_url || "").trim()).filter(Boolean))
-        );
+        const seen = new Set<string>();
+        const pairs: { url: string; name: string }[] = [];
+        for (const x of imgRows) {
+          const url = String((x as Row).file_url || "").trim();
+          if (!url || seen.has(url)) continue;
+          seen.add(url);
+          pairs.push({ url, name: String((x as Row).file_name || "").trim() });
+        }
+        gaImageUrls = pairs.map((p) => p.url);
+        gaImageNames = pairs.map((p) => p.name);
       } catch (err) {
         console.error("[export actual] ga images (project) query failed:", err);
       }
     }
     // 3) Last resort: the single image from project_ga_drawings.
-    if (!gaImageUrls.length && gaImageUrl) gaImageUrls = [gaImageUrl];
+    if (!gaImageUrls.length && gaImageUrl) {
+      gaImageUrls = [gaImageUrl];
+      gaImageNames = [""];
+    }
   }
+
+  // Heading for each diagram, parallel to gaImageUrls. Primary source is the
+  // slot tag in the file name; a positional fallback covers older diagrams that
+  // were saved before slot tagging. Summary reports keep their single
+  // "GA VEHICLE DRAWING:" heading, so no per-slot headings there.
+  const GA_HEADINGS_BY_TAG: Record<string, string> = {
+    GAWOL: "GA DRAWING WITHOUT LOAD:",
+    GAWL: "GA DRAWING WITH LOAD:",
+    TURN: "TURNING CIRCLE DRAWING:",
+    STAB: "STABILITY DRAWING:",
+  };
+  const GA_HEADINGS_POSITIONAL = [
+    "GA DRAWING WITHOUT LOAD:",
+    "GA DRAWING WITH LOAD:",
+    "TURNING CIRCLE DRAWING:",
+    "STABILITY DRAWING:",
+  ];
+  const gaHeadings: string[] = summaryMode
+    ? []
+    : gaImageUrls.map((_u, idx) => {
+        const m = String(gaImageNames[idx] || "").match(/^([A-Z]{3,6})__/);
+        if (m && GA_HEADINGS_BY_TAG[m[1]]) return GA_HEADINGS_BY_TAG[m[1]];
+        return GA_HEADINGS_POSITIONAL[idx] || "";
+      });
   console.log("[export actual] GA images:", gaImageUrls.length);
   console.log("[export actual] routeMapUrl:", routeMapUrl || "(none)");
 
@@ -5707,6 +5751,51 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.error("[title wording] replace failed - leaving heading untouched:", err);
   }
 
+  // ----- Step 10b-3b: The template's single GA-drawing heading ("GA DRAWING
+  // FOR 50 FEET TRAILER WITHOUT LOAD:") is coloured WHITE (invisible on the
+  // white page) and carries fixed wording. Two jobs here, scoped to THAT
+  // heading paragraph only (matched by its text, so the white banner title on
+  // the coloured header is never touched):
+  //   (a) Detail reports: rename it to the FIRST uploaded diagram's heading
+  //       (e.g. "GA DRAWING WITHOUT LOAD:") so the template GA slot sits under
+  //       the correct heading. Extra diagrams get their own headed pages below.
+  //   (b) Recolour white -> dark so the heading is actually visible.
+  try {
+    const renderedZip = doc.getZip();
+    const docFile = renderedZip.file("word/document.xml");
+    if (docFile) {
+      let xml = docFile.asText();
+      let changed = false;
+      // Heading text is plain ASCII (letters/space/colon) so no escaping needed.
+      const firstGaHeading = !summaryMode ? String(gaHeadings[0] || "").trim() : "";
+      xml = xml.replace(/<w:p\b[\s\S]*?<\/w:p>/g, (p) => {
+        if (!/GA DRAWING FOR 50 FEET TRAILER|GA VEHICLE DRAWING/.test(p)) return p;
+        let np = p;
+        // (a) rename the template GA heading to the first diagram's heading.
+        if (firstGaHeading) {
+          np = np.replace(
+            /GA DRAWING FOR 50 FEET TRAILER WITHOUT LOAD:/g,
+            firstGaHeading
+          );
+        }
+        // (b) recolour white -> dark so it is visible.
+        if (/w:color w:val="FFFFFF"/i.test(np)) {
+          np = np.replace(/<w:color w:val="FFFFFF"\s*\/>/gi, '<w:color w:val="1F2937"/>');
+        }
+        if (np !== p) changed = true;
+        return np;
+      });
+      if (changed) {
+        renderedZip.file("word/document.xml", xml);
+        console.log(
+          "[GA heading] renamed + recoloured (first heading: " + (firstGaHeading || "n/a") + ")"
+        );
+      }
+    }
+  } catch (err) {
+    console.error("[GA heading] rename/recolour failed - leaving untouched:", err);
+  }
+
   // ----- Step 10b-4: Add a custom theme so the 6 route-difficulty colours
   // appear in Word's colour picker ("Theme Colors" row). Defensive: skips if a
   // theme already exists or any required part is missing.
@@ -6942,12 +7031,23 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         }
         if (gaRelsXml) renderedZip.file("word/_rels/document.xml.rels", gaRelsXml);
 
-        // 2) One "page" per extra GA image: a page-break paragraph, then a
-        //    centered full-size GA drawing (same size as GA image 0).
+        // 2) One "page" per extra GA image: a page-break paragraph, its OWN
+        //    heading (GA DRAWING WITH LOAD / TURNING CIRCLE / STABILITY, etc.),
+        //    then a centered full-size GA drawing (same size as GA image 0).
         const GA_CX = GA_DRAWING_SIZE[0] * PX_TO_EMU;
         const GA_CY = GA_DRAWING_SIZE[1] * PX_TO_EMU;
-        const gaPageBlock = (rId: string, dpId: number): string =>
+        // Heading paragraph for an extra diagram page. Matches the dark, bold
+        // style of the template GA heading; keepNext glues it to its drawing.
+        // Heading text is plain ASCII (letters/space/colon) so no escaping.
+        const gaHeadingPara = (heading: string): string =>
+          heading
+            ? `<w:p><w:pPr><w:spacing w:before="120" w:after="80"/><w:keepNext/></w:pPr>` +
+              `<w:r><w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/><w:color w:val="1F2937"/></w:rPr>` +
+              `<w:t xml:space="preserve">${heading}</w:t></w:r></w:p>`
+            : "";
+        const gaPageBlock = (rId: string, dpId: number, heading: string): string =>
           `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>` +
+          gaHeadingPara(heading) +
           `<w:p>` +
             `<w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="0"/><w:keepNext/><w:keepLines/></w:pPr>` +
             `<w:r><w:drawing>` +
@@ -6995,7 +7095,9 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         if (gaImg0End > 0) {
           let block = "";
           for (let gi = 0; gi < gaExtraRIds.length; gi += 1) {
-            block += gaPageBlock(gaExtraRIds[gi], 9100 + gi);
+            // Extra image gi is overall diagram index gi + 1 (image 0 fills the
+            // template GA slot), so its heading is gaHeadings[gi + 1].
+            block += gaPageBlock(gaExtraRIds[gi], 9100 + gi, String(gaHeadings[gi + 1] || ""));
           }
           xml = xml.slice(0, gaImg0End) + block + xml.slice(gaImg0End);
           gaExtraPagesInjected = gaExtraRIds.length;
@@ -8423,26 +8525,40 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.error("[export] undefined-media content-type fix failed (non-fatal):", err);
   }
 
-  // ----- Vertical alignment: force every page to TOP.
+  // ----- Vertical alignment: force every page to TOP — EXCEPT the cover page.
   // Some template sections carry <w:sectPr>…<w:vAlign w:val="center"/>, which
   // vertically centres the WHOLE page — so when the user opens the exported
   // file to edit it, the cursor/content sits in the middle of the page instead
   // of the top. Rewrite page-level (sectPr) vAlign to "top" so content starts
   // at the top. Table-cell (tcPr) vAlign is intentionally left untouched.
+  //
+  // The ONE exception is the cover/title page (the first section): the user
+  // wants its title block ("…SURVEY REPORT" + the title table) sitting in the
+  // vertical MIDDLE of the page, not pinned to the top. So we keep the first
+  // centred section centred and only force the REST to top.
   try {
     const zip = doc.getZip();
     const df = zip.file("word/document.xml");
     if (df) {
       let dx = df.asText();
       let changed = 0;
+      let keptCover = false;
       dx = dx.replace(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g, (sect: string) => {
         if (!/<w:vAlign\b[^>]*w:val="center"/i.test(sect)) return sect;
+        // First centred section = cover/title page: leave it centred so the
+        // title sits in the middle of the page.
+        if (!keptCover) {
+          keptCover = true;
+          return sect;
+        }
         changed++;
         return sect.replace(/<w:vAlign\b[^>]*\/>/g, '<w:vAlign w:val="top"/>');
       });
-      if (changed) {
+      if (changed || keptCover) {
         zip.file("word/document.xml", dx);
-        console.log(`[export] page vAlign set to top on ${changed} section(s)`);
+        console.log(
+          `[export] page vAlign set to top on ${changed} section(s); cover page kept centred: ${keptCover}`
+        );
       }
     }
   } catch (err) {

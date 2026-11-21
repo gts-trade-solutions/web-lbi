@@ -16,16 +16,21 @@ type ReportPoint = {
   location: string;
   state: string;
   difficulty: "green" | "yellow" | "red" | "";
-  date: string; // survey date shown on the pin (e.g. "16 Oct 2026"); "" if none
+  date: string; // upload date+time shown on the pin (e.g. "16 Oct 2026, 14:30"); "" if none
 };
 
-// Format a report's created_at into a short survey date for the map pins.
+// Format a report's created_at into the upload date AND time for the map pins,
+// matching the "Created" date+time shown on the projects list (e.g.
+// "20 Nov 2026, 18:59"). Time is 24-hour local, seconds dropped to keep the
+// pin chip compact.
 function fmtPointDate(raw: unknown): string {
   if (!raw) return "";
   const d = new Date(String(raw));
   if (isNaN(d.getTime())) return "";
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${String(d.getDate()).padStart(2, "0")} ${months[d.getMonth()]} ${d.getFullYear()}`;
+  const datePart = `${String(d.getDate()).padStart(2, "0")} ${months[d.getMonth()]} ${d.getFullYear()}`;
+  const timePart = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return `${datePart}, ${timePart}`;
 }
 
 // Normalise a report's route-difficulty into green / yellow / red / "" (not set),

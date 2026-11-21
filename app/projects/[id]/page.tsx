@@ -7690,18 +7690,30 @@ function RouteSetupModal({
         });
       }
       // Upload the diagrams in a stable slot order so the Word export shows
-      // Without Load → With Load → Turning Circle → Other.
+      // Without Load → With Load → Turning Circle → Stability. Each file's slot
+      // is encoded as a short tag in its stored file name (e.g.
+      // "GAWOL__drawing.png") so the export can print every diagram under its
+      // OWN heading instead of stacking them together.
       const gaSlotOrder = [
         "GA Drawing — Without Load",
         "GA Drawing — With Load",
         "Turning Circle Drawing",
-        "Other diagram",
+        "Stability Drawing",
       ];
-      const orderedGaFiles = gaFiles
-        .map((f, i) => ({ f, pri: gaSlotOrder.indexOf(gaLabels[i] || "Other diagram") }))
-        .sort((a, b) => (a.pri === -1 ? 99 : a.pri) - (b.pri === -1 ? 99 : b.pri))
-        .map((x) => x.f);
-      for (const originalFile of orderedGaFiles) {
+      const gaSlotTag: Record<string, string> = {
+        "GA Drawing — Without Load": "GAWOL",
+        "GA Drawing — With Load": "GAWL",
+        "Turning Circle Drawing": "TURN",
+        "Stability Drawing": "STAB",
+      };
+      const orderedGa = gaFiles
+        .map((f, i) => ({ f, label: gaLabels[i] || "Stability Drawing" }))
+        .sort((a, b) => {
+          const pa = gaSlotOrder.indexOf(a.label);
+          const pb = gaSlotOrder.indexOf(b.label);
+          return (pa === -1 ? 99 : pa) - (pb === -1 ? 99 : pb);
+        });
+      for (const { f: originalFile, label } of orderedGa) {
         const storageFile = isPdfFile(originalFile)
           ? await convertPdfFirstPageToPngFile(originalFile)
           : originalFile;
@@ -7710,12 +7722,17 @@ function RouteSetupModal({
         const storagePath = `projects/${projectId}/${Date.now()}_${safeName}`;
         const uploaded = await uploadToBucket("ga-drawings", storagePath, storageFile);
 
+        // Tag the stored file name with the diagram slot so the Word export
+        // knows which heading this drawing belongs under.
+        const slotTag = gaSlotTag[label] || "";
+        const taggedName = slotTag ? `${slotTag}__${storageFile.name}` : storageFile.name;
+
         rows.push({
           file_url: uploaded.publicUrl,
           imageUrl: uploaded.publicUrl,
           imageKey: uploaded.path,
-          file_name: storageFile.name,
-          fileName: storageFile.name,
+          file_name: taggedName,
+          fileName: taggedName,
           mime_type: storageFile.type || "image/png",
           mimeType: storageFile.type || "image/png",
           file_size: storageFile.size || null,
@@ -8090,7 +8107,7 @@ function RouteSetupModal({
           />
 
           <div style={{ display: "grid", gap: 10 }}>
-            {["GA Drawing — Without Load", "GA Drawing — With Load", "Turning Circle Drawing", "Other diagram"].map((slot) => {
+            {["GA Drawing — Without Load", "GA Drawing — With Load", "Turning Circle Drawing", "Stability Drawing"].map((slot) => {
               const slotFiles = gaFiles
                 .map((f, i) => ({ f, i }))
                 .filter(({ i }) => (gaLabels[i] || "Other") === slot);
@@ -8248,7 +8265,7 @@ function RouteSetupModal({
                 type="button"
                 style={styles.btnPrimary}
                 onClick={() => setStep((s) => Math.min(WIZARD_STEPS.length - 1, s + 1))}
-                disabled={saving || (step === 0 && (!fromLabel || !toLabel))}
+                disabled={saving}
               >
                 Next →
               </button>
@@ -8262,7 +8279,7 @@ function RouteSetupModal({
 
         <div style={styles.modalNote}>
           {step === 0 && (!fromLabel || !toLabel)
-            ? "Enter the Start (From) and End (To) to continue."
+            ? "Tip: set Start (From) and End (To) — they auto-fill the Conclusion. You can still continue without them."
             : step < WIZARD_STEPS.length - 1
               ? `Step ${step + 1} of ${WIZARD_STEPS.length} — ${WIZARD_STEPS[step]}.`
               : "After saving, Export will open automatically."}

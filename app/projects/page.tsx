@@ -3894,7 +3894,19 @@ export default function ProjectsPage() {
               disabled={combining}
             />
 
-            <div style={styles.modalActions}>
+            {/* Sticky footer so Cancel/Combine stay visible once the KM list
+                makes the modal taller than the screen (was scrolling off). */}
+            <div
+              style={{
+                ...styles.modalActions,
+                position: "sticky",
+                bottom: 0,
+                background: "#fff",
+                paddingTop: 12,
+                marginTop: 4,
+                borderTop: "1px solid #EAECF0",
+              }}
+            >
               <button
                 style={styles.btnGhost}
                 onClick={() => setCombineOpen(false)}
