@@ -18,7 +18,12 @@ import {
 import { descriptionForCategory } from "../../../lib/observationTemplates";
 import { fetchPhotoBlob, loadCanvasSafeImage } from "../../../lib/authedImage";
 import { replacePhotoImage } from "../../../lib/replacePhoto";
-import { buildStandardConclusionHtml, STANDARD_OBJECTIVE_DEFAULT } from "../../../lib/standardReportText";
+import {
+  buildStandardConclusionHtml,
+  STANDARD_OBJECTIVE_DEFAULT,
+  STANDARD_HINDRANCE_ROWS,
+  STANDARD_HINDRANCE_CONSIDERATIONS,
+} from "../../../lib/standardReportText";
 import PizZip from "pizzip";
 
 type VehicleMovement = "green" | "yellow" | "red" | "";
@@ -7334,12 +7339,83 @@ function RouteSetupModal({
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Step-by-step wizard: 0 Route(From→To) · 1 Map · 2 Diagrams · 3 Texts · 4 Review
+  // Step-by-step wizard, in the SAME order as the reference report so the user
+  // uploads each part in sequence:
+  // 0 Route(From→To) · 1 Objective & Map · 2 Diagrams · 3 Summary of
+  // Observations · 4 Hindrance Solutions · 5 Stage Summary · 6 Conclusion ·
+  // 7 Review
   const [step, setStep] = useState(0);
-  const WIZARD_STEPS = ["Route", "Map", "Diagrams", "Texts", "Review"];
+  const WIZARD_STEPS = [
+    "Route",
+    "Objective & Map",
+    "Diagrams",
+    "Summary",
+    "Hindrance",
+    "Stage Summary",
+    "Conclusion",
+    "Review",
+  ];
 
   // Objective keeps the fixed standard sentence as a starting point.
   const [objective, setObjective] = useState(STANDARD_OBJECTIVE_DEFAULT);
+
+  // ----- #4 Summary of Observations (editable) -----
+  const [soFrom, setSoFrom] = useState("");
+  const [soTo, setSoTo] = useState("");
+  const [soDistance, setSoDistance] = useState("");
+  const [soKeyLocations, setSoKeyLocations] = useState("");
+  const [soFlowChartFile, setSoFlowChartFile] = useState<File | null>(null);
+  const [soFlowChartUrl, setSoFlowChartUrl] = useState("");
+
+  // ----- #5 Hindrance Solutions (editable table + considerations) -----
+  const [hindranceRows, setHindranceRows] = useState<{ hindrance: string; solution: string }[]>(
+    () => STANDARD_HINDRANCE_ROWS.map((r) => ({ ...r }))
+  );
+  const [considerations, setConsiderations] = useState<string[]>(() => [
+    ...STANDARD_HINDRANCE_CONSIDERATIONS,
+  ]);
+
+  // ----- #6 Stage Summary image (optional, replaces the auto table) -----
+  const [stageImageFile, setStageImageFile] = useState<File | null>(null);
+  const [stageImageUrl, setStageImageUrl] = useState("");
+
+  // Shared field styles + row handlers for the new wizard steps.
+  const wzInput = {
+    height: 44,
+    borderRadius: 12,
+    border: "1px solid #D0D5DD",
+    padding: "0 12px",
+    fontWeight: 700,
+    outline: "none",
+    background: "#fff",
+    width: "100%",
+  } as const;
+  const wzArea = {
+    minHeight: 70,
+    borderRadius: 12,
+    border: "1px solid #D0D5DD",
+    padding: "10px 12px",
+    fontWeight: 600,
+    outline: "none",
+    background: "#fff",
+    width: "100%",
+    fontFamily: "inherit",
+  } as const;
+  const wzFieldLabel = {
+    display: "grid",
+    gap: 6,
+    fontWeight: 900,
+    fontSize: 12,
+    color: "#344054",
+  } as const;
+  const setHinRow = (i: number, field: "hindrance" | "solution", val: string) =>
+    setHindranceRows((p) => p.map((r, idx) => (idx === i ? { ...r, [field]: val } : r)));
+  const addHinRow = () => setHindranceRows((p) => [...p, { hindrance: "", solution: "" }]);
+  const rmHinRow = (i: number) => setHindranceRows((p) => p.filter((_, idx) => idx !== i));
+  const setConsid = (i: number, val: string) =>
+    setConsiderations((p) => p.map((s, idx) => (idx === i ? val : s)));
+  const addConsid = () => setConsiderations((p) => [...p, ""]);
+  const rmConsid = (i: number) => setConsiderations((p) => p.filter((_, idx) => idx !== i));
 
   const [loadingExisting, setLoadingExisting] = useState(false);
   const [existingMapUrl, setExistingMapUrl] = useState<string>("");
@@ -7600,6 +7676,51 @@ function RouteSetupModal({
             }))
             .filter((x) => x.file_url)
         );
+
+        // Load the editable report sections (Summary of Observations, Hindrance
+        // Solutions, Stage-Summary image). These are per-project and independent
+        // of the page. Any missing section keeps its default.
+        try {
+          const secHeaders = token ? { Authorization: `Bearer ${token}` } : undefined;
+          const getSection = async (key: string) => {
+            const r = await fetch(
+              `/api/projects/${encodeURIComponent(projectId)}/report-sections/${key}`,
+              { method: "GET", credentials: "include", headers: secHeaders }
+            );
+            const j = await r.json().catch(() => ({} as any));
+            return r.ok ? j?.data ?? null : null;
+          };
+          const [obs, hin, stg] = await Promise.all([
+            getSection("observation-summary"),
+            getSection("hindrance"),
+            getSection("stage-image"),
+          ]);
+          if (obs) {
+            setSoFrom(String(obs.fromText || ""));
+            setSoTo(String(obs.toText || ""));
+            setSoDistance(String(obs.distance || ""));
+            setSoKeyLocations(String(obs.keyLocations || ""));
+            setSoFlowChartUrl(String(obs.flowChartUrl || ""));
+          }
+          if (hin) {
+            if (Array.isArray(hin.rows) && hin.rows.length) {
+              setHindranceRows(
+                hin.rows.map((r: any) => ({
+                  hindrance: String(r?.hindrance || ""),
+                  solution: String(r?.solution || ""),
+                }))
+              );
+            }
+            if (Array.isArray(hin.considerations) && hin.considerations.length) {
+              setConsiderations(hin.considerations.map((s: any) => String(s || "")));
+            }
+          }
+          if (stg && stg.imageUrl) {
+            setStageImageUrl(String(stg.imageUrl || ""));
+          }
+        } catch {
+          /* non-fatal: keep defaults */
+        }
       } catch (e: any) {
         setErr(e?.message || String(e));
       } finally {
@@ -7768,6 +7889,60 @@ function RouteSetupModal({
         throw new Error(saveData?.error || "Failed to save GA drawing");
       }
 
+      // Persist the editable report sections (#4 Summary of Observations,
+      // #5 Hindrance Solutions, #6 Stage-Summary image). Non-fatal: a failure
+      // here never blocks the main GA-drawing save.
+      try {
+        let flowChartUrl = soFlowChartUrl;
+        if (soFlowChartFile) {
+          const ext = soFlowChartFile.name.split(".").pop() || "png";
+          const up = await uploadToBucket(
+            "ga-drawings",
+            `projects/${projectId}/${Date.now()}_flowchart.${ext}`,
+            soFlowChartFile
+          );
+          flowChartUrl = up.publicUrl;
+        }
+        let stageImgUrl = stageImageUrl;
+        if (stageImageFile) {
+          const ext = stageImageFile.name.split(".").pop() || "png";
+          const up = await uploadToBucket(
+            "ga-drawings",
+            `projects/${projectId}/${Date.now()}_stage.${ext}`,
+            stageImageFile
+          );
+          stageImgUrl = up.publicUrl;
+        }
+        const putSection = (key: string, data: any) =>
+          fetch(`/api/projects/${encodeURIComponent(projectId)}/report-sections/${key}`, {
+            method: "PUT",
+            credentials: "include",
+            headers: {
+              "Content-Type": "application/json",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({ data }),
+          });
+        await Promise.all([
+          putSection("observation-summary", {
+            fromText: soFrom.trim(),
+            toText: soTo.trim(),
+            distance: soDistance.trim(),
+            keyLocations: soKeyLocations.trim(),
+            flowChartUrl: flowChartUrl || "",
+          }),
+          putSection("hindrance", {
+            rows: hindranceRows
+              .map((r) => ({ hindrance: r.hindrance.trim(), solution: r.solution.trim() }))
+              .filter((r) => r.hindrance || r.solution),
+            considerations: considerations.map((s) => s.trim()).filter(Boolean),
+          }),
+          putSection("stage-image", stageImgUrl ? { imageUrl: stageImgUrl } : null),
+        ]);
+      } catch (secErr) {
+        console.warn("[setup] saving report sections failed (non-fatal):", secErr);
+      }
+
       onSaved();
     } catch (e: any) {
       setErr(e?.message || "Failed to save GA drawing");
@@ -7931,7 +8106,7 @@ function RouteSetupModal({
         )}
 
         {/* ===== STEP 3 · Texts: Objective ===== */}
-        {step === 3 && (
+        {step === 1 && (
         <div style={{ display: "grid", gap: 8 }}>
           <div style={styles.routeLabel}>Objective (edit the cargo size as needed)</div>
           <textarea
@@ -8191,8 +8366,253 @@ function RouteSetupModal({
         </div>
         )}
 
-        {/* ===== STEP 3 · Texts: Conclusion (locked, From→To only) ===== */}
+        {/* ===== STEP 3 · Summary of Observations (editable) ===== */}
         {step === 3 && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={styles.routeLabel}>Summary of Observations</div>
+            <div style={styles.modalNote}>
+              Fills the report&apos;s <b>A. Surveyed Route</b> and <b>B. Key Locations</b> section. Leave a
+              field blank to use the automatic value from the points.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <label style={wzFieldLabel}>
+                From (start)
+                <input
+                  value={soFrom}
+                  onChange={(e) => setSoFrom(e.target.value)}
+                  placeholder="e.g. Sameep Engineering, Navsari"
+                  style={wzInput}
+                />
+              </label>
+              <label style={wzFieldLabel}>
+                To (destination)
+                <input
+                  value={soTo}
+                  onChange={(e) => setSoTo(e.target.value)}
+                  placeholder="e.g. Mundra Port"
+                  style={wzInput}
+                />
+              </label>
+            </div>
+            <label style={wzFieldLabel}>
+              Distance
+              <input
+                value={soDistance}
+                onChange={(e) => setSoDistance(e.target.value)}
+                placeholder="e.g. 381.65 km  (blank = auto from points)"
+                style={wzInput}
+              />
+            </label>
+            <label style={wzFieldLabel}>
+              Key Locations (the route chain — type it as it should read)
+              <textarea
+                value={soKeyLocations}
+                onChange={(e) => setSoKeyLocations(e.target.value)}
+                placeholder="India - Maharashtra - Salem - Kallakurichi - ... - Mundra Port"
+                style={wzArea}
+              />
+            </label>
+            <div style={wzFieldLabel}>
+              Route Survey Flow Chart image (optional)
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setSoFlowChartFile(e.target.files?.[0] || null)}
+                style={{ fontWeight: 600 }}
+              />
+              {(soFlowChartFile || soFlowChartUrl) && (
+                <div style={styles.modalNote}>
+                  {soFlowChartFile ? `Selected: ${soFlowChartFile.name}` : "Kept (already uploaded)"}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ===== STEP 4 · Hindrance Solutions (editable table + considerations) ===== */}
+        {step === 4 && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={styles.routeLabel}>Hindrance Solutions</div>
+            <div style={styles.modalNote}>
+              A table of <b>hindrance → solution</b>, plus the <b>Additional Considerations</b> list.
+              Pre-filled with the standard wording — edit as needed. This section appears in the report
+              once you save it here.
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 2fr 36px",
+                  gap: 8,
+                  fontWeight: 900,
+                  fontSize: 12,
+                  color: "#344054",
+                }}
+              >
+                <div>Hindrance</div>
+                <div>Solution</div>
+                <div />
+              </div>
+              {hindranceRows.map((r, i) => (
+                <div
+                  key={i}
+                  style={{ display: "grid", gridTemplateColumns: "1fr 2fr 36px", gap: 8, alignItems: "start" }}
+                >
+                  <textarea
+                    value={r.hindrance}
+                    onChange={(e) => setHinRow(i, "hindrance", e.target.value)}
+                    placeholder="e.g. Major Obstacles"
+                    style={{ ...wzArea, minHeight: 54 }}
+                  />
+                  <textarea
+                    value={r.solution}
+                    onChange={(e) => setHinRow(i, "solution", e.target.value)}
+                    placeholder="e.g. Height / width clearance identified and prioritized if any."
+                    style={{ ...wzArea, minHeight: 54 }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => rmHinRow(i)}
+                    title="Remove row"
+                    style={{
+                      height: 40,
+                      width: 36,
+                      borderRadius: 10,
+                      border: "1px solid #E4E7EC",
+                      background: "#fff",
+                      color: "#B91C2A",
+                      fontSize: 20,
+                      cursor: "pointer",
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={addHinRow}
+                style={{
+                  alignSelf: "start",
+                  height: 34,
+                  padding: "0 12px",
+                  borderRadius: 10,
+                  border: "1px dashed #6F7A8F",
+                  background: "#F8FAFC",
+                  color: "#1F2937",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                + Add hindrance row
+              </button>
+            </div>
+            <div style={styles.routeLabel}>Additional Considerations</div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {considerations.map((c, i) => (
+                <div
+                  key={i}
+                  style={{ display: "grid", gridTemplateColumns: "24px 1fr 36px", gap: 8, alignItems: "start" }}
+                >
+                  <div style={{ paddingTop: 10, fontWeight: 900, color: "#344054" }}>{i + 1}.</div>
+                  <textarea
+                    value={c}
+                    onChange={(e) => setConsid(i, e.target.value)}
+                    placeholder="e.g. Regulatory Compliance: Confirm all permits and compliance..."
+                    style={{ ...wzArea, minHeight: 54 }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => rmConsid(i)}
+                    title="Remove"
+                    style={{
+                      height: 40,
+                      width: 36,
+                      borderRadius: 10,
+                      border: "1px solid #E4E7EC",
+                      background: "#fff",
+                      color: "#B91C2A",
+                      fontSize: 20,
+                      cursor: "pointer",
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={addConsid}
+                style={{
+                  alignSelf: "start",
+                  height: 34,
+                  padding: "0 12px",
+                  borderRadius: 10,
+                  border: "1px dashed #6F7A8F",
+                  background: "#F8FAFC",
+                  color: "#1F2937",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                + Add consideration
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ===== STEP 5 · Stage Summary image (optional, replaces the auto table) ===== */}
+        {step === 5 && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={styles.routeLabel}>Stage Summary</div>
+            <div style={styles.modalNote}>
+              By default the report builds the Stage Summary table automatically (category / count / %).
+              If you have a <b>pie chart image</b> made elsewhere, upload it here and it will be used
+              <b> instead of</b> the table.
+            </div>
+            <div style={wzFieldLabel}>
+              Stage Summary image (optional — e.g. a pie chart)
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setStageImageFile(e.target.files?.[0] || null)}
+                style={{ fontWeight: 600 }}
+              />
+            </div>
+            {(stageImageFile || stageImageUrl) && (
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={styles.modalNote}>
+                  {stageImageFile
+                    ? `Selected: ${stageImageFile.name}`
+                    : "An image is saved — it will replace the auto table."}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStageImageFile(null);
+                    setStageImageUrl("");
+                  }}
+                  style={{
+                    alignSelf: "start",
+                    height: 34,
+                    padding: "0 12px",
+                    borderRadius: 10,
+                    border: "1px solid #E4E7EC",
+                    background: "#fff",
+                    color: "#B91C2A",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  Remove image (use the auto table)
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ===== STEP 6 · Conclusion (locked, From→To only) ===== */}
+        {step === 6 && (
           <div style={{ display: "grid", gap: 8 }}>
             <div style={styles.routeLabel}>Conclusion &amp; Certification (standard — auto-filled)</div>
             <div style={styles.modalNote}>
@@ -8217,8 +8637,8 @@ function RouteSetupModal({
           </div>
         )}
 
-        {/* ===== STEP 4 · Review & Save ===== */}
-        {step === 4 && (
+        {/* ===== STEP 7 · Review & Save ===== */}
+        {step === 7 && (
           <div style={{ display: "grid", gap: 10 }}>
             <div style={styles.routeLabel}>Review</div>
             <div

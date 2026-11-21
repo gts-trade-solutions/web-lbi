@@ -10,6 +10,7 @@ import { injectDifficultyThemeColors } from "./wordThemeColors";
 import { composeObservation } from "./observationTemplates";
 import { formatNeLat, formatNeLon } from "./coordFormat";
 import { getCategoryDisplayName, normalizeCategory, type StageSummaryRow } from "./categoryDisplay";
+import { STANDARD_HINDRANCE_ROWS, STANDARD_HINDRANCE_CONSIDERATIONS } from "./standardReportText";
 
 // docxtemplater-image-module-free has no TypeScript types shipped.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -2906,6 +2907,74 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const summaryMode = options.summaryMode === true;
   const reportIdsFilter = (options.reportIds || []).filter(Boolean);
 
+  // ----- Editable report-section overrides (Summary of Observations, Hindrance
+  // Solutions, Stage-Summary image). Stored per-project in project_report_sections
+  // and edited via /api/projects/:id/report-sections/:key. Loaded once here so
+  // both the early summary block and the late Stage-Summary injection can use
+  // them. Non-fatal: any failure leaves the defaults in place.
+  let observationSummaryOverride: {
+    fromText?: string;
+    toText?: string;
+    distance?: string;
+    keyLocations?: string;
+    flowChartUrl?: string;
+  } | null = null;
+  let hindranceOverride: {
+    rows?: { hindrance?: string; solution?: string }[];
+    considerations?: string[];
+  } | null = null;
+  let stageImageOverride: { imageUrl?: string } | null = null;
+  if (projectId) {
+    try {
+      const [secRows] = await pool.query(
+        "SELECT section_key, data_json FROM project_report_sections WHERE project_id = ?",
+        [projectId]
+      );
+      for (const r of (Array.isArray(secRows) ? secRows : []) as any[]) {
+        let parsed: any = null;
+        try {
+          parsed = JSON.parse(String(r?.data_json ?? ""));
+        } catch {
+          parsed = null;
+        }
+        if (!parsed) continue;
+        if (r?.section_key === "observation-summary") observationSummaryOverride = parsed;
+        else if (r?.section_key === "hindrance") hindranceOverride = parsed;
+        else if (r?.section_key === "stage-image") stageImageOverride = parsed;
+      }
+    } catch (secErr) {
+      console.warn("[report sections] override load failed - using defaults:", secErr);
+    }
+  }
+
+  // Fetch + size the optional "Route Survey Flow Chart" image shown under the
+  // Summary of Observations (uploaded in the setup wizard). Non-fatal: if it
+  // fails to load, the section just renders without the image.
+  let flowChartImg: { buffer: Buffer; emuW: number; emuH: number } | null = null;
+  if (!summaryMode && observationSummaryOverride?.flowChartUrl) {
+    try {
+      const f = await fetchImageBuffer(String(observationSummaryOverride.flowChartUrl), "flowChart");
+      if (f && Buffer.isBuffer(f.buffer) && f.buffer.length) {
+        const opt = await optimizeDocxImage(f.buffer, "observation", "flowChart");
+        const EMU_PER_INCH_FC = 914400;
+        const emuW = Math.round(7.5 * EMU_PER_INCH_FC);
+        let emuH = Math.round(4.0 * EMU_PER_INCH_FC);
+        const shFc = getSharp();
+        if (shFc) {
+          try {
+            const m = await shFc(opt).metadata();
+            if (m.width && m.height && m.width > 0) emuH = Math.round((emuW * m.height) / m.width);
+          } catch {
+            /* keep fallback height */
+          }
+        }
+        flowChartImg = { buffer: opt, emuW, emuH };
+      }
+    } catch (fcErr) {
+      console.warn("[flow chart] load failed - skipping:", fcErr);
+    }
+  }
+
   console.log("[export actual] started", {
     projectId,
     reportIdsCount: reportIdsFilter.length,
@@ -5582,14 +5651,79 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           const keyLocs = Array.from(
             new Set((observations || []).map((o: any) => String(o.location || "").trim()).filter(Boolean))
           ).join(" - ");
+          // Prefer the per-project editable override (Summary of Observations
+          // step in the setup wizard) over the auto-derived text.
+          const ovFrom = String(observationSummaryOverride?.fromText || "").trim();
+          const ovTo = String(observationSummaryOverride?.toText || "").trim();
+          const ovDistance = String(observationSummaryOverride?.distance || "").trim();
+          const ovKeyLocs = String(observationSummaryOverride?.keyLocations || "").trim();
+          const surveyedRouteLine = ovFrom
+            ? ovTo
+              ? `From ${ovFrom} to ${ovTo}`
+              : `From ${ovFrom}`
+            : routeName
+              ? `From ${routeName}`
+              : "-";
+          const distanceLine = ovDistance
+            ? `Distance: ${ovDistance}`
+            : maxKm > 0
+              ? `Distance: ${maxKm.toFixed(2)} km`
+              : "Distance: -";
+          // Embed the optional flow-chart image into the rendered doc (media +
+          // relationship, the same proven way the route-locations image is
+          // embedded) and show it under "B. Key Locations". Defensive: on any
+          // failure it is simply omitted, never corrupting the document.
+          let flowChartPara = "";
+          if (flowChartImg) {
+            try {
+              const ctF = renderedZip.file("[Content_Types].xml");
+              if (ctF) {
+                let ctX = ctF.asText();
+                if (!/Extension="jpeg"/i.test(ctX) && ctX.includes("</Types>")) {
+                  ctX = ctX.replace(
+                    "</Types>",
+                    `<Default Extension="jpeg" ContentType="image/jpeg"/></Types>`
+                  );
+                  renderedZip.file("[Content_Types].xml", ctX);
+                }
+              }
+              renderedZip.file("word/media/flow_chart.jpeg", flowChartImg.buffer);
+              const relsF = renderedZip.file("word/_rels/document.xml.rels");
+              let relsX = relsF ? relsF.asText() : "";
+              const fcRId = "rIdFlowChart";
+              if (relsX && !relsX.includes(`Id="${fcRId}"`)) {
+                relsX = relsX.replace(
+                  "</Relationships>",
+                  `<Relationship Id="${fcRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/flow_chart.jpeg"/></Relationships>`
+                );
+                renderedZip.file("word/_rels/document.xml.rels", relsX);
+              }
+              flowChartPara =
+                `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="80" w:after="80"/><w:keepLines/></w:pPr>` +
+                `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                `<wp:extent cx="${flowChartImg.emuW}" cy="${flowChartImg.emuH}"/>` +
+                `<wp:docPr id="9400" name="Route Survey Flow Chart"/>` +
+                `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+                `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                `<pic:nvPicPr><pic:cNvPr id="0" name=""/><pic:cNvPicPr/></pic:nvPicPr>` +
+                `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${fcRId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+                `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${flowChartImg.emuW}" cy="${flowChartImg.emuH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+                `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+            } catch (fcEmbedErr) {
+              console.warn("[flow chart] embed failed - omitting:", fcEmbedErr);
+              flowChartPara = "";
+            }
+          }
           const observationsBlock =
             headingP("OBSERVATIONS:") +
             bodyP("Summary of Observations", { bold: true }) +
             bodyP("A. Surveyed Route:", { bold: true }) +
-            bodyP(routeName ? `From ${routeName}` : "-") +
-            bodyP(maxKm > 0 ? `Distance: ${maxKm.toFixed(2)} km` : "Distance: -") +
+            bodyP(surveyedRouteLine) +
+            bodyP(distanceLine) +
             bodyP("B. Key Locations:", { bold: true }) +
-            bodyP(keyLocs || "-") +
+            bodyP(ovKeyLocs || keyLocs || "-") +
+            flowChartPara +
             spacer;
 
           // Page break so the per-point detail tables start on a fresh page,
@@ -8462,12 +8596,106 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   } catch (ovErr) {
     console.warn("[stage summary] override load failed - using auto:", ovErr);
   }
+
+  // ----- Hindrance Solutions + Additional Considerations. A new section the
+  // template never had; injected before the final section properties (the same
+  // structurally-safe spot the Stage Summary uses). Inserted BEFORE the Stage
+  // Summary block below so it reads Hindrance → Stage Summary, matching the
+  // reference report. Defaults come from the standard report wording and are
+  // overridable per-project via the setup wizard. Non-fatal.
+  try {
+    // Opt-in: the Hindrance Solutions section only appears once the user has
+    // saved it in the setup wizard (an override exists). This keeps existing
+    // reports unchanged until the section is deliberately filled in.
+    if (!summaryMode && hindranceOverride) {
+      const hRows = (hindranceOverride?.rows && hindranceOverride.rows.length
+        ? hindranceOverride.rows
+        : STANDARD_HINDRANCE_ROWS
+      )
+        .map((r) => ({
+          hindrance: String(r?.hindrance || "").trim(),
+          solution: String(r?.solution || "").trim(),
+        }))
+        .filter((r) => r.hindrance || r.solution);
+      const considerations = (hindranceOverride?.considerations &&
+      hindranceOverride.considerations.length
+        ? hindranceOverride.considerations
+        : STANDARD_HINDRANCE_CONSIDERATIONS
+      )
+        .map((s) => String(s || "").trim())
+        .filter(Boolean);
+      if (hRows.length || considerations.length) {
+        const zip = doc.getZip();
+        const docFile = zip.file("word/document.xml");
+        if (docFile) {
+          let xml = docFile.asText();
+          const FONT = "Neue Haas Grotesk Text Pro";
+          const esc = (s: string) =>
+            String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          const cell = (
+            text: string,
+            bold: boolean,
+            fill: string,
+            color: string,
+            w: number
+          ) =>
+            `<w:tc><w:tcPr>${fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/>` : ""}` +
+            `<w:tcW w:w="${w}" w:type="dxa"/><w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="160" w:type="dxa"/><w:bottom w:w="120" w:type="dxa"/><w:right w:w="160" w:type="dxa"/></w:tcMar><w:vAlign w:val="center"/></w:tcPr>` +
+            `<w:p><w:pPr><w:spacing w:before="40" w:after="40" w:line="264" w:lineRule="auto"/></w:pPr>` +
+            `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/>${bold ? "<w:b/><w:bCs/>" : ""}<w:color w:val="${color}"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr><w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p></w:tc>`;
+          const heading =
+            `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="160" w:line="240" w:lineRule="auto"/></w:pPr>` +
+            `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="163A2A"/><w:sz w:val="40"/><w:szCs w:val="40"/></w:rPr><w:t>Hindrance Solutions</w:t></w:r></w:p>`;
+          let tableXml = "";
+          if (hRows.length) {
+            const colH = 3200;
+            const colS = 7000;
+            const hr = `<w:tr>${cell("Hindrance", true, "1F7A5A", "FFFFFF", colH)}${cell("Solution", true, "1F7A5A", "FFFFFF", colS)}</w:tr>`;
+            const body = hRows
+              .map(
+                (r) =>
+                  `<w:tr>${cell(r.hindrance || "-", true, "", "111827", colH)}${cell(r.solution || "-", false, "", "111827", colS)}</w:tr>`
+              )
+              .join("");
+            const borders = `<w:tblBorders><w:top w:val="single" w:sz="4" w:color="B7C4BF"/><w:left w:val="single" w:sz="4" w:color="B7C4BF"/><w:bottom w:val="single" w:sz="4" w:color="B7C4BF"/><w:right w:val="single" w:sz="4" w:color="B7C4BF"/><w:insideH w:val="single" w:sz="4" w:color="D7E0DC"/><w:insideV w:val="single" w:sz="4" w:color="D7E0DC"/></w:tblBorders>`;
+            const grid = `<w:tblGrid><w:gridCol w:w="${colH}"/><w:gridCol w:w="${colS}"/></w:tblGrid>`;
+            tableXml = `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>${borders}<w:tblLayout w:type="fixed"/></w:tblPr>${grid}${hr}${body}</w:tbl>`;
+          }
+          const addlHeading = considerations.length
+            ? `<w:p><w:pPr><w:spacing w:before="240" w:after="100"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr><w:t>Additional Considerations</w:t></w:r></w:p>`
+            : "";
+          const addlItems = considerations
+            .map(
+              (c, i) =>
+                `<w:p><w:pPr><w:spacing w:before="20" w:after="20" w:line="264" w:lineRule="auto"/><w:ind w:left="360" w:hanging="360"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:color w:val="111827"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr><w:t xml:space="preserve">${i + 1}. ${esc(c)}</w:t></w:r></w:p>`
+            )
+            .join("");
+          const block = heading + tableXml + `<w:p/>` + addlHeading + addlItems + `<w:p/>`;
+          const bodyClose = xml.lastIndexOf("</w:body>");
+          if (bodyClose !== -1) {
+            const lastSectPr = xml.lastIndexOf("<w:sectPr", bodyClose);
+            const insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
+            xml = xml.slice(0, insertAt) + block + xml.slice(insertAt);
+            zip.file("word/document.xml", xml);
+            console.log("[hindrance] injected", {
+              rows: hRows.length,
+              considerations: considerations.length,
+            });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[hindrance] injection failed - non-fatal:", err);
+  }
+
   try {
     const stageRows: StageSummaryRow[] =
       stageSummaryOverride && stageSummaryOverride.length
         ? stageSummaryOverride
         : categorySummary.map((c) => ({ label: c.categoryLabel, count: c.count }));
-    if (STAGE_SUMMARY_ENABLED && stageRows.length) {
+    const stageImageUrl = String(stageImageOverride?.imageUrl || "").trim();
+    if (STAGE_SUMMARY_ENABLED && (stageRows.length || stageImageUrl)) {
       const zip = doc.getZip();
       const docFile = zip.file("word/document.xml");
       if (docFile) {
@@ -8504,7 +8732,71 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         // paragraph that would strand a blank page when the preceding
         // observation fills its page — see the PAGE_BREAK_PARA note above.
         const heading = `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="163A2A"/><w:sz w:val="40"/><w:szCs w:val="40"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
-        const block = heading + table + `<w:p/>`;
+
+        // If the user uploaded a Stage-Summary image (e.g. a pie chart made
+        // elsewhere), show that image INSTEAD of the auto table. Embedded the
+        // same proven way as the route-locations stepper: add media + a
+        // relationship, size from the PNG's real aspect ratio via sharp.
+        let stageContent = table;
+        if (stageImageUrl) {
+          try {
+            const fetched = await fetchImageBuffer(stageImageUrl, "stageImage");
+            if (fetched && Buffer.isBuffer(fetched.buffer) && fetched.buffer.length > 0) {
+              const ctFileSi = zip.file("[Content_Types].xml");
+              if (ctFileSi) {
+                let ctXmlSi = ctFileSi.asText();
+                if (!ctXmlSi.includes('Extension="png"')) {
+                  ctXmlSi = ctXmlSi.replace(
+                    "</Types>",
+                    `<Default Extension="png" ContentType="image/png"/></Types>`
+                  );
+                  zip.file("[Content_Types].xml", ctXmlSi);
+                }
+              }
+              const siMedia = "word/media/stage_summary_image.png";
+              zip.file(siMedia, fetched.buffer);
+              const siRelsFile = zip.file("word/_rels/document.xml.rels");
+              let siRelsXml = siRelsFile ? siRelsFile.asText() : "";
+              const siRId = "rIdStageSummaryImage";
+              if (siRelsXml && !siRelsXml.includes(`Id="${siRId}"`)) {
+                siRelsXml = siRelsXml.replace(
+                  "</Relationships>",
+                  `<Relationship Id="${siRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/stage_summary_image.png"/></Relationships>`
+                );
+                zip.file("word/_rels/document.xml.rels", siRelsXml);
+              }
+              const EMU_PER_INCH_SI = 914400;
+              let siW = Math.round(8.0 * EMU_PER_INCH_SI);
+              let siH = Math.round(5.5 * EMU_PER_INCH_SI);
+              const sharpSi = getSharp();
+              if (sharpSi) {
+                try {
+                  const meta = await sharpSi(fetched.buffer).metadata();
+                  if (meta.width && meta.height && meta.width > 0) {
+                    siH = Math.round((siW * meta.height) / meta.width);
+                  }
+                } catch {
+                  /* keep fallback dims */
+                }
+              }
+              stageContent =
+                `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="0"/><w:keepNext/><w:keepLines/></w:pPr>` +
+                `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                `<wp:extent cx="${siW}" cy="${siH}"/>` +
+                `<wp:docPr id="9300" name="Stage Summary Image"/>` +
+                `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+                `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                `<pic:nvPicPr><pic:cNvPr id="0" name=""/><pic:cNvPicPr/></pic:nvPicPr>` +
+                `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${siRId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+                `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${siW}" cy="${siH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+                `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+            }
+          } catch (siErr) {
+            console.warn("[stage summary] image embed failed - falling back to table:", siErr);
+          }
+        }
+        const block = heading + stageContent + `<w:p/>`;
         // Insert BEFORE the final body-level section properties — the ONLY
         // structurally-safe spot. (Placing it at the GA section boundary means
         // rewriting a section break, which repeatedly corrupted the file.) The

@@ -14,6 +14,37 @@
 export const STANDARD_OBJECTIVE_DEFAULT =
   "To study and evaluate the feasibility of moving cargo measuring dimensions of Consignment: L __ m X W __ m X H __ m including trailer - WT __ Tons";
 
+/** Default "Hindrance Solutions" table rows (hindrance → solution), captured
+ *  from the RACE "… to Mundra Port" detail report. Editable per job. */
+export const STANDARD_HINDRANCE_ROWS: { hindrance: string; solution: string }[] = [
+  {
+    hindrance: "Major Obstacles",
+    solution:
+      "Height / width clearance and necessary road adjustments identified and prioritized if any.",
+  },
+  {
+    hindrance: "Minor Hindrances",
+    solution:
+      "Issues such as tree branches and cable clearances addressed with specific solutions.",
+  },
+  {
+    hindrance: "Documentation",
+    solution: "Comprehensive solutions detailed in the accompanying detailed report.",
+  },
+];
+
+/** Default "Additional Considerations" numbered list, captured from the same
+ *  report. Editable per job. */
+export const STANDARD_HINDRANCE_CONSIDERATIONS: string[] = [
+  "Regulatory Compliance: Confirm all permits and compliance with local transport regulations for oversized vehicles to avoid legal issues.",
+  "Route Review: Perform a final check of the route shortly before transport to identify any new obstacles or changes.",
+  "Stakeholder Engagement: Notify local authorities and communities along the route of the transport schedule to foster cooperation and minimize disruptions.",
+  "Safety Protocols: Implement comprehensive safety measures, including warning signs and possibly traffic management, to ensure the safety of both transport personnel and the public.",
+  "Contingency Planning: Develop plans for unforeseen delays or route changes, including alternative routes and communication strategies for the team.",
+  "Monitoring Systems: Utilize GPS tracking to monitor the vehicle in real-time, ensuring adherence to the planned route and prompt response to any issues.",
+  "Post-Transport Review: Conduct a debriefing after the transport to assess the process, identify any issues faced, and gather insights for future operations.",
+];
+
 function escapeHtml(s: string): string {
   return String(s || "")
     .replace(/&/g, "&amp;")
