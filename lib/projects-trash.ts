@@ -77,6 +77,44 @@ export function ensureStatusColumn(): Promise<boolean> {
   return ensuredStatus;
 }
 
+// The `source` column marks how a project was created ("imported" for an
+// uploaded old report, otherwise an app survey). It drives the "Imported" vs
+// "App survey" badge on the projects list. Added lazily like the others so no
+// manual migration is needed — without it, the import's source="imported"
+// value was silently dropped and imported reports showed as "App survey".
+let ensuredSource: Promise<boolean> | null = null;
+export function ensureSourceColumn(): Promise<boolean> {
+  if (!ensuredSource) {
+    ensuredSource = (async () => {
+      try {
+        if (!(await columnExists("source"))) {
+          await pool.query(
+            "ALTER TABLE projects ADD COLUMN source VARCHAR(32) NULL DEFAULT NULL"
+          );
+        }
+        // Backfill: projects imported before `source` was saved are detectable
+        // by their "Imported from …" description. Tag them so they show as
+        // "Imported" everywhere, including views that only check `source`.
+        try {
+          if (await columnExists("description")) {
+            await pool.query(
+              "UPDATE projects SET source='imported' WHERE (source IS NULL OR source='') AND description LIKE 'Imported from%'"
+            );
+          }
+        } catch {
+          // Best-effort backfill — ignore if it can't run.
+        }
+        return true;
+      } catch (error) {
+        console.error("[projects-trash] failed to ensure source column:", error);
+        ensuredSource = null; // allow a retry on the next request
+        return false;
+      }
+    })();
+  }
+  return ensuredSource;
+}
+
 /**
  * Permanently remove any project that has been in the recycle bin longer than
  * the retention window. Safe to call on every trash read.

@@ -14,6 +14,7 @@ import { parsePdfReport } from "../../../../lib/pdfReportImport";
 import { renderAnnotatedPhotos } from "../../../../lib/docxRenderAnnotated";
 import { uploadBufferToS3 } from "../../../../lib/s3";
 import { logActivity } from "../../../../lib/activityLog";
+import { ensureSourceColumn } from "../../../../lib/projects-trash";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -164,6 +165,10 @@ export async function POST(request: Request) {
       return getPhoto(zipPath);
     };
 
+    // Make sure the `source` column exists BEFORE reading the column list, so
+    // the project's source="imported" marker is actually saved (otherwise it is
+    // silently dropped and the import shows as "App survey" on the list).
+    await ensureSourceColumn();
     const projectCols = await columnsOf("projects");
     const reportCols = await columnsOf("reports");
     const photoCols = await columnsOf("report_photos");

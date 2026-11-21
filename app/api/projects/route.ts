@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import pool from "../../../lib/db";
 import { requireAuth } from "../../../lib/auth";
-import { ensureTrashColumns, ensureStatusColumn } from "../../../lib/projects-trash";
+import { ensureTrashColumns, ensureStatusColumn, ensureSourceColumn } from "../../../lib/projects-trash";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,6 +27,7 @@ export async function GET(request: Request) {
     requireAuth(request);
     await ensureTrashColumns();
     await ensureStatusColumn();
+    await ensureSourceColumn();
     const columns = await getProjectColumns();
 
     const orderBy = columns.has("created_at")

@@ -10,7 +10,7 @@ import { injectDifficultyThemeColors } from "./wordThemeColors";
 import { composeObservation } from "./observationTemplates";
 import { formatNeLat, formatNeLon } from "./coordFormat";
 import { getCategoryDisplayName, normalizeCategory, type StageSummaryRow } from "./categoryDisplay";
-import { STANDARD_HINDRANCE_ROWS, STANDARD_HINDRANCE_CONSIDERATIONS } from "./standardReportText";
+import { STANDARD_HINDRANCE_ROWS, STANDARD_HINDRANCE_CONSIDERATIONS, buildStandardConclusionHtml } from "./standardReportText";
 
 // docxtemplater-image-module-free has no TypeScript types shipped.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1244,6 +1244,95 @@ function stripHtml(input: string) {
     .trim();
 }
 
+// Sentinel put into the {conclusion} slot at render time. After docxtemplater
+// runs, the post-render pass finds this single paragraph and swaps it for the
+// neatly-formatted Conclusion & Certification body (see conclusionHtmlToOoxml).
+const CONCLUSION_SENTINEL = "RACE_CONCLUSION_BODY_PLACEHOLDER_X7";
+
+// Convert the inline part of a conclusion block (text + <strong>/<b> + <br/>)
+// into Word runs. The incoming text is already XML-safe (buildStandardConclusion
+// Html escapes &,<,> ), so entities pass straight through.
+function conclusionInlineRunsToOoxml(inner: string, sz: number): string {
+  const runText = (t: string, bold: boolean): string => {
+    if (!t) return "";
+    return (
+      `<w:r><w:rPr>${bold ? "<w:b/><w:bCs/>" : ""}` +
+      `<w:color w:val="111111"/><w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/></w:rPr>` +
+      `<w:t xml:space="preserve">${t}</w:t></w:r>`
+    );
+  };
+  let out = "";
+  let bold = false;
+  let last = 0;
+  const tokenRe = /<\/?(strong|b|br)\s*\/?>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tokenRe.exec(inner)) !== null) {
+    out += runText(inner.slice(last, m.index).replace(/\s+/g, " "), bold);
+    const tag = m[1].toLowerCase();
+    if (tag === "br") out += "<w:r><w:br/></w:r>";
+    else bold = m[0][1] !== "/"; // "<strong>" opens, "</strong>" closes
+    last = tokenRe.lastIndex;
+  }
+  out += runText(inner.slice(last).replace(/\s+/g, " "), bold);
+  return out;
+}
+
+// Turn the fixed Conclusion HTML (<p>, <strong>, <br/>, <ul>/<li>) into neat
+// Word paragraphs: proper paragraph breaks, bold sub-headers and bullet lists,
+// instead of one flat run (or a blank page when the saved value is empty).
+function conclusionHtmlToOoxml(html: string): string {
+  const BODY = 22; // 11pt
+  const src = String(html || "");
+  const paras: string[] = [];
+  const blockRe = /<ul\b[^>]*>([\s\S]*?)<\/ul>|<p\b[^>]*>([\s\S]*?)<\/p>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(src)) !== null) {
+    if (m[1] !== undefined) {
+      // <ul> list → one bulleted paragraph per <li>
+      const liRe = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
+      let li: RegExpExecArray | null;
+      while ((li = liRe.exec(m[1])) !== null) {
+        const bullet =
+          `<w:r><w:rPr><w:color w:val="111111"/><w:sz w:val="${BODY}"/><w:szCs w:val="${BODY}"/></w:rPr>` +
+          `<w:t xml:space="preserve">•  </w:t></w:r>`;
+        paras.push(
+          `<w:p><w:pPr><w:spacing w:before="0" w:after="40" w:line="264" w:lineRule="auto"/>` +
+            `<w:ind w:left="360" w:hanging="220"/></w:pPr>` +
+            bullet +
+            conclusionInlineRunsToOoxml(li[1], BODY) +
+            `</w:p>`
+        );
+      }
+    } else {
+      // <p> → one justified paragraph
+      paras.push(
+        `<w:p><w:pPr><w:spacing w:before="0" w:after="120" w:line="264" w:lineRule="auto"/><w:jc w:val="both"/></w:pPr>` +
+          conclusionInlineRunsToOoxml(m[2], BODY) +
+          `</w:p>`
+      );
+    }
+  }
+  if (!paras.length) {
+    // Unknown markup → split the stripped text on blank lines so it is at least
+    // readable rather than one wall of text.
+    const txt = stripHtml(src) || "-";
+    for (const chunk of txt.split(/\n{2,}/)) {
+      const safe = chunk
+        .trim()
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      if (!safe) continue;
+      paras.push(
+        `<w:p><w:pPr><w:spacing w:before="0" w:after="120" w:line="264" w:lineRule="auto"/></w:pPr>` +
+          `<w:r><w:rPr><w:color w:val="111111"/><w:sz w:val="${BODY}"/><w:szCs w:val="${BODY}"/></w:rPr>` +
+          `<w:t xml:space="preserve">${safe}</w:t></w:r></w:p>`
+      );
+    }
+  }
+  return paras.join("");
+}
+
 function formatDateDDMMYYYYDot(d = new Date()) {
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -2056,6 +2145,171 @@ async function generateRouteLocationsStepper(
       "[ROUTE LOCATIONS STEPPER FAILED] SVG→PNG render failed " +
         "(probably libvips lacks librsvg in this build). Word-table " +
         "fallback will be used instead. Error:",
+      (err as Error)?.message || String(err)
+    );
+    return null;
+  }
+}
+
+/**
+ * Render the route key points as a horizontal numbered "snake" map
+ * (START ▶ ① ▶ ② … ▶ DESTINATION), matching the gold-standard route
+ * infographic but using the typed key-point NAMES only (no photos).
+ * Boustrophedon layout: rows alternate L→R / R→L, joined by arrows.
+ * Rendered as SVG → PNG via sharp (same pipeline as the stepper image).
+ * Returns a PNG Buffer, or null if sharp/SVG rendering is unavailable.
+ */
+async function generateRouteLocationsSnake(
+  labels: { label: string; pin_type: string }[]
+): Promise<Buffer | null> {
+  const sharp = getSharp();
+  if (!sharp) return null;
+  const items = labels.filter((l) => l.label).slice(0, 40);
+  if (items.length === 0) return null;
+
+  const escapeXml = (s: string) =>
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+
+  // Number-badge colours cycle like the sample map.
+  const BADGE_COLORS = [
+    "#2563EB", "#EA580C", "#16A34A", "#7C3AED",
+    "#DB2777", "#0891B2", "#CA8A04", "#DC2626",
+  ];
+
+  type Cell = { kind: "start" | "dest" | "point"; label: string; n?: number; color?: string };
+  const cells: Cell[] = [];
+  cells.push({ kind: "start", label: "START" });
+  items.forEach((it, i) =>
+    cells.push({
+      kind: "point",
+      label: it.label,
+      n: i + 1,
+      color: BADGE_COLORS[i % BADGE_COLORS.length],
+    })
+  );
+  cells.push({ kind: "dest", label: "DESTINATION" });
+
+  const T = cells.length;
+  // Cards per row: wide but balanced (≈6 per row).
+  const perRow = T <= 6 ? T : Math.ceil(T / Math.ceil(T / 6));
+  const rows = Math.ceil(T / perRow);
+
+  const CARD_W = 230, CARD_H = 92;
+  const ARROW_W = 60;   // horizontal gap between cards (room for the arrow)
+  const ROW_GAP = 78;   // vertical gap between rows (room for the down arrow)
+  const PAD = 36;
+  const HEADING_H = 54;
+
+  const W = PAD * 2 + perRow * CARD_W + (perRow - 1) * ARROW_W;
+  const H = PAD * 2 + HEADING_H + rows * CARD_H + (rows - 1) * ROW_GAP;
+
+  const pos = (i: number) => {
+    const row = Math.floor(i / perRow);
+    const inRow = i % perRow;
+    const col = row % 2 === 0 ? inRow : perRow - 1 - inRow; // snake reversal
+    const x = PAD + col * (CARD_W + ARROW_W);
+    const y = PAD + HEADING_H + row * (CARD_H + ROW_GAP);
+    return { row, x, y };
+  };
+
+  const HEAD = 11;
+  const aRight = (x1: number, x2: number, y: number) =>
+    `<line x1="${x1}" y1="${y}" x2="${x2 - HEAD}" y2="${y}" stroke="#2563EB" stroke-width="6" stroke-linecap="round"/>` +
+    `<path d="M ${x2} ${y} L ${x2 - HEAD} ${y - HEAD * 0.8} L ${x2 - HEAD} ${y + HEAD * 0.8} Z" fill="#2563EB"/>`;
+  const aLeft = (x1: number, x2: number, y: number) =>
+    `<line x1="${x1}" y1="${y}" x2="${x2 + HEAD}" y2="${y}" stroke="#2563EB" stroke-width="6" stroke-linecap="round"/>` +
+    `<path d="M ${x2} ${y} L ${x2 + HEAD} ${y - HEAD * 0.8} L ${x2 + HEAD} ${y + HEAD * 0.8} Z" fill="#2563EB"/>`;
+  const aDown = (x: number, y1: number, y2: number) =>
+    `<line x1="${x}" y1="${y1}" x2="${x}" y2="${y2 - HEAD}" stroke="#2563EB" stroke-width="6" stroke-linecap="round"/>` +
+    `<path d="M ${x} ${y2} L ${x - HEAD * 0.8} ${y2 - HEAD} L ${x + HEAD * 0.8} ${y2 - HEAD} Z" fill="#2563EB"/>`;
+
+  const parts: string[] = [];
+  parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#FFFFFF"/>`);
+  parts.push(
+    `<text x="${PAD}" y="${PAD + 34}" font-family="Arial, sans-serif" font-size="30" font-weight="700" fill="#1F2937">ROUTE SURVEY KEY POINTS</text>`
+  );
+
+  // Connector arrows (drawn under the cards).
+  for (let i = 0; i < T - 1; i += 1) {
+    const a = pos(i), b = pos(i + 1);
+    if (a.row === b.row) {
+      const yMid = a.y + CARD_H / 2;
+      if (b.x > a.x) parts.push(aRight(a.x + CARD_W + 6, b.x - 6, yMid));
+      else parts.push(aLeft(a.x - 6, b.x + CARD_W + 6, yMid));
+    } else {
+      const xMid = a.x + CARD_W / 2;
+      parts.push(aDown(xMid, a.y + CARD_H + 4, b.y - 4));
+    }
+  }
+
+  // Cells.
+  for (let i = 0; i < T; i += 1) {
+    const c = cells[i];
+    const p = pos(i);
+    if (c.kind === "point") {
+      parts.push(
+        `<rect x="${p.x}" y="${p.y}" width="${CARD_W}" height="${CARD_H}" rx="16" ry="16" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>`
+      );
+      const bx = p.x + 28, by = p.y + 22;
+      parts.push(`<circle cx="${bx}" cy="${by}" r="20" fill="${c.color}"/>`);
+      parts.push(
+        `<text x="${bx}" y="${by + 8}" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#FFFFFF">${c.n}</text>`
+      );
+      const fs = c.label.length > 16 ? 20 : c.label.length > 11 ? 24 : 27;
+      parts.push(
+        `<text x="${p.x + CARD_W / 2}" y="${p.y + CARD_H / 2 + 26}" text-anchor="middle" font-family="Arial, sans-serif" font-size="${fs}" font-weight="700" fill="#0F172A">${escapeXml(c.label)}</text>`
+      );
+    } else if (c.kind === "start") {
+      const cx = p.x + CARD_W / 2, top = p.y + 4;
+      parts.push(
+        `<g transform="translate(${cx},${top})">` +
+          `<path d="M 0,0 C -16,0 -24,11 -24,19 C -24,37 0,60 0,60 C 0,60 24,37 24,19 C 24,11 16,0 0,0 Z" fill="#16A34A" stroke="#0F7A33" stroke-width="2"/>` +
+          `<circle cx="0" cy="20" r="8" fill="#FFFFFF"/>` +
+        `</g>`
+      );
+      parts.push(
+        `<text x="${cx}" y="${p.y + CARD_H + 4}" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#16A34A">START</text>`
+      );
+    } else {
+      // Checkered destination flag.
+      const fx = p.x + CARD_W / 2 - 22, fy = p.y + 8, sq = 14;
+      parts.push(`<line x1="${fx}" y1="${fy}" x2="${fx}" y2="${fy + 60}" stroke="#334155" stroke-width="4"/>`);
+      for (let r = 0; r < 2; r += 1)
+        for (let cc = 0; cc < 3; cc += 1) {
+          const fill = (r + cc) % 2 === 0 ? "#111827" : "#FFFFFF";
+          parts.push(
+            `<rect x="${fx + 2 + cc * sq}" y="${fy + r * sq}" width="${sq}" height="${sq}" fill="${fill}" stroke="#111827" stroke-width="1"/>`
+          );
+        }
+      parts.push(
+        `<text x="${p.x + CARD_W / 2}" y="${p.y + CARD_H + 4}" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#DC2626">DESTINATION</text>`
+      );
+    }
+  }
+
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+    parts.join("") +
+    `</svg>`;
+
+  try {
+    const buf = await sharp(Buffer.from(svg)).png().toBuffer();
+    console.log("[ROUTE LOCATIONS SNAKE GENERATED]", {
+      items: items.length,
+      perRow,
+      rows,
+      svgSize: `${W}x${H}`,
+      bytes: buf.length,
+    });
+    return buf;
+  } catch (err) {
+    console.warn(
+      "[ROUTE LOCATIONS SNAKE] SVG→PNG failed (libvips may lack librsvg) — " +
+        "OOXML snake-table fallback will be used. Error:",
       (err as Error)?.message || String(err)
     );
     return null;
@@ -3612,8 +3866,32 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const objective = valueOrDash(
     routePageRow?.objective ?? projectRow.objective ?? projectRow.description
   );
-  const conclusionSource = gaRow?.conclusion_html || routePageRow?.conclusion_html || "";
-  const conclusion = stripHtml(String(conclusionSource)) || "-";
+  // ----- Conclusion & Certification body.
+  // Prefer the saved conclusion HTML; otherwise fall back to the fixed RACE
+  // standard certification text so the page is NEVER blank. From/To for the
+  // standard text come from the route's first/last key location, else the
+  // project name ("A to B"). The body is rendered as neat formatted paragraphs
+  // in the post-render pass (via CONCLUSION_SENTINEL), not a flat run.
+  const savedConclusionHtml = String(
+    gaRow?.conclusion_html || routePageRow?.conclusion_html || ""
+  ).trim();
+  let conclusionHtmlResolved = savedConclusionHtml;
+  if (!conclusionHtmlResolved) {
+    const locLabels = (routeLocationLabels || [])
+      .map((l) => String(l.label || "").trim())
+      .filter(Boolean);
+    let concFrom = locLabels[0] || "";
+    let concTo = locLabels.length > 1 ? locLabels[locLabels.length - 1] : "";
+    if (!concFrom || !concTo) {
+      const parts = String(projectName || "").split(/\s+to\s+/i);
+      if (parts.length >= 2) {
+        concFrom = concFrom || parts[0].trim();
+        concTo = concTo || parts[parts.length - 1].trim();
+      }
+    }
+    conclusionHtmlResolved = buildStandardConclusionHtml(concFrom, concTo);
+  }
+  const conclusionBodyOoxml = conclusionHtmlToOoxml(conclusionHtmlResolved);
   const dateDot = formatSurveyDate(reports, ".");
   const dateDash = formatSurveyDate(reports, "-");
 
@@ -3679,38 +3957,12 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   //      by the post-render injection pass)
   try {
     if (routeLocationLabels.length > 0) {
-      // Tier 1: sharp + SVG (REAL FONT). Pass empty title — the project
-      // title is in the Word header now so we don't bake it into the image.
-      let stepperBuf = await generateRouteLocationsStepper(
-        routeLocationLabels,
-        ""
-      );
-      // Tier 2: sharp.text + composite (REAL FONT, no SVG/librsvg
-      // needed — works as long as sharp is installed with Pango).
-      if (!stepperBuf || stepperBuf.length === 0) {
-        try {
-          stepperBuf = await renderRouteLocationsStepperViaSharpText(
-            routeLocationLabels
-          );
-        } catch (err) {
-          console.warn(
-            "[export actual] sharp.text stepper renderer threw:",
-            (err as Error)?.message || err
-          );
-        }
-      }
-      // Tier 3: pure-JS bitmap PNG renderer (no native deps at all,
-      // visible pixelation but functional).
-      if (!stepperBuf || stepperBuf.length === 0) {
-        try {
-          stepperBuf = renderRouteLocationsStepperPng(routeLocationLabels);
-        } catch (err) {
-          console.warn(
-            "[export actual] pure-JS PNG stepper renderer threw:",
-            (err as Error)?.message || err
-          );
-        }
-      }
+      // Primary: a horizontal numbered "snake" map (START ▶ ①..N ▶ DEST)
+      // rendered via sharp (SVG→PNG). If that fails (no sharp / no librsvg),
+      // the post-render pass falls back to the OOXML snake table instead — so
+      // we DON'T fall back to the old vertical stepper, which the client asked
+      // us to replace.
+      let stepperBuf = await generateRouteLocationsSnake(routeLocationLabels);
       if (stepperBuf && stepperBuf.length > 0) {
         imageMap.set("routeLocations", {
           buffer: stepperBuf,
@@ -3720,7 +3972,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       }
     }
   } catch (err) {
-    console.warn("[export actual] route locations stepper failed - ignoring:", err);
+    console.warn("[export actual] route locations snake failed - ignoring:", err);
   }
 
   // ----- Observations.
@@ -4972,7 +5224,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const renderData = {
     projectNameUpper: projectName.toUpperCase(),
     objective,
-    conclusion,
+    conclusion: CONCLUSION_SENTINEL,
     dateDot,
     dateDash,
     routeMap: imageMap.has("routeMap") ? "routeMap" : "",
@@ -7272,8 +7524,46 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       // centered paragraph immediately AFTER the route-map drawing.
       // Identifies the route map by EMU width matching ROUTE_MAP_SIZE.
       let routeLocationsStepperInjected = false;
+
+      // The route key points render as a horizontal numbered "snake" map
+      // (START → ①..N → DESTINATION) generated into imageMap("routeLocations")
+      // and injected as an image below. See generateRouteLocationsSnake. The
+      // image injection block + OOXML snake-table fallback are just below.
+
+      // ---- CONCLUSION BODY INJECTION ----
+      // The {conclusion} slot was rendered as a single sentinel paragraph.
+      // Replace that whole paragraph with the neatly-formatted Conclusion &
+      // Certification body (bold sub-headers + bullet lists). If the sentinel
+      // is missing, nothing changes (safe no-op).
+      try {
+        const sentIdx = xml.indexOf(CONCLUSION_SENTINEL);
+        if (sentIdx >= 0 && conclusionBodyOoxml) {
+          const pStart = xml.lastIndexOf("<w:p>", sentIdx);
+          const pEndMarker = xml.indexOf("</w:p>", sentIdx);
+          if (pStart >= 0 && pEndMarker > pStart) {
+            const pEnd = pEndMarker + "</w:p>".length;
+            xml = xml.slice(0, pStart) + conclusionBodyOoxml + xml.slice(pEnd);
+            console.log("[DOCX CONCLUSION BODY INJECTED]", {
+              paras: (conclusionBodyOoxml.match(/<w:p\b/g) || []).length,
+            });
+          }
+        }
+      } catch (concErr) {
+        console.warn("[conclusion body inject] failed - leaving placeholder:", concErr);
+      }
+      // Safety net: never let the raw sentinel show. If it somehow survived,
+      // replace it with the plain conclusion text.
+      if (xml.indexOf(CONCLUSION_SENTINEL) >= 0) {
+        const plain = (stripHtml(conclusionHtmlResolved) || "-")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/\s+/g, " ");
+        xml = xml.split(CONCLUSION_SENTINEL).join(plain);
+      }
+
       const routeLocEntry = imageMap.get("routeLocations");
-      if (routeLocEntry?.buffer && routeLocEntry.buffer.length > 0) {
+      if (!routeLocationsStepperInjected && routeLocEntry?.buffer && routeLocEntry.buffer.length > 0) {
         // 1. Add the stepper PNG to the zip + register a relationship.
         const docRelsFile2 = renderedZip.file("word/_rels/document.xml.rels");
         let docRelsXml2 = docRelsFile2 ? docRelsFile2.asText() : "";
@@ -7300,22 +7590,32 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         }
 
         // 2. Compute display dimensions from the actual PNG aspect ratio
-        //    (read via sharp metadata) so the stepper never stretches.
-        //    Target width: 7" (matches the typical content area). Height
-        //    auto from aspect.
-        const STEPPER_TARGET_W_IN = 7.0;
+        //    (read via sharp metadata) so the snake map never stretches.
+        //    The snake is WIDE, so fill most of the landscape page width
+        //    (≈13.5") but cap the height (≈7") so it still fits on one page.
         const EMU_PER_INCH_2 = 914400;
-        let stepperEmuW = Math.round(STEPPER_TARGET_W_IN * EMU_PER_INCH_2);
+        const SNAKE_MAX_W_IN = 13.5; // landscape content ≈ 15.8"
+        const SNAKE_MAX_H_IN = 7.0;  // leave room for heading + page borders
+        let stepperEmuW = Math.round(SNAKE_MAX_W_IN * EMU_PER_INCH_2);
         let stepperEmuH = Math.round(4.5 * EMU_PER_INCH_2); // safety fallback
         const sharp2 = getSharp();
         if (sharp2) {
           try {
             const meta = await sharp2(routeLocEntry.buffer).metadata();
             if (meta.width && meta.height && meta.width > 0) {
-              stepperEmuH = Math.round(stepperEmuW * (meta.height / meta.width));
+              const aspect = meta.height / meta.width; // h/w
+              let wIn = SNAKE_MAX_W_IN;
+              let hIn = wIn * aspect;
+              if (hIn > SNAKE_MAX_H_IN) {
+                // Too tall at full width — shrink to fit the height cap.
+                hIn = SNAKE_MAX_H_IN;
+                wIn = hIn / aspect;
+              }
+              stepperEmuW = Math.round(wIn * EMU_PER_INCH_2);
+              stepperEmuH = Math.round(hIn * EMU_PER_INCH_2);
             }
           } catch {
-            // Use the safety fallback height if metadata read fails.
+            // Use the safety fallback dimensions if metadata read fails.
           }
         }
 
@@ -7387,7 +7687,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           stepperEmuH,
           stepperHeightInches: (stepperEmuH / EMU_PER_INCH_2).toFixed(2),
         });
-      } else if (routeLocationLabels.length > 0) {
+      } else if (!routeLocationsStepperInjected && routeLocationLabels.length > 0) {
         // ---- SHARP-FREE FALLBACK ----
         // Stepper PNG wasn't generated (sharp unavailable, libvips
         // missing librsvg, etc.). Inject a pure OOXML table instead so
