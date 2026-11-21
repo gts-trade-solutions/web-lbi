@@ -799,6 +799,15 @@ async function optimizeDocxImage(
       // openable and memory stays bounded.
       optimized = await sharp(input)
         .rotate()
+        // Preserve the source photo's colour profile. Phone cameras (iPhone and
+        // most modern Android) shoot in the WIDE "Display P3" colour space with
+        // an embedded ICC profile. sharp drops that profile on JPEG conversion
+        // unless told to keep it, so Word reads the P3 pixels as plain sRGB and
+        // EVERY photo looks colour-shifted (duller / greener). Keeping the ICC
+        // profile lets Word colour-manage the image and show the true colours.
+        // keepIccProfile keeps ONLY the colour profile (not EXIF orientation),
+        // so it never fights the .rotate() auto-orient above.
+        .keepIccProfile()
         .resize({
           width: OBS_PHOTO_TARGET.width,
           height: OBS_PHOTO_TARGET.height,
@@ -7034,22 +7043,30 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         // 2) One "page" per extra GA image: a page-break paragraph, its OWN
         //    heading (GA DRAWING WITH LOAD / TURNING CIRCLE / STABILITY, etc.),
         //    then a centered full-size GA drawing (same size as GA image 0).
-        const GA_CX = GA_DRAWING_SIZE[0] * PX_TO_EMU;
-        const GA_CY = GA_DRAWING_SIZE[1] * PX_TO_EMU;
-        // Heading paragraph for an extra diagram page. Matches the dark, bold
-        // style of the template GA heading; keepNext glues it to its drawing.
+        // Extra-diagram image size. The GA drawing is ~full page height, so a
+        // heading ABOVE a full-size image overflows and the image jumps to the
+        // next page — stranding the title alone on the previous page. Scale the
+        // headed image down a touch so the title + image always sit together on
+        // ONE page.
+        const GA_HEAD_SCALE = 0.9;
+        const GA_CX = Math.round(GA_DRAWING_SIZE[0] * PX_TO_EMU * GA_HEAD_SCALE);
+        const GA_CY = Math.round(GA_DRAWING_SIZE[1] * PX_TO_EMU * GA_HEAD_SCALE);
+        // Heading paragraph for an extra diagram page. pageBreakBefore starts the
+        // new page ON the heading (no separate empty spacer paragraph, which
+        // wasted a line and could push the image off the page); keepNext glues
+        // the heading to its drawing so they never split across pages.
         // Heading text is plain ASCII (letters/space/colon) so no escaping.
         const gaHeadingPara = (heading: string): string =>
           heading
-            ? `<w:p><w:pPr><w:spacing w:before="120" w:after="80"/><w:keepNext/></w:pPr>` +
+            ? `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="80"/><w:keepNext/></w:pPr>` +
               `<w:r><w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/><w:color w:val="1F2937"/></w:rPr>` +
               `<w:t xml:space="preserve">${heading}</w:t></w:r></w:p>`
             : "";
-        const gaPageBlock = (rId: string, dpId: number, heading: string): string =>
-          `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>` +
-          gaHeadingPara(heading) +
+        // The image paragraph. When there is no heading, it carries the
+        // pageBreakBefore itself so the diagram still starts on a fresh page.
+        const gaImagePara = (rId: string, dpId: number, firstOnPage: boolean): string =>
           `<w:p>` +
-            `<w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="0"/><w:keepNext/><w:keepLines/></w:pPr>` +
+            `<w:pPr>${firstOnPage ? "<w:pageBreakBefore/>" : ""}<w:jc w:val="center"/><w:spacing w:before="0" w:after="0"/><w:keepNext/><w:keepLines/></w:pPr>` +
             `<w:r><w:drawing>` +
               `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
                 `<wp:extent cx="${GA_CX}" cy="${GA_CY}"/>` +
@@ -7072,6 +7089,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               `</wp:inline>` +
             `</w:drawing></w:r>` +
           `</w:p>`;
+        const gaPageBlock = (rId: string, dpId: number, heading: string): string =>
+          heading
+            ? gaHeadingPara(heading) + gaImagePara(rId, dpId, false)
+            : gaImagePara(rId, dpId, true);
 
         // 3) Insert all extra GA pages right AFTER GA image 0's paragraph
         //    (found by its GA-sized drawing width). A TIGHT ±4% tolerance so
