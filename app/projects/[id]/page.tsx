@@ -5126,6 +5126,213 @@ export default function ProjectReportsPage() {
 }
 
 /** ✅ Small modal to create a new report exactly at a position */
+// ---- Shared in-app spell check (offline, server-side dictionary) ----
+// Used by BOTH the "Add Report" (new point) and "Edit Report" modals so the
+// checker works identically whether you are adding a point or editing one.
+// (Previously it existed only in the Edit modal, so adding a new point had no
+// spell check.)
+type SpellMiss = { word: string; suggestions: string[]; count: number };
+
+function useSpellCheck(
+  description: string,
+  setDescription: React.Dispatch<React.SetStateAction<string>>,
+  remarksAction: string,
+  setRemarksAction: React.Dispatch<React.SetStateAction<string>>
+) {
+  const [spellBusy, setSpellBusy] = useState(false);
+  const [spellRun, setSpellRun] = useState(false);
+  const [spellDesc, setSpellDesc] = useState<SpellMiss[]>([]);
+  const [spellRem, setSpellRem] = useState<SpellMiss[]>([]);
+
+  const runSpellCheck = async () => {
+    setSpellBusy(true);
+    try {
+      let ignore: string[] = [];
+      try { ignore = JSON.parse(localStorage.getItem("lbi_spell_ignore") || "[]"); } catch {}
+      const res = await fetch("/api/spellcheck", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ fields: { description, remarks: remarksAction }, ignore }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      setSpellDesc(Array.isArray(data?.results?.description) ? data.results.description : []);
+      setSpellRem(Array.isArray(data?.results?.remarks) ? data.results.remarks : []);
+      setSpellRun(true);
+    } catch {
+      setSpellDesc([]);
+      setSpellRem([]);
+      setSpellRun(true);
+    } finally {
+      setSpellBusy(false);
+    }
+  };
+
+  // Replace every whole-word occurrence of a misspelled token with the chosen
+  // fix, preserving the original capitalisation.
+  const applySpellFix = (field: "description" | "remarks", token: string, sug: string) => {
+    const replacement = /^[A-Z]/.test(token) ? sug.charAt(0).toUpperCase() + sug.slice(1) : sug;
+    const esc = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(^|[^A-Za-z'’])${esc}(?![A-Za-z'’])`, "g");
+    const doReplace = (s: string) => s.replace(re, (_m, p1) => `${p1}${replacement}`);
+    if (field === "description") {
+      setDescription((s) => doReplace(s));
+      setSpellDesc((l) => l.filter((x) => x.word !== token));
+    } else {
+      setRemarksAction((s) => doReplace(s));
+      setSpellRem((l) => l.filter((x) => x.word !== token));
+    }
+  };
+
+  // Teach the checker a word (persist in this browser) so it stops flagging it.
+  const ignoreSpellWord = (token: string) => {
+    const w = token.replace(/['’]/g, "").toLowerCase();
+    try {
+      const cur: string[] = JSON.parse(localStorage.getItem("lbi_spell_ignore") || "[]");
+      if (!cur.includes(w)) {
+        cur.push(w);
+        localStorage.setItem("lbi_spell_ignore", JSON.stringify(cur));
+      }
+    } catch {}
+    const strip = (t: string) => t.replace(/['’]/g, "").toLowerCase();
+    setSpellDesc((l) => l.filter((x) => strip(x.word) !== w));
+    setSpellRem((l) => l.filter((x) => strip(x.word) !== w));
+  };
+
+  return { spellBusy, spellRun, spellDesc, spellRem, runSpellCheck, applySpellFix, ignoreSpellWord };
+}
+
+function SpellCheckPanel({ spell }: { spell: ReturnType<typeof useSpellCheck> }) {
+  const {
+    spellBusy, spellRun, spellDesc, spellRem,
+    runSpellCheck, applySpellFix, ignoreSpellWord,
+  } = spell;
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <button
+          type="button"
+          onClick={runSpellCheck}
+          disabled={spellBusy}
+          style={{
+            padding: "9px 16px",
+            borderRadius: 12,
+            border: "1px solid #C7D2FE",
+            background: "#EEF2FF",
+            color: "#3730A3",
+            fontWeight: 800,
+            fontSize: 13,
+            cursor: "pointer",
+            opacity: spellBusy ? 0.7 : 1,
+          }}
+          title="Check Description and Remarks for spelling mistakes"
+        >
+          {spellBusy ? "Checking…" : "🔤 Check spelling"}
+        </button>
+        {spellRun && !spellBusy && spellDesc.length === 0 && spellRem.length === 0 ? (
+          <span style={{ fontSize: 13, fontWeight: 800, color: "#067647" }}>
+            ✓ No spelling mistakes found
+          </span>
+        ) : null}
+      </div>
+
+      {spellDesc.length > 0 || spellRem.length > 0 ? (
+        <div
+          style={{
+            border: "1px solid #FECACA",
+            background: "#FFFBFA",
+            borderRadius: 12,
+            padding: 12,
+            display: "grid",
+            gap: 10,
+          }}
+        >
+          {(
+            [
+              ["description", "In Description", spellDesc],
+              ["remarks", "In Remarks / Action", spellRem],
+            ] as const
+          ).map(([field, label, list]) =>
+            list.length ? (
+              <div key={field} style={{ display: "grid", gap: 6 }}>
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 800,
+                    color: "#6B7280",
+                    textTransform: "uppercase",
+                    letterSpacing: 0.3,
+                  }}
+                >
+                  {label}
+                </div>
+                {list.map((m) => (
+                  <div
+                    key={m.word}
+                    style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
+                  >
+                    <span
+                      style={{
+                        fontWeight: 800,
+                        color: "#B42318",
+                        textDecoration: "underline wavy #F97066",
+                      }}
+                    >
+                      {m.word}
+                    </span>
+                    <span style={{ color: "#98A2B3" }}>→</span>
+                    {m.suggestions.length ? (
+                      m.suggestions.map((s) => (
+                        <button
+                          key={s}
+                          type="button"
+                          onClick={() => applySpellFix(field, m.word, s)}
+                          style={{
+                            padding: "4px 10px",
+                            borderRadius: 999,
+                            border: "1px solid #A6F4C5",
+                            background: "#ECFDF3",
+                            color: "#067647",
+                            fontWeight: 800,
+                            fontSize: 13,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {/^[A-Z]/.test(m.word) ? s.charAt(0).toUpperCase() + s.slice(1) : s}
+                        </button>
+                      ))
+                    ) : (
+                      <span style={{ fontSize: 12, color: "#98A2B3" }}>no suggestion</span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => ignoreSpellWord(m.word)}
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 999,
+                        border: "1px solid #E5E7EB",
+                        background: "#fff",
+                        color: "#475467",
+                        fontWeight: 700,
+                        fontSize: 12,
+                        cursor: "pointer",
+                        marginLeft: "auto",
+                      }}
+                      title="Not a mistake — stop flagging this word on this computer"
+                    >
+                      Ignore
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function InsertReportModal({
   afterIndex,
   onClose,
@@ -5145,6 +5352,8 @@ function InsertReportModal({
   const [files, setFiles] = useState<File[]>([]);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [saving, setSaving] = useState(false);
+  // Same in-app spell check the Edit form has, so a NEW point can be checked too.
+  const spell = useSpellCheck(description, setDescription, remarksAction, setRemarksAction);
 
   const addFiles = (list: FileList | null) => {
     if (!list?.length) return;
@@ -5349,6 +5558,9 @@ function InsertReportModal({
             <option value="red">Red</option>
           </select>
         </div>
+
+        {/* ---- Spell check (Description + Remarks) ---- */}
+        <SpellCheckPanel spell={spell} />
 
         <div style={{ display: "grid", gap: 8 }}>
           <div style={styles.routeLabel}>Photos (optional)</div>
@@ -7760,6 +7972,74 @@ function RouteSetupModal({
     setErr(null);
 
     try {
+      // ---- Persist the editable report sections FIRST ----
+      // #4 Summary of Observations, #5 Hindrance Solutions, #6 Stage-Summary
+      // image. These are saved BEFORE the GA-drawing / route-map checks below
+      // so that filling in (say) just the Hindrance table or Stage pie always
+      // saves — previously the checks threw first and the sections were lost.
+      // Each image upload is isolated so a failed upload can't stop the text
+      // sections (Hindrance / Summary) from saving. Non-fatal throughout.
+      try {
+        const secToken =
+          typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+        let flowChartUrl = soFlowChartUrl;
+        if (soFlowChartFile) {
+          try {
+            const ext = soFlowChartFile.name.split(".").pop() || "png";
+            const up = await uploadToBucket(
+              "ga-drawings",
+              `projects/${projectId}/${Date.now()}_flowchart.${ext}`,
+              soFlowChartFile
+            );
+            flowChartUrl = up.publicUrl;
+          } catch (upErr) {
+            console.warn("[setup] flow-chart upload failed (non-fatal):", upErr);
+          }
+        }
+        let stageImgUrl = stageImageUrl;
+        if (stageImageFile) {
+          try {
+            const ext = stageImageFile.name.split(".").pop() || "png";
+            const up = await uploadToBucket(
+              "ga-drawings",
+              `projects/${projectId}/${Date.now()}_stage.${ext}`,
+              stageImageFile
+            );
+            stageImgUrl = up.publicUrl;
+          } catch (upErr) {
+            console.warn("[setup] stage-image upload failed (non-fatal):", upErr);
+          }
+        }
+        const putSection = (key: string, data: any) =>
+          fetch(`/api/projects/${encodeURIComponent(projectId)}/report-sections/${key}`, {
+            method: "PUT",
+            credentials: "include",
+            headers: {
+              "Content-Type": "application/json",
+              ...(secToken ? { Authorization: `Bearer ${secToken}` } : {}),
+            },
+            body: JSON.stringify({ data }),
+          });
+        await Promise.all([
+          putSection("observation-summary", {
+            fromText: soFrom.trim(),
+            toText: soTo.trim(),
+            distance: soDistance.trim(),
+            keyLocations: soKeyLocations.trim(),
+            flowChartUrl: flowChartUrl || "",
+          }),
+          putSection("hindrance", {
+            rows: hindranceRows
+              .map((r) => ({ hindrance: r.hindrance.trim(), solution: r.solution.trim() }))
+              .filter((r) => r.hindrance || r.solution),
+            considerations: considerations.map((s) => s.trim()).filter(Boolean),
+          }),
+          putSection("stage-image", stageImgUrl ? { imageUrl: stageImgUrl } : null),
+        ]);
+      } catch (secErr) {
+        console.warn("[setup] saving report sections failed (non-fatal):", secErr);
+      }
+
       // Must have at least 1 GA image to proceed — either one already saved
       // (kept) or a newly added file. This is what lets the user add a point
       // without re-uploading the GA drawing every time.
@@ -7887,60 +8167,6 @@ function RouteSetupModal({
       const saveData = await saveRes.json().catch(() => ({} as any));
       if (!saveRes.ok) {
         throw new Error(saveData?.error || "Failed to save GA drawing");
-      }
-
-      // Persist the editable report sections (#4 Summary of Observations,
-      // #5 Hindrance Solutions, #6 Stage-Summary image). Non-fatal: a failure
-      // here never blocks the main GA-drawing save.
-      try {
-        let flowChartUrl = soFlowChartUrl;
-        if (soFlowChartFile) {
-          const ext = soFlowChartFile.name.split(".").pop() || "png";
-          const up = await uploadToBucket(
-            "ga-drawings",
-            `projects/${projectId}/${Date.now()}_flowchart.${ext}`,
-            soFlowChartFile
-          );
-          flowChartUrl = up.publicUrl;
-        }
-        let stageImgUrl = stageImageUrl;
-        if (stageImageFile) {
-          const ext = stageImageFile.name.split(".").pop() || "png";
-          const up = await uploadToBucket(
-            "ga-drawings",
-            `projects/${projectId}/${Date.now()}_stage.${ext}`,
-            stageImageFile
-          );
-          stageImgUrl = up.publicUrl;
-        }
-        const putSection = (key: string, data: any) =>
-          fetch(`/api/projects/${encodeURIComponent(projectId)}/report-sections/${key}`, {
-            method: "PUT",
-            credentials: "include",
-            headers: {
-              "Content-Type": "application/json",
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            body: JSON.stringify({ data }),
-          });
-        await Promise.all([
-          putSection("observation-summary", {
-            fromText: soFrom.trim(),
-            toText: soTo.trim(),
-            distance: soDistance.trim(),
-            keyLocations: soKeyLocations.trim(),
-            flowChartUrl: flowChartUrl || "",
-          }),
-          putSection("hindrance", {
-            rows: hindranceRows
-              .map((r) => ({ hindrance: r.hindrance.trim(), solution: r.solution.trim() }))
-              .filter((r) => r.hindrance || r.solution),
-            considerations: considerations.map((s) => s.trim()).filter(Boolean),
-          }),
-          putSection("stage-image", stageImgUrl ? { imageUrl: stageImgUrl } : null),
-        ]);
-      } catch (secErr) {
-        console.warn("[setup] saving report sections failed (non-fatal):", secErr);
       }
 
       onSaved();

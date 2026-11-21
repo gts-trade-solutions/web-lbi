@@ -8974,15 +8974,36 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             )
             .join("");
           const block = heading + tableXml + `<w:p/>` + addlHeading + addlItems + `<w:p/>`;
-          const bodyClose = xml.lastIndexOf("</w:body>");
-          if (bodyClose !== -1) {
-            const lastSectPr = xml.lastIndexOf("<w:sectPr", bodyClose);
-            const insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
-            xml = xml.slice(0, insertAt) + block + xml.slice(insertAt);
+          // Insert just BEFORE the first per-point observation table (its header
+          // contains "GPS LOCATION"), so the order reads
+          // Summary of Observations → Hindrance → Stage Summary → per-point
+          // observations, matching the reference report. "GPS LOCATION" sits
+          // INSIDE the observation table, so the nearest <w:tbl> before it is
+          // that table (not this section's own table). Falls back to the end of
+          // the document (before the final section properties) if there are no
+          // observation tables. Same safe anchor the Summary block already uses.
+          const gpsIdxH = xml.indexOf("GPS LOCATION");
+          let insertAtH = -1;
+          if (gpsIdxH !== -1) {
+            insertAtH = Math.max(
+              xml.lastIndexOf("<w:tbl>", gpsIdxH),
+              xml.lastIndexOf("<w:tbl ", gpsIdxH)
+            );
+          }
+          if (insertAtH === -1) {
+            const bodyCloseH = xml.lastIndexOf("</w:body>");
+            if (bodyCloseH !== -1) {
+              const lastSectPrH = xml.lastIndexOf("<w:sectPr", bodyCloseH);
+              insertAtH = lastSectPrH !== -1 ? lastSectPrH : bodyCloseH;
+            }
+          }
+          if (insertAtH > 0) {
+            xml = xml.slice(0, insertAtH) + block + xml.slice(insertAtH);
             zip.file("word/document.xml", xml);
             console.log("[hindrance] injected", {
               rows: hRows.length,
               considerations: considerations.length,
+              beforeObservations: gpsIdxH !== -1,
             });
           }
         }
@@ -9100,17 +9121,36 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
         const block = heading + stageContent + `<w:p/>`;
-        // Insert BEFORE the final body-level section properties — the ONLY
-        // structurally-safe spot. (Placing it at the GA section boundary means
-        // rewriting a section break, which repeatedly corrupted the file.) The
-        // final section is top-aligned, so the table starts at the page top.
-        const bodyClose = xml.lastIndexOf("</w:body>");
-        if (bodyClose !== -1) {
-          const lastSectPr = xml.lastIndexOf("<w:sectPr", bodyClose);
-          const insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
+        // Insert just BEFORE the first per-point observation table (header
+        // contains "GPS LOCATION") so the order reads Hindrance → Stage Summary
+        // → per-point observations. Because Hindrance was inserted just above
+        // (its own table is FURTHER from "GPS LOCATION"), the nearest <w:tbl>
+        // before "GPS LOCATION" is still the observation table, so Stage lands
+        // after Hindrance and before the observations. Falls back to the end of
+        // the document if there are no observation tables. NOTE: this is the
+        // SAME anchor the Summary block uses — it does not rewrite any section
+        // break, so it does not hit the earlier GA-boundary corruption.
+        const gpsIdxS = xml.indexOf("GPS LOCATION");
+        let insertAt = -1;
+        if (gpsIdxS !== -1) {
+          insertAt = Math.max(
+            xml.lastIndexOf("<w:tbl>", gpsIdxS),
+            xml.lastIndexOf("<w:tbl ", gpsIdxS)
+          );
+        }
+        if (insertAt === -1) {
+          const bodyClose = xml.lastIndexOf("</w:body>");
+          if (bodyClose !== -1) {
+            const lastSectPr = xml.lastIndexOf("<w:sectPr", bodyClose);
+            insertAt = lastSectPr !== -1 ? lastSectPr : bodyClose;
+          }
+        }
+        if (insertAt > 0) {
           xml = xml.slice(0, insertAt) + block + xml.slice(insertAt);
           zip.file("word/document.xml", xml);
-          console.log("[stage summary] injected table with", sorted.length, "rows (end, safe)");
+          console.log("[stage summary] injected", sorted.length, "rows", {
+            beforeObservations: gpsIdxS !== -1,
+          });
         }
       }
     }
