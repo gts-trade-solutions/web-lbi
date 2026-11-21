@@ -875,14 +875,16 @@ export type ExportResult = {
 const TEMPLATE_PATH = path.join(process.cwd(), "templates", "reena-all-template.docx");
 
 // Per spec: route map = 13" × 7" (1248 × 672 px) landscape, GA drawing
-// = 14" × 9.5" (1344 × 912 px) landscape — sized so GA + title fit on
-// ONE landscape A3 page (~14.5" × 10.5" content; title ~0.5", GA 9.5"
-// → total 10" within 10.5"). Big enough to dominate the page, small
-// enough that Word's keepNext on the title above it actually keeps
-// them on the same page. On smaller pages Word scales down
-// proportionally while preserving aspect ratio.
+// landscape — sized so the GA heading + the drawing fit TOGETHER on ONE
+// landscape A3 page. The template page has a red double border (offset
+// ~0.67" from each edge) plus a header and footer, which eat the vertical
+// space: a full 9.5"-tall drawing left no room for the heading above it, so
+// the drawing spilled onto the next page (heading alone on one page, image
+// on the next). 1142 × 775 px (~11.9" × 8.1", same aspect) leaves room for
+// the heading so title + image always share one page. On smaller pages Word
+// scales down proportionally while preserving aspect ratio.
 const ROUTE_MAP_SIZE: [number, number] = [1248, 672];
-const GA_DRAWING_SIZE: [number, number] = [1344, 912];
+const GA_DRAWING_SIZE: [number, number] = [1142, 775];
 
 // The GA drawing slot in the template holds ONE image. When several GA images
 // were uploaded, lay them out in a grid on a single canvas that matches the GA
@@ -7177,12 +7179,11 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         // 2) One "page" per extra GA image: a page-break paragraph, its OWN
         //    heading (GA DRAWING WITH LOAD / TURNING CIRCLE / STABILITY, etc.),
         //    then a centered full-size GA drawing (same size as GA image 0).
-        // Extra-diagram image size. The GA drawing is ~full page height, so a
-        // heading ABOVE a full-size image overflows and the image jumps to the
-        // next page — stranding the title alone on the previous page. Scale the
-        // headed image down a touch so the title + image always sit together on
-        // ONE page.
-        const GA_HEAD_SCALE = 0.9;
+        // Extra-diagram image size. GA_DRAWING_SIZE is already sized to leave
+        // room for a heading above it (see its definition), so the extra pages
+        // use it as-is (scale 1.0) — same size as the first diagram, for a
+        // consistent look, with the title + image always on one page.
+        const GA_HEAD_SCALE = 1.0;
         const GA_CX = Math.round(GA_DRAWING_SIZE[0] * PX_TO_EMU * GA_HEAD_SCALE);
         const GA_CY = Math.round(GA_DRAWING_SIZE[1] * PX_TO_EMU * GA_HEAD_SCALE);
         // Heading paragraph for an extra diagram page. pageBreakBefore starts the
@@ -7229,9 +7230,11 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             : gaImagePara(rId, dpId, true);
 
         // 3) Insert all extra GA pages right AFTER GA image 0's paragraph
-        //    (found by its GA-sized drawing width). A TIGHT ±4% tolerance so
-        //    the GA width (1344px) is matched but the slightly-smaller route
-        //    map (1248px, ~7% apart) is never mistaken for the GA drawing.
+        //    (found by its GA-sized drawing width). ±4% tolerance (empirical,
+        //    absorbs the image module's rounding): GA image 0 matches, while the
+        //    route map (now ~9.3% wider than the GA drawing) stays outside the
+        //    window. Observation photos display at 7.5" (far narrower), so they
+        //    never collide either.
         const GA_W_EMU_INS = GA_DRAWING_SIZE[0] * PX_TO_EMU;
         const GA_TOL_INS = GA_W_EMU_INS * 0.04;
         const gaParaRe =
