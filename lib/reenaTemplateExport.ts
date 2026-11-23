@@ -1486,6 +1486,9 @@ type ObservationData = {
   photoMissingReason: string | null;
   categoryIconKey: string;
   hasCategoryIcon: boolean;
+  // Per-point Summary-report risk override from the points grid
+  // ("low" | "medium" | "high"; empty = derive from difficultyKey).
+  summaryRisk: string;
   // Per-row difficulty styling — feeds either rawXml placeholders for cell
   // shading or the {#isRedDifficulty}/{#isYellowDifficulty}/{#isGreenDifficulty}
   // conditional blocks that triplicate the observation table in the template.
@@ -4589,6 +4592,12 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       photoMissingReason: hasObservationPhoto ? null : photoMissingReason,
       categoryIconKey,
       hasCategoryIcon,
+      // Per-point Summary-report risk override chosen in the points grid
+      // (low / medium / high); empty = derive from the difficulty colour.
+      summaryRisk: ((): string => {
+        const v = String((r as any).summary_risk || "").toLowerCase().trim();
+        return v === "low" || v === "medium" || v === "high" ? v : "";
+      })(),
       difficultyValue,
       difficultyKey: tableColors.key,
       headerFillColor: tableColors.headerFillColor,
@@ -5826,16 +5835,24 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             `<w:r><w:rPr>${opt.bold ? "<w:b/>" : ""}<w:sz w:val="${opt.size || 20}"/><w:szCs w:val="${opt.size || 20}"/><w:color w:val="1F2937"/></w:rPr>` +
             `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p>`;
 
-          const deriveObstruction = (category: string, diff: string) => {
+          // Risk level for the Score column: the per-point "Summary risk"
+          // dropdown (low / medium / high) wins; otherwise derived from the
+          // route-difficulty colour (red→high, yellow→medium, green→low).
+          const riskKeyOf = (o: any, diff: string): "low" | "medium" | "high" => {
+            const v = String(o?.summaryRisk || "").toLowerCase();
+            if (v === "low" || v === "medium" || v === "high") return v;
+            return diff === "red" ? "high" : diff === "yellow" ? "medium" : "low";
+          };
+          const deriveObstruction = (category: string, risk: string) => {
             const base = String(category || "Obstacle").trim() || "Obstacle";
-            const tail = diff === "red" ? "Major Civil Work" : diff === "yellow" ? "Clearance Check" : "Review";
+            const tail = risk === "high" ? "Major Civil Work" : risk === "medium" ? "Clearance Check" : "Review";
             return `${base} – ${tail}`;
           };
-          const deriveScore = (diff: string) =>
-            diff === "red"
+          const deriveScore = (risk: string) =>
+            risk === "high"
               ? "High risk; significant clearance / civil work required."
-              : diff === "yellow"
-                ? "Moderate risk; pass with caution / minor works."
+              : risk === "medium"
+                ? "Medium risk; pass with caution / minor works."
                 : "Low risk; normal passage.";
 
           // Table 1 — fixed Category / Work-Item taxonomy; counts derived from
@@ -5899,6 +5916,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           const t2Body = (observations || [])
             .map((o: any, i: number) => {
               const diff = String(o.difficultyKey || "green");
+              const risk = riskKeyOf(o, diff);
               const f = i % 2 === 0 ? "CAEDFB" : null; // striped light-blue rows
               const gps = [o.gpsLat, o.gpsLon].filter((x) => x && x !== "-").join(" ");
               const rec =
@@ -5912,8 +5930,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                 cell(String(o.location || "-"), { w: t2cols[1], fill: f }) +
                 cell(gps || "-", { w: t2cols[2], fill: f }) +
                 cell(String(o.km || "-"), { w: t2cols[3], align: "center", fill: f }) +
-                cell(deriveObstruction(o.category, diff), { w: t2cols[4], fill: f }) +
-                cell(deriveScore(diff), { w: t2cols[5], fill: f }) +
+                cell(deriveObstruction(o.category, risk), { w: t2cols[4], fill: f }) +
+                cell(deriveScore(risk), { w: t2cols[5], fill: f }) +
                 cell(rec || "-", { w: t2cols[6], fill: f }) +
                 "</w:tr>"
               );

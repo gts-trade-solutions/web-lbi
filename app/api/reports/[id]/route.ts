@@ -48,12 +48,31 @@ export async function PUT(request: Request, context: Ctx) {
 
     const body = await request.json().catch(() => ({} as any));
     const cols = await getColumns();
+
+    // Self-healing summary_risk column — the per-point Low/Medium/High
+    // override for the Summary report's Score column. Migration-free, same
+    // on-demand ALTER pattern as the other optional columns.
+    if (Object.prototype.hasOwnProperty.call(body, "summary_risk")) {
+      if (!cols.has("summary_risk")) {
+        try {
+          await pool.query("ALTER TABLE reports ADD COLUMN summary_risk VARCHAR(10) NULL");
+          cols.add("summary_risk");
+          console.log("[api/reports/:id] added reports.summary_risk column");
+        } catch (e) {
+          console.error("[api/reports/:id] summary_risk ALTER failed:", e);
+        }
+      }
+      const v = String(body.summary_risk || "").toLowerCase().trim();
+      body.summary_risk = v === "low" || v === "medium" || v === "high" ? v : null;
+    }
+
     const allowed = [
       "route_id",
       "category",
       "description",
       "remarks_action",
       "difficulty",
+      "summary_risk",
       "sort_order",
       "status",
       "point_key",

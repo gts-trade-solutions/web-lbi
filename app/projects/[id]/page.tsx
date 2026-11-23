@@ -50,6 +50,9 @@ type ReportRow = {
   remarks_action?: string | null;
   created_at: string;
   difficulty?: VehicleMovement | null; // ✅ DB column
+  // Per-point risk override for the SUMMARY report's Score column
+  // ("low" | "medium" | "high" | null = derive from difficulty colour).
+  summary_risk?: string | null;
   sort_order?: number | null; // ✅ NEW (for inserting at exact position)
   photos?: ReportPhotoRow[]; // ✅ per-photo Word-export checkboxes in the table
   // NE Coordinates — editable in the Edit-report form. latitude/longitude are the
@@ -269,6 +272,14 @@ async function updateReportVM(reportId: string, next: VehicleMovement) {
   await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}`, {
     method: "PUT",
     body: JSON.stringify(payload),
+  });
+}
+
+// Save the per-point "Summary risk" override (low/medium/high, "" = auto).
+async function updateReportSummaryRisk(reportId: string, next: string) {
+  await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ summary_risk: next ? next : null }),
   });
 }
 
@@ -751,6 +762,8 @@ export default function ProjectReportsPage() {
 
 
   const [vmSaving, setVmSaving] = useState<Record<string, boolean>>({});
+  // Saving state for the per-point "Summary risk" dropdown (Low/Medium/High).
+  const [riskSaving, setRiskSaving] = useState<Record<string, boolean>>({});
 
   // Search + filter
   const [q, setQ] = useState("");
@@ -901,6 +914,23 @@ export default function ProjectReportsPage() {
       toast(e?.message || String(e));
     } finally {
       setVmSaving((p) => ({ ...p, [reportId]: false }));
+    }
+  };
+
+  // Per-point "Summary risk" dropdown: Low/Medium/High override that the
+  // Summary report's Score column uses (blank = automatic from the colour).
+  const onChangeSummaryRisk = async (reportId: string, value: string) => {
+    const next = value === "low" || value === "medium" || value === "high" ? value : "";
+    setRiskSaving((p) => ({ ...p, [reportId]: true }));
+    setReports((prev) => prev.map((r) => (r.id === reportId ? { ...r, summary_risk: next || null } : r)));
+
+    try {
+      await updateReportSummaryRisk(reportId, next);
+    } catch (e: any) {
+      await fetchReports(q, sortDir, vmFilter);
+      toast(e?.message || String(e));
+    } finally {
+      setRiskSaving((p) => ({ ...p, [reportId]: false }));
     }
   };
 
@@ -4448,6 +4478,10 @@ export default function ProjectReportsPage() {
                     const created = r.created_at ? new Date(r.created_at).toLocaleString() : "—";
                     const desc = displayDescription((r.description || "").trim());
                     const vmValue = normalizeVM(r.difficulty);
+                    const riskValue =
+                      r.summary_risk === "low" || r.summary_risk === "medium" || r.summary_risk === "high"
+                        ? r.summary_risk
+                        : "";
 
                     return (
                       <React.Fragment key={r.id}>
@@ -4868,44 +4902,89 @@ export default function ProjectReportsPage() {
                           </td>
 
                           <td className="col-vm" style={styles.td}>
-                            <select
-                              value={vmValue || ""}
-                              disabled={!!vmSaving[r.id]}
-                              onChange={(e) => onChangeVM(r.id, e.target.value)}
-                              style={{
-                                height: 38,
-                                borderRadius: 14,
-                                border: "1px solid #EAECF0",
-                                padding: "0 12px",
-                                fontWeight: 950,
-                                background:
-                                  vmValue === "green"
-                                    ? "#EAFBF0"
-                                    : vmValue === "yellow"
-                                      ? "#FFFBEB"
-                                      : vmValue === "red"
-                                        ? "#FEF2F2"
-                                        : "#F2F4F7",
-                                color:
-                                  vmValue === "green"
-                                    ? "#067647"
-                                    : vmValue === "yellow"
-                                      ? "#92400E"
-                                      : vmValue === "red"
-                                        ? "#B42318"
-                                        : "#475467",
-                                cursor: vmSaving[r.id] ? "not-allowed" : "pointer",
-                                outline: "none",
-                                minWidth: 130,
-                                opacity: vmSaving[r.id] ? 0.7 : 1,
-                              }}
-                              title="Update route difficulty"
-                            >
-                              <option value="">Not set</option>
-                              <option value="green">Green</option>
-                              <option value="yellow">Yellow</option>
-                              <option value="red">Red</option>
-                            </select>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                              <select
+                                value={vmValue || ""}
+                                disabled={!!vmSaving[r.id]}
+                                onChange={(e) => onChangeVM(r.id, e.target.value)}
+                                style={{
+                                  height: 38,
+                                  borderRadius: 14,
+                                  border: "1px solid #EAECF0",
+                                  padding: "0 12px",
+                                  fontWeight: 950,
+                                  background:
+                                    vmValue === "green"
+                                      ? "#EAFBF0"
+                                      : vmValue === "yellow"
+                                        ? "#FFFBEB"
+                                        : vmValue === "red"
+                                          ? "#FEF2F2"
+                                          : "#F2F4F7",
+                                  color:
+                                    vmValue === "green"
+                                      ? "#067647"
+                                      : vmValue === "yellow"
+                                        ? "#92400E"
+                                        : vmValue === "red"
+                                          ? "#B42318"
+                                          : "#475467",
+                                  cursor: vmSaving[r.id] ? "not-allowed" : "pointer",
+                                  outline: "none",
+                                  minWidth: 130,
+                                  opacity: vmSaving[r.id] ? 0.7 : 1,
+                                }}
+                                title="Update route difficulty"
+                              >
+                                <option value="">Not set</option>
+                                <option value="green">Green</option>
+                                <option value="yellow">Yellow</option>
+                                <option value="red">Red</option>
+                              </select>
+
+                              {/* Summary-report risk: the Score column in the
+                                  pinned Summary report uses this choice; blank
+                                  = automatic from the colour above. */}
+                              <select
+                                value={riskValue}
+                                disabled={!!riskSaving[r.id]}
+                                onChange={(e) => onChangeSummaryRisk(r.id, e.target.value)}
+                                style={{
+                                  height: 32,
+                                  borderRadius: 12,
+                                  border: "1px solid #EAECF0",
+                                  padding: "0 10px",
+                                  fontWeight: 900,
+                                  fontSize: 12,
+                                  background:
+                                    riskValue === "low"
+                                      ? "#EAFBF0"
+                                      : riskValue === "medium"
+                                        ? "#FFFBEB"
+                                        : riskValue === "high"
+                                          ? "#FEF2F2"
+                                          : "#F9FAFB",
+                                  color:
+                                    riskValue === "low"
+                                      ? "#067647"
+                                      : riskValue === "medium"
+                                        ? "#92400E"
+                                        : riskValue === "high"
+                                          ? "#B42318"
+                                          : "#667085",
+                                  cursor: riskSaving[r.id] ? "not-allowed" : "pointer",
+                                  outline: "none",
+                                  minWidth: 130,
+                                  opacity: riskSaving[r.id] ? 0.7 : 1,
+                                }}
+                                title="Risk shown in the Summary report's Score column (blank = automatic from the colour)"
+                              >
+                                <option value="">Risk: auto</option>
+                                <option value="low">Low risk</option>
+                                <option value="medium">Medium risk</option>
+                                <option value="high">High risk</option>
+                              </select>
+                            </div>
                           </td>
 
                           <td className="col-created" style={styles.td}>
