@@ -296,6 +296,10 @@ export async function GET(request: Request, context: Ctx) {
     requestedFileName: String(url.searchParams.get("fileName") || "").trim(),
     sort: url.searchParams.get("sort") === "desc" ? "desc" : "asc",
     format: url.searchParams.get("format") === "pdf" ? "pdf" : "docx",
+    watermark:
+      url.searchParams.get("wm") === "1"
+        ? { enabled: true, text: String(url.searchParams.get("wmText") || "").trim().slice(0, 200) }
+        : undefined,
   });
 }
 
@@ -313,8 +317,9 @@ async function renderAndRespond(args: {
   sort?: "asc" | "desc";
   format?: "docx" | "pdf";
   summaryMode?: boolean;
+  watermark?: { enabled?: boolean; text?: string };
 }) {
-  const { projectId, reportIds, includePhotos, includeGa, requestedFileName, sort, summaryMode } = args;
+  const { projectId, reportIds, includePhotos, includeGa, requestedFileName, sort, summaryMode, watermark } = args;
   const format = args.format === "pdf" ? "pdf" : "docx";
   let stage: string = "started";
   try {
@@ -340,6 +345,7 @@ async function renderAndRespond(args: {
       includeGa: includeGa !== false,
       sort,
       summaryMode: summaryMode === true,
+      watermark,
     });
 
     // Same report, PDF format: convert the just-rendered DOCX with LibreOffice.
@@ -490,6 +496,11 @@ export async function POST(request: Request, context: Ctx) {
   const sort = (body as { sort?: unknown }).sort === "desc" ? "desc" : "asc";
   const format = (body as { format?: unknown }).format === "pdf" ? "pdf" : "docx";
   const summaryMode = (body as { summaryMode?: unknown }).summaryMode === true;
+  const wmRaw = (body as { watermark?: { enabled?: unknown; text?: unknown } }).watermark;
+  const watermark =
+    wmRaw && wmRaw.enabled === true
+      ? { enabled: true, text: String(wmRaw.text || "").trim().slice(0, 200) }
+      : undefined;
 
-  return renderAndRespond({ projectId, reportIds, includePhotos, includeGa, requestedFileName, sort, format, summaryMode });
+  return renderAndRespond({ projectId, reportIds, includePhotos, includeGa, requestedFileName, sort, format, summaryMode, watermark });
 }

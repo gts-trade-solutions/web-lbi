@@ -468,6 +468,7 @@ async function fetchProjectExportDocx(params: {
   sort?: "asc" | "desc";
   format?: "docx" | "pdf";
   summaryMode?: boolean;
+  watermark?: WatermarkOpts;
 }): Promise<ExportDocxResult> {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
@@ -499,6 +500,10 @@ async function fetchProjectExportDocx(params: {
       }
       if (params.sort) sp.set("sort", params.sort);
       if (params.format === "pdf") sp.set("format", "pdf");
+      if (params.watermark?.enabled && params.watermark.text.trim()) {
+        sp.set("wm", "1");
+        sp.set("wmText", params.watermark.text.trim());
+      }
       const suffix = sp.toString() ? `?${sp.toString()}` : "";
       res = await fetch(`${exportUrl}${suffix}`, {
         method: "GET",
@@ -524,6 +529,10 @@ async function fetchProjectExportDocx(params: {
           sort: params.sort,
           format: params.format,
           summaryMode: params.summaryMode === true,
+          watermark:
+            params.watermark?.enabled && params.watermark.text.trim()
+              ? { enabled: true, text: params.watermark.text.trim() }
+              : undefined,
         }),
       });
     }
@@ -1947,8 +1956,9 @@ export default function ProjectReportsPage() {
         await ensureRouteIdForMissingReports(selectedIdsInOrder);
       }
 
+      // Watermark options from the dialog (checkbox + text). Passed to the
+      // server export so the Word/PDF gets the diagonal page watermark.
       const wm = watermarkOpts.enabled ? watermarkOpts : { enabled: false, text: "" };
-      void wm;
 
       if (exportMode === "all") {
         const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-ALL-REPORTS`)}.${docExt}`;
@@ -1959,6 +1969,7 @@ export default function ProjectReportsPage() {
           fileName,
           sort: sortDir,
           format: docFormat,
+          watermark: wm,
         });
         setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
         setDlDone(true);
@@ -1981,6 +1992,7 @@ export default function ProjectReportsPage() {
           fileName,
           sort: sortDir,
           format: docFormat,
+          watermark: wm,
         });
 
         setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
@@ -2000,6 +2012,7 @@ export default function ProjectReportsPage() {
           fileName,
           sort: sortDir,
           format: docFormat,
+          watermark: wm,
         });
 
         setPreparedFiles([{ fileName: serverFileName || fileName, blob, downloadUrl }]);
@@ -2031,6 +2044,7 @@ export default function ProjectReportsPage() {
             fileName,
             sort: sortDir,
             format: docFormat,
+            watermark: wm,
           });
 
           files.push({ fileName: serverFileName || fileName, blob, downloadUrl });
@@ -7561,7 +7575,7 @@ function RouteSetupModal({
     "Route",
     "Objective & Map",
     "Diagrams",
-    "Summary",
+    "Route Summary",
     "Hindrance",
     "Stage Summary",
     "Conclusion",
@@ -8613,10 +8627,10 @@ function RouteSetupModal({
         </div>
         )}
 
-        {/* ===== STEP 3 · Summary of Observations (editable) ===== */}
+        {/* ===== STEP 3 · Route Summary (editable) ===== */}
         {step === 3 && (
           <div style={{ display: "grid", gap: 12 }}>
-            <div style={styles.routeLabel}>Summary of Observations</div>
+            <div style={styles.routeLabel}>Route Summary</div>
             <div style={styles.modalNote}>
               Fills the report&apos;s <b>A. Surveyed Route</b> and <b>B. Key Locations</b> section. Leave a
               field blank to use the automatic value from the points.

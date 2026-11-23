@@ -864,6 +864,10 @@ export type ExportOptions = {
   // summary tables (category counts + key-obstacle list) before the first
   // point table. Meant to be combined with a pinned-points reportIds filter.
   summaryMode?: boolean;
+  // Diagonal text watermark across every page (classic Word watermark shape
+  // anchored in the page header). When enabled with a non-empty text, a light
+  // grey rotated text is drawn behind the page content.
+  watermark?: { enabled?: boolean; text?: string };
 };
 
 export type ExportResult = {
@@ -3180,6 +3184,9 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const includePhotos = options.includePhotos !== false;
   const includeGa = options.includeGa !== false; // default true; false = skip GA drawing
   const summaryMode = options.summaryMode === true;
+  // Watermark text (empty = no watermark). Drawn in the header pass below.
+  const watermarkText =
+    options.watermark?.enabled === true ? String(options.watermark?.text || "").trim() : "";
   const reportIdsFilter = (options.reportIds || []).filter(Boolean);
 
   // ----- Editable report-section overrides (Summary of Observations, Hindrance
@@ -5990,7 +5997,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
           const observationsBlock =
             headingP("OBSERVATIONS:") +
-            bodyP("Summary of Observations", { bold: true }) +
+            bodyP("Route Summary", { bold: true }) +
             bodyP("A. Surveyed Route:", { bold: true }) +
             bodyP(surveyedRouteLine) +
             bodyP(distanceLine) +
@@ -8703,13 +8710,50 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               `<w:t xml:space="preserve">${escapedTitleForHeader}</w:t>` +
             `</w:r>`
           : `<w:r/>`;
+        // Optional diagonal text watermark (classic Word "washout" watermark):
+        // a VML text shape anchored in the header, centred on the page,
+        // rotated 315°, light grey, BEHIND the body text (negative z-index).
+        // Word, LibreOffice (the PDF converter) and Google Docs all honour
+        // this shape — it is exactly what Word's own Insert→Watermark emits.
+        const wmEsc = (s: string) =>
+          s
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        const WATERMARK_P = watermarkText
+          ? `<w:p><w:pPr><w:pStyle w:val="Header"/><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr><w:r><w:pict>` +
+            `<v:shapetype id="_x0000_t136" coordsize="21600,21600" o:spt="136" adj="10800" path="m@7,l@8,m@5,21600l@6,21600e">` +
+            `<v:formulas>` +
+            `<v:f eqn="sum #0 0 10800"/><v:f eqn="prod #0 2 1"/><v:f eqn="sum 21600 0 @1"/>` +
+            `<v:f eqn="sum 0 0 @2"/><v:f eqn="sum 21600 0 @3"/><v:f eqn="if @0 @3 0"/>` +
+            `<v:f eqn="if @0 21600 @1"/><v:f eqn="if @0 0 @2"/><v:f eqn="if @0 @4 21600"/>` +
+            `<v:f eqn="mid @5 @6"/><v:f eqn="mid @8 @5"/><v:f eqn="mid @7 @8"/>` +
+            `<v:f eqn="mid @6 @7"/><v:f eqn="sum @6 0 @5"/>` +
+            `</v:formulas>` +
+            `<v:path textpathok="t" o:connecttype="custom" o:connectlocs="@9,0;@10,10800;@11,21600;@12,10800" o:connectangles="270,180,90,0"/>` +
+            `<v:textpath on="t" fitshape="t"/>` +
+            `<v:handles><v:h position="#0,bottomRight" xrange="6629,14971"/></v:handles>` +
+            `<o:lock v:ext="edit" text="t" shapetype="t"/>` +
+            `</v:shapetype>` +
+            `<v:shape id="WordWaterMark1" o:spid="_x0000_s2049" type="#_x0000_t136"` +
+            ` style="position:absolute;margin-left:0;margin-top:0;width:760pt;height:190pt;rotation:315;z-index:-251658752;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin;mso-wrap-style:none"` +
+            ` o:allowincell="f" fillcolor="silver" stroked="f">` +
+            `<v:fill opacity=".5"/>` +
+            `<v:textpath style="font-family:&quot;Calibri&quot;;font-size:1pt" string="${wmEsc(watermarkText)}"/>` +
+            `</v:shape>` +
+            `</w:pict></w:r></w:p>`
+          : "";
         const HEADER_XML =
           `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
           `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"` +
           ` xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"` +
           ` xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"` +
           ` xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"` +
+          ` xmlns:v="urn:schemas-microsoft-com:vml"` +
+          ` xmlns:o="urn:schemas-microsoft-com:office:office"` +
           ` xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+          WATERMARK_P +
           // Tab-stop header (NOT a table). The logo sits at the LEFT; a CENTER
           // tab at the page midpoint (11385 twips = half of the 22771-twip
           // content width) centres the title; a RIGHT tab at 22771 right-aligns
