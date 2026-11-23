@@ -1249,16 +1249,28 @@ function stripHtml(input: string) {
 // neatly-formatted Conclusion & Certification body (see conclusionHtmlToOoxml).
 const CONCLUSION_SENTINEL = "RACE_CONCLUSION_BODY_PLACEHOLDER_X7";
 
+// Make an inline text slice XML-safe for a <w:t>. The standard conclusion HTML
+// is already escaped, but a user-EDITED conclusion (contentEditable) can contain
+// stray tags (<span>, <div>, <font>…) or a lone "&"/"<". Drop unknown tags and
+// escape lone &/< so the run never breaks the document XML.
+function conclusionSanitizeInline(t: string): string {
+  return String(t)
+    .replace(/<[^>]*>/g, "") // drop stray editor tags (bold/br handled by caller)
+    .replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/gi, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/\s+/g, " ");
+}
+
 // Convert the inline part of a conclusion block (text + <strong>/<b> + <br/>)
-// into Word runs. The incoming text is already XML-safe (buildStandardConclusion
-// Html escapes &,<,> ), so entities pass straight through.
+// into Word runs.
 function conclusionInlineRunsToOoxml(inner: string, sz: number): string {
   const runText = (t: string, bold: boolean): string => {
-    if (!t) return "";
+    const safe = conclusionSanitizeInline(t);
+    if (!safe) return "";
     return (
       `<w:r><w:rPr>${bold ? "<w:b/><w:bCs/>" : ""}` +
       `<w:color w:val="111111"/><w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/></w:rPr>` +
-      `<w:t xml:space="preserve">${t}</w:t></w:r>`
+      `<w:t xml:space="preserve">${safe}</w:t></w:r>`
     );
   };
   let out = "";
@@ -1284,7 +1296,9 @@ function conclusionHtmlToOoxml(html: string): string {
   const BODY = 22; // 11pt
   const src = String(html || "");
   const paras: string[] = [];
-  const blockRe = /<ul\b[^>]*>([\s\S]*?)<\/ul>|<p\b[^>]*>([\s\S]*?)<\/p>/gi;
+  // <p> and <div> both act as paragraph blocks (contentEditable emits <div> for
+  // new lines when the conclusion is edited). <ul> becomes a bulleted list.
+  const blockRe = /<ul\b[^>]*>([\s\S]*?)<\/ul>|<(?:p|div)\b[^>]*>([\s\S]*?)<\/(?:p|div)>/gi;
   let m: RegExpExecArray | null;
   while ((m = blockRe.exec(src)) !== null) {
     if (m[1] !== undefined) {
@@ -6495,6 +6509,22 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             if (keptTr !== lastTr) out = out.replace(lastTr, keptTr);
           }
 
+          // 7. Fill the gaps: align DATA-row cells to the TOP. When an
+          //    Observation is long the row is tall, and vertically-centred
+          //    short cells (GPS / KM / Location) float in the middle with big
+          //    empty gaps above and below. Top alignment lines every cell up
+          //    with the first line of text — no gaps. The header row (first
+          //    <w:tr>) stays centred.
+          const alignTrs = out.match(/<w:tr\b[\s\S]*?<\/w:tr>/g) || [];
+          for (let ti = 1; ti < alignTrs.length; ti += 1) {
+            const tr = alignTrs[ti];
+            const topped = tr.replace(
+              /<w:vAlign w:val="center"\/>/g,
+              '<w:vAlign w:val="top"/>'
+            );
+            if (topped !== tr) out = out.replace(tr, topped);
+          }
+
           return out;
         }
       );
@@ -7236,22 +7266,18 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         // the next page and both pages are left mostly empty. (A single-photo
         // point never reaches here: it renders big in place.)
         const GRID_ASPECT = SIDE_BY_SIDE_PHOTO_SIZE[0] / SIDE_BY_SIDE_PHOTO_SIZE[1]; // w/h
-        const gridCellSize = (n: number): { cx: number; cy: number } => {
-          if (n <= 1) return { cx: MULTI_PHOTO_EMU_WIDTH, cy: MULTI_PHOTO_EMU_HEIGHT };
-          const rows = Math.max(1, Math.ceil(n / 2));
-          // ~7.5in of page height is left for photos after the observation
-          // table. Keep a single row reasonably tall, then divide the budget
-          // across the rows so the whole grid still fits under the table.
-          const heightIn = Math.min(4.8, 7.5 / rows);
-          let hpx = Math.round(heightIn * 96); // 96 px per inch
-          let wpx = Math.round(hpx * GRID_ASPECT);
-          const maxWpx = Math.round(6.9 * 96); // keep inside the 50%-width cell
-          if (wpx > maxWpx) {
-            wpx = maxWpx;
-            hpx = Math.round(wpx / GRID_ASPECT);
-          }
-          return { cx: wpx * PX_TO_EMU, cy: hpx * PX_TO_EMU };
-        };
+        // Fixed, legible sizes — NO shrink-to-fit. Photos PAGINATE two-per-page,
+        // matching the reference PDF: the first pair sits under the observation
+        // table on its page, and every further pair starts a fresh page. An odd
+        // final photo renders larger and centred, alone on its own page.
+        const pairWpx = Math.round(6.6 * 96); // ~6.6" wide so two + the gap fit
+        const pairHpx = Math.round((6.6 / GRID_ASPECT) * 96);
+        const PAIR_CX = pairWpx * PX_TO_EMU;
+        const PAIR_CY = pairHpx * PX_TO_EMU;
+        const loneWpx = Math.round(9.0 * 96); // a single leftover photo renders big
+        const loneHpx = Math.round((9.0 / GRID_ASPECT) * 96);
+        const LONE_CX = loneWpx * PX_TO_EMU;
+        const LONE_CY = loneHpx * PX_TO_EMU;
         const NO_BORDER =
           `<w:tcBorders>` +
             `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
@@ -7266,81 +7292,89 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             `<w:bottom w:w="0" w:type="dxa"/>` +
             `<w:right w:w="60" w:type="dxa"/>` +
           `</w:tcMar>`;
-        const buildPhotoGrid = (rIds: string[], docPrBase: number): string => {
-          const { cx, cy } = gridCellSize(rIds.length);
-          const twoUp = rIds.length > 1; // two photos side by side per row
-          const cellPct = twoUp ? "2500" : "5000"; // 50% vs 100% of the row
-          const drawing = (rId: string, dpId: number) =>
-            `<w:drawing>` +
-              `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
-                `<wp:extent cx="${cx}" cy="${cy}"/>` +
-                `<wp:docPr id="${dpId}" name="Photo ${dpId}"/>` +
-                `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
-                  `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
-                    `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
-                      `<pic:nvPicPr><pic:cNvPr id="0" name=""/><pic:cNvPicPr/></pic:nvPicPr>` +
-                      `<pic:blipFill>` +
-                        `<a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${rId}"/>` +
-                        `<a:stretch><a:fillRect/></a:stretch>` +
-                      `</pic:blipFill>` +
-                      `<pic:spPr>` +
-                        `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
-                        `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
-                      `</pic:spPr>` +
-                    `</pic:pic>` +
-                  `</a:graphicData>` +
-                `</a:graphic>` +
-              `</wp:inline>` +
-            `</w:drawing>`;
-          const cell = (rId: string, dpId: number) =>
-            `<w:tc>` +
-              `<w:tcPr><w:tcW w:w="${cellPct}" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
-              `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="40" w:after="40"/><w:keepNext/><w:keepLines/></w:pPr>` +
-                (rId ? `<w:r>${drawing(rId, dpId)}</w:r>` : "") +
-              `</w:p>` +
-            `</w:tc>`;
-          // Two photos per row (side by side). An odd final photo fills the
-          // left cell and gets a blank same-width right cell, so every photo
-          // ends up the identical size.
-          const perRow = twoUp ? 2 : 1;
-          let rowsXml = "";
-          for (let r = 0; r < rIds.length; r += perRow) {
-            let cellsXml = "";
-            for (let c = 0; c < perRow; c += 1) {
-              const idx = r + c;
-              if (idx < rIds.length) cellsXml += cell(rIds[idx], docPrBase + idx);
-              else if (twoUp) cellsXml += cell("", docPrBase + 500 + idx); // blank filler cell
-            }
-            rowsXml += `<w:tr><w:trPr><w:cantSplit/></w:trPr>${cellsXml}</w:tr>`;
-          }
-          return (
-            `<w:tbl>` +
-              `<w:tblPr>` +
-                `<w:tblW w:w="5000" w:type="pct"/>` +
-                `<w:tblInd w:w="0" w:type="dxa"/>` +
-                `<w:tblBorders>` +
-                  `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                  `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                  `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                  `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                  `<w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                  `<w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                `</w:tblBorders>` +
-                `<w:tblCellMar>` +
-                  `<w:top w:w="0" w:type="dxa"/>` +
-                  `<w:left w:w="0" w:type="dxa"/>` +
-                  `<w:bottom w:w="0" w:type="dxa"/>` +
-                  `<w:right w:w="0" w:type="dxa"/>` +
-                `</w:tblCellMar>` +
-              `</w:tblPr>` +
-              `<w:tblGrid>` +
-                (twoUp
-                  ? `<w:gridCol w:w="4680"/><w:gridCol w:w="4680"/>`
-                  : `<w:gridCol w:w="9360"/>`) +
-              `</w:tblGrid>` +
-              rowsXml +
-            `</w:tbl>`
+        // Property page break (not a hard <w:br>): starts the paragraph it's on
+        // at the top of a new page without stranding a blank page.
+        const PHOTO_PAGE_BREAK =
+          `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>`;
+        const drawing = (rId: string, dpId: number, cx: number, cy: number) =>
+          `<w:drawing>` +
+            `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+              `<wp:extent cx="${cx}" cy="${cy}"/>` +
+              `<wp:docPr id="${dpId}" name="Photo ${dpId}"/>` +
+              `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+                `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                  `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                    `<pic:nvPicPr><pic:cNvPr id="0" name=""/><pic:cNvPicPr/></pic:nvPicPr>` +
+                    `<pic:blipFill>` +
+                      `<a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${rId}"/>` +
+                      `<a:stretch><a:fillRect/></a:stretch>` +
+                    `</pic:blipFill>` +
+                    `<pic:spPr>` +
+                      `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
+                      `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+                    `</pic:spPr>` +
+                  `</pic:pic>` +
+                `</a:graphicData>` +
+              `</a:graphic>` +
+            `</wp:inline>` +
+          `</w:drawing>`;
+        const photoCell = (rId: string, dpId: number, cellPct: string, cx: number, cy: number) =>
+          `<w:tc>` +
+            `<w:tcPr><w:tcW w:w="${cellPct}" w:type="pct"/>${NO_BORDER}${ZERO_TC_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+            `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="40" w:after="40"/><w:keepNext/><w:keepLines/></w:pPr>` +
+              (rId ? `<w:r>${drawing(rId, dpId, cx, cy)}</w:r>` : "") +
+            `</w:p>` +
+          `</w:tc>`;
+        const tableWrap = (gridCols: string, rowXml: string) =>
+          `<w:tbl>` +
+            `<w:tblPr>` +
+              `<w:tblW w:w="5000" w:type="pct"/>` +
+              `<w:tblInd w:w="0" w:type="dxa"/>` +
+              `<w:tblBorders>` +
+                `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `<w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+                `<w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
+              `</w:tblBorders>` +
+              `<w:tblCellMar>` +
+                `<w:top w:w="0" w:type="dxa"/>` +
+                `<w:left w:w="0" w:type="dxa"/>` +
+                `<w:bottom w:w="0" w:type="dxa"/>` +
+                `<w:right w:w="0" w:type="dxa"/>` +
+              `</w:tblCellMar>` +
+            `</w:tblPr>` +
+            `<w:tblGrid>${gridCols}</w:tblGrid>` +
+            `<w:tr><w:trPr><w:cantSplit/></w:trPr>${rowXml}</w:tr>` +
+          `</w:tbl>`;
+        // One page's worth of photos: a pair side by side, or a lone big one.
+        const pairTable = (a: string, b: string, base: number) =>
+          tableWrap(
+            `<w:gridCol w:w="4680"/><w:gridCol w:w="4680"/>`,
+            photoCell(a, base, "2500", PAIR_CX, PAIR_CY) +
+              photoCell(b || "", base + 1, "2500", PAIR_CX, PAIR_CY)
           );
+        const loneTable = (a: string, base: number) =>
+          tableWrap(
+            `<w:gridCol w:w="9360"/>`,
+            photoCell(a, base, "5000", LONE_CX, LONE_CY)
+          );
+        // Paginate the point's photos TWO PER PAGE: first pair under the table,
+        // each further pair (or odd single) on its own fresh page.
+        const buildPhotoGrid = (rIds: string[], docPrBase: number): string => {
+          if (rIds.length <= 1) return loneTable(rIds[0] || "", docPrBase);
+          let out = "";
+          let page = 0;
+          for (let r = 0; r < rIds.length; r += 2) {
+            if (page > 0) out += PHOTO_PAGE_BREAK; // every pair after the first → new page
+            out +=
+              r + 1 < rIds.length
+                ? pairTable(rIds[r], rIds[r + 1], docPrBase + r)
+                : loneTable(rIds[r], docPrBase + r); // odd last photo, big & centred
+            page += 1;
+          }
+          return out;
         };
 
         // Walk observation photo paragraphs in order; for each multi-photo

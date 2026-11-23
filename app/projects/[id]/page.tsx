@@ -7632,11 +7632,18 @@ function RouteSetupModal({
   const [loadingExisting, setLoadingExisting] = useState(false);
   const [existingMapUrl, setExistingMapUrl] = useState<string>("");
 
-  // ✅ Conclusion HTML — generated from From→To (locked standard wording)
+  // ✅ Conclusion HTML — starts from the standard From→To wording, but the user
+  // can edit it freely. Once edited (or loaded from a saved report), it stops
+  // auto-regenerating from From→To so the user's changes are never clobbered.
   const [conclusionHtml, setConclusionHtml] = useState<string>(() =>
     buildStandardConclusionHtml("", "")
   );
-  const conclusionRef = useRef<any>(null);
+  // The editable box is uncontrolled (contentEditable) so typing never loses the
+  // caret; we read its innerHTML from this ref when saving.
+  const conclusionRef = useRef<HTMLDivElement | null>(null);
+  // True once the user has typed in the Conclusion (or a saved one was loaded):
+  // From→To changes then no longer overwrite it.
+  const [conclusionTouched, setConclusionTouched] = useState(false);
 
   // ✅ Locations — dynamic, no fixed limit. Starts with 4 (typical
   //    start + 2 stops + end), but the user can add or remove rows.
@@ -7665,8 +7672,12 @@ function RouteSetupModal({
   const fromLabel = (routeLocations[0] || "").trim();
   const toLabel = (routeLocations[routeLocations.length - 1] || "").trim();
   useEffect(() => {
-    setConclusionHtml(buildStandardConclusionHtml(fromLabel, toLabel));
-  }, [fromLabel, toLabel]);
+    // Keep the standard text in sync with From→To ONLY while the user hasn't
+    // edited the Conclusion themselves. Once they edit it, their text wins.
+    if (!conclusionTouched) {
+      setConclusionHtml(buildStandardConclusionHtml(fromLabel, toLabel));
+    }
+  }, [fromLabel, toLabel, conclusionTouched]);
 
   const presetMaps: PresetMap[] = useMemo(
     () => [
@@ -7861,7 +7872,13 @@ function RouteSetupModal({
           setMapPickMode(((page as any).map_mode as PickMode) || "preset");
           setSelectedPresetMapId((page as any).preset_map_key || presetMaps[0]?.id || "");
           setExistingMapUrl((page as any).map_file_url || "");
-          setConclusionHtml((page as any).conclusion_html || "");
+          const savedConclusion = String((page as any).conclusion_html || "").trim();
+          if (savedConclusion) {
+            // A saved conclusion is the user's own text — keep it verbatim and
+            // don't let From→To regenerate over it.
+            setConclusionHtml(savedConclusion);
+            setConclusionTouched(true);
+          }
         }
 
         const locs = Array.isArray(data?.locations) ? (data.locations as RouteLocationRow[]) : [];
@@ -8068,7 +8085,11 @@ function RouteSetupModal({
         }
       }
 
-      const currentConclusion = (conclusionRef.current?.getContent?.() ?? conclusionHtml ?? "").trim();
+      // Prefer what's actually in the editable box (the user may have typed into
+      // it without React state updating); fall back to the generated standard text.
+      const currentConclusion = String(
+        conclusionRef.current?.innerHTML ?? conclusionHtml ?? ""
+      ).trim();
 
       // Upload GA files + insert rows
       // ✅ Important fix:
@@ -8840,23 +8861,63 @@ function RouteSetupModal({
         {/* ===== STEP 6 · Conclusion (locked, From→To only) ===== */}
         {step === 6 && (
           <div style={{ display: "grid", gap: 8 }}>
-            <div style={styles.routeLabel}>Conclusion &amp; Certification (standard — auto-filled)</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <div style={styles.routeLabel}>Conclusion &amp; Certification (editable)</div>
+              <button
+                type="button"
+                onClick={() => {
+                  // Regenerate the standard wording for the current From→To and
+                  // drop any edits. Remount the box (key) so it shows fresh text.
+                  const fresh = buildStandardConclusionHtml(fromLabel, toLabel);
+                  setConclusionHtml(fresh);
+                  setConclusionTouched(false);
+                  if (conclusionRef.current) conclusionRef.current.innerHTML = fresh;
+                }}
+                style={{
+                  padding: "7px 12px",
+                  borderRadius: 10,
+                  border: "1px solid #E5E7EB",
+                  background: "#fff",
+                  color: "#475467",
+                  fontWeight: 800,
+                  fontSize: 12,
+                  cursor: "pointer",
+                }}
+                title="Replace with the standard certification text for the current From → To"
+              >
+                ↺ Reset to standard text
+              </button>
+            </div>
             <div style={styles.modalNote}>
-              This is the fixed RACE standard certification. You don&apos;t type it — it
-              fills in the <b>From → To</b> from step 1 ({fromLabel || "[From]"} → {toLabel || "[To]"}).
-              To change the names, go <b>Back</b> to Route.
+              Starts from the standard RACE certification (auto-filled with{" "}
+              <b>{fromLabel || "[From]"} → {toLabel || "[To]"}</b>). <b>Click in the box
+              below and edit it like a document</b> — change wording, add or remove lines.
+              Your text is saved with the report.
             </div>
             <div
+              ref={conclusionRef}
+              contentEditable
+              suppressContentEditableWarning
+              onInput={() => {
+                if (!conclusionTouched) setConclusionTouched(true);
+              }}
+              onBlur={(e) => {
+                // Capture edits into state so they survive leaving this step
+                // (the box unmounts) and are available when saving from Review.
+                setConclusionHtml((e.currentTarget as HTMLDivElement).innerHTML);
+              }}
               style={{
-                border: "1px solid #EAECF0",
+                border: "1px solid #D0D5DD",
                 borderRadius: 16,
-                background: "#F9FAFB",
+                background: "#fff",
                 padding: 16,
-                maxHeight: 320,
+                maxHeight: 360,
+                minHeight: 200,
                 overflow: "auto",
                 fontSize: 13,
                 lineHeight: 1.5,
                 color: "#1F2937",
+                outline: "none",
               }}
               dangerouslySetInnerHTML={{ __html: conclusionHtml }}
             />
@@ -8885,7 +8946,7 @@ function RouteSetupModal({
               <div>🗺 <b>Map:</b> {uploadedMapFile ? uploadedMapFile.name : existingMapUrl ? "kept (already uploaded)" : <span style={{ color: "#B42318" }}>none</span>}</div>
               <div>📐 <b>Diagrams:</b> {gaFiles.length + existingGaImages.length} file(s)</div>
               <div>📝 <b>Objective:</b> {objective?.trim() ? "set" : "empty"}</div>
-              <div>📄 <b>Conclusion:</b> standard (auto-filled with From → To)</div>
+              <div>📄 <b>Conclusion:</b> {conclusionTouched ? "edited" : "standard (auto-filled with From → To)"}</div>
             </div>
             <div style={styles.modalNote}>Press <b>Save</b> to store this setup. Export opens automatically.</div>
           </div>

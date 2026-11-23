@@ -363,7 +363,14 @@ export async function GET(request: Request) {
           segments.push({
             id: pid,
             name: String(p.name || p.title || p.project_name || "Untitled Project"),
-            source: (p.source as string) ?? null,
+            // Treat a project as imported if source says so OR its description is
+            // the "Imported from …" marker — so the Imported tag shows even on
+            // servers where the source column couldn't be added/backfilled.
+            source:
+              (p.source as string) === "imported" ||
+              /^imported from/i.test(String((p as any).description || ""))
+                ? "imported"
+                : ((p.source as string) ?? null),
             status: (p.status as string) ?? null,
             from: roll.from, to: roll.to,
             points: roll.usable.length,
@@ -449,7 +456,13 @@ export async function GET(request: Request) {
       const routeStr = roll.from && roll.to ? `${roll.from} → ${roll.to}` : roll.from || roll.to || name;
       const summaryLine = [routeStr, `${roll.usable.length} point${roll.usable.length === 1 ? "" : "s"}`, roll.yearStr, roll.red ? `${roll.red} difficult` : ""].filter(Boolean).join(" · ");
       hits.push({
-        id: pid, name, source: (p.source as string) ?? null, status: (p.status as string) ?? null,
+        id: pid, name,
+        source:
+          (p.source as string) === "imported" ||
+          /^imported from/i.test(String((p as any).description || ""))
+            ? "imported"
+            : ((p.source as string) ?? null),
+        status: (p.status as string) ?? null,
         from: roll.from, to: roll.to, points: roll.usable.length, years: roll.yearStr,
         red: roll.red, amber: roll.amber, green: roll.green, keyObstacles: roll.keyObstacles,
         matchedPlaces: Array.from(new Set(matchedPlaces)), score, summaryLine,
