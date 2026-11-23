@@ -8963,6 +8963,12 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.warn("[stage summary] override load failed - using auto:", ovErr);
   }
 
+  // Set when the Hindrance / Stage Summary blocks are injected before the
+  // first observation table — used further below to push that table onto its
+  // own page (otherwise it starts directly under the injected section, unlike
+  // the reference PDF where point 1 always begins a fresh page).
+  let injectedBeforeObservations = false;
+
   // ----- Hindrance Solutions + Additional Considerations. A new section the
   // template never had; injected before the final section properties (the same
   // structurally-safe spot the Stage Summary uses). Inserted BEFORE the Stage
@@ -9078,6 +9084,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           if (insertAtH > 0) {
             xml = xml.slice(0, insertAtH) + block + xml.slice(insertAtH);
             zip.file("word/document.xml", xml);
+            if (gpsIdxH !== -1) injectedBeforeObservations = true;
             console.log("[hindrance] injected", {
               rows: hRows.length,
               considerations: considerations.length,
@@ -9226,6 +9233,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         if (insertAt > 0) {
           xml = xml.slice(0, insertAt) + block + xml.slice(insertAt);
           zip.file("word/document.xml", xml);
+          if (gpsIdxS !== -1) injectedBeforeObservations = true;
           console.log("[stage summary] injected", sorted.length, "rows", {
             beforeObservations: gpsIdxS !== -1,
           });
@@ -9234,6 +9242,39 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     }
   } catch (err) {
     console.error("[stage summary] injection failed - non-fatal:", err);
+  }
+
+  // ----- Keep the first per-point observation table OFF the injected
+  // Hindrance / Stage Summary pages. In the reference PDF the Stage Summary
+  // is its own page and point 1 starts the NEXT page; without this, the first
+  // observation table runs straight on under the Stage Summary table. A
+  // zero-height paragraph with pageBreakBefore (a paragraph PROPERTY, same
+  // pattern as the photo-grid breaks) pushes the table to a fresh page and
+  // can never strand a fully blank page the way a hard page break can.
+  try {
+    if (!summaryMode && injectedBeforeObservations) {
+      const zip = doc.getZip();
+      const docFile = zip.file("word/document.xml");
+      if (docFile) {
+        let xml = docFile.asText();
+        const gpsIdxB = xml.indexOf("GPS LOCATION");
+        if (gpsIdxB !== -1) {
+          const tblIdxB = Math.max(
+            xml.lastIndexOf("<w:tbl>", gpsIdxB),
+            xml.lastIndexOf("<w:tbl ", gpsIdxB)
+          );
+          if (tblIdxB > 0) {
+            const OBS_PAGE_BREAK =
+              '<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>';
+            xml = xml.slice(0, tblIdxB) + OBS_PAGE_BREAK + xml.slice(tblIdxB);
+            zip.file("word/document.xml", xml);
+            console.log("[obs page break] first observation table pushed to a fresh page");
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[obs page break] failed - non-fatal:", err);
   }
 
   // ----- Fix pre-existing template corruption. reena-all-template.docx ships
