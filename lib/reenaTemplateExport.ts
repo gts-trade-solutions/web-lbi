@@ -8729,15 +8729,19 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                 `<w:right w:w="0" w:type="dxa"/>` +
               `</w:tblCellMar>` +
             `</w:tblPr>` +
+            // Explicit DXA column widths (content width 22771 twips = landscape
+            // A3 minus 520+520 margins): 25% / 50% / 25%. DXA + fixed layout is
+            // honoured by Word, Google Docs AND LibreOffice, so the empty right
+            // cell can't collapse and the centre (title) cell stays centred.
             `<w:tblGrid>` +
-              `<w:gridCol w:w="2340"/>` +
-              `<w:gridCol w:w="4680"/>` +
-              `<w:gridCol w:w="2340"/>` +
+              `<w:gridCol w:w="5693"/>` +
+              `<w:gridCol w:w="11385"/>` +
+              `<w:gridCol w:w="5693"/>` +
             `</w:tblGrid>` +
             `<w:tr>` +
               // Left cell — logo (25%)
               `<w:tc>` +
-                `<w:tcPr><w:tcW w:w="1250" w:type="pct"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+                `<w:tcPr><w:tcW w:w="5693" w:type="dxa"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
                 `<w:p>` +
                   `<w:pPr><w:pStyle w:val="Header"/><w:spacing w:before="0" w:after="0"/></w:pPr>` +
                   `<w:r>` +
@@ -8771,7 +8775,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               `</w:tc>` +
               // Center cell — project title (50% — sits centered on page)
               `<w:tc>` +
-                `<w:tcPr><w:tcW w:w="2500" w:type="pct"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+                `<w:tcPr><w:tcW w:w="11385" w:type="dxa"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
                 `<w:p>` +
                   `<w:pPr>` +
                     `<w:pStyle w:val="Header"/>` +
@@ -8784,7 +8788,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               // Right cell — client logo (right-aligned) when present, else
               // an empty spacer that balances the RACE logo column (25%).
               `<w:tc>` +
-                `<w:tcPr><w:tcW w:w="1250" w:type="pct"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
+                `<w:tcPr><w:tcW w:w="5693" w:type="dxa"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
                 rightCellInner +
               `</w:tc>` +
             `</w:tr>` +
