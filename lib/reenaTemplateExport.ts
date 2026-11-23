@@ -8718,6 +8718,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                 `<w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
                 `<w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
               `</w:tblBorders>` +
+              // Fixed layout so the logo can't widen its cell and shove the
+              // centre (title) cell off-centre — the 25% / 50% / 25% columns
+              // stay put, keeping the title centred on the page.
+              `<w:tblLayout w:type="fixed"/>` +
               `<w:tblCellMar>` +
                 `<w:top w:w="0" w:type="dxa"/>` +
                 `<w:left w:w="0" w:type="dxa"/>` +
