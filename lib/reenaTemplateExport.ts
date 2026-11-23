@@ -8525,16 +8525,20 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
 
-        // Logo display size: 3" wide ONLY — height is computed from the
-        // source image's true aspect ratio. Resolution order:
+        // Logo display size: sized by HEIGHT so the whole logo sits ABOVE the
+        // red page-border line. The border's top line is drawn ~0.67in from the
+        // page edge (space=48pt); the header starts 0.125in from the top
+        // (w:header=180, set in the pgMar pass) — so a 0.45in-tall logo ends at
+        // ~0.575in, clear of the line instead of being sliced by it. WIDTH is
+        // computed from the source image's true aspect ratio. Resolution order:
         //   1. sharp metadata (works locally)
         //   2. native PNG IHDR parser (works in production even when
         //      sharp/libvips is missing — fixes logo stretching)
-        //   3. 1" fallback (used only if both readers fail)
-        const LOGO_TARGET_W_IN = 3.0;
+        //   3. 2.4in-wide fallback (used only if both readers fail)
+        const LOGO_TARGET_H_IN = 0.45;
         const EMU_PER_INCH = 914400;
-        let logoEmuW = Math.round(LOGO_TARGET_W_IN * EMU_PER_INCH); // 2743200
-        let logoEmuH = Math.round(1.0 * EMU_PER_INCH);               // 914400 fallback
+        let logoEmuH = Math.round(LOGO_TARGET_H_IN * EMU_PER_INCH);
+        let logoEmuW = Math.round(2.4 * EMU_PER_INCH); // fallback width
         let aspectSource: "sharp" | "png-parser" | "fallback" = "fallback";
         let aspectRatio: number | null = null;
         const sharp = getSharp();
@@ -8559,21 +8563,21 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
         if (aspectRatio !== null) {
-          logoEmuH = Math.round(logoEmuW * aspectRatio);
+          logoEmuW = Math.round(logoEmuH / aspectRatio);
         }
         console.log("[CLIENT DOCX HEADER] logo aspect ratio", {
           aspectSource,
           aspect: aspectRatio !== null ? aspectRatio.toFixed(4) : "n/a",
           emuW: logoEmuW,
           emuH: logoEmuH,
-          inchesW: LOGO_TARGET_W_IN,
-          inchesH: (logoEmuH / EMU_PER_INCH).toFixed(3),
+          inchesW: (logoEmuW / EMU_PER_INCH).toFixed(3),
+          inchesH: LOGO_TARGET_H_IN,
         });
 
         console.log("[DOCX TITLE LOGO FIX]", {
           titleSize: "22pt",
           titleDuplicateAvoided: true,
-          logoWidth: "3.0in",
+          logoWidth: (logoEmuW / EMU_PER_INCH).toFixed(3) + "in",
           logoHeightInches: (logoEmuH / EMU_PER_INCH).toFixed(3),
           logoAspectRatioPreserved: true,
           logoNotStretched: true,
@@ -8854,7 +8858,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           logoSize: logoBuffer.length,
           logoEmuW,
           logoEmuH,
-          logoInchesW: LOGO_TARGET_W_IN,
+          logoInchesW: (logoEmuW / 914400).toFixed(3),
           logoInchesH: (logoEmuH / EMU_PER_INCH).toFixed(3),
           titleInHeader: false,
           titleInBody: "via {projectNameUpper} template tag",
@@ -9233,9 +9237,26 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       const COVER_SPACER =
         '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="6000" w:lineRule="exact"/></w:pPr></w:p>';
       dx = dx.replace(/(<w:body>)/, '$1' + COVER_SPACER);
+      // Keep the header clear of the red page border, and the body below it:
+      //   w:header → 180: the header (logo + title) starts 0.125in from the
+      //     page top, so the 0.45in logo ends ~0.575in — ABOVE the border's top
+      //     line, which is drawn ~0.67in from the page edge (space=48pt). The
+      //     template's 240/420 values pushed the logo down INTO the line.
+      //   pgMar w:top → 1040: body content starts 0.72in down — BELOW the
+      //     line — explicitly, instead of relying on a tall header to push it.
+      //     (Slightly MORE usable page height than before: the old header
+      //     pushed the body to ~0.86in.)
+      dx = dx.replace(
+        /(<w:pgMar\b[^>]*?w:header=")\d+(")/g,
+        (_m: string, a: string, b: string) => a + "180" + b
+      );
+      dx = dx.replace(
+        /(<w:pgMar\b[^>]*?w:top=")\d+(")/g,
+        (_m: string, a: string, b: string) => a + "1040" + b
+      );
       zip.file("word/document.xml", dx);
       console.log(
-        `[export] sections forced to top: ${changed}; cover centred via spacer`
+        `[export] sections forced to top: ${changed}; cover centred via spacer; header/top margins normalised (header=180, top=1040)`
       );
     }
   } catch (err) {
