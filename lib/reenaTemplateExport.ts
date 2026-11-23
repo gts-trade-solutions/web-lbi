@@ -8706,95 +8706,69 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           ` xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"` +
           ` xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"` +
           ` xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
-          `<w:tbl>` +
-            `<w:tblPr>` +
-              `<w:tblW w:w="5000" w:type="pct"/>` +
-              `<w:tblInd w:w="0" w:type="dxa"/>` +
-              `<w:tblBorders>` +
-                `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                `<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                `<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                `<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                `<w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-                `<w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
-              `</w:tblBorders>` +
-              // Fixed layout so the logo can't widen its cell and shove the
-              // centre (title) cell off-centre — the 25% / 50% / 25% columns
-              // stay put, keeping the title centred on the page.
-              `<w:tblLayout w:type="fixed"/>` +
-              `<w:tblCellMar>` +
-                `<w:top w:w="0" w:type="dxa"/>` +
-                `<w:left w:w="0" w:type="dxa"/>` +
-                `<w:bottom w:w="0" w:type="dxa"/>` +
-                `<w:right w:w="0" w:type="dxa"/>` +
-              `</w:tblCellMar>` +
-            `</w:tblPr>` +
-            // Explicit DXA column widths (content width 22771 twips = landscape
-            // A3 minus 520+520 margins): 25% / 50% / 25%. DXA + fixed layout is
-            // honoured by Word, Google Docs AND LibreOffice, so the empty right
-            // cell can't collapse and the centre (title) cell stays centred.
-            `<w:tblGrid>` +
-              `<w:gridCol w:w="5693"/>` +
-              `<w:gridCol w:w="11385"/>` +
-              `<w:gridCol w:w="5693"/>` +
-            `</w:tblGrid>` +
-            `<w:tr>` +
-              // Left cell — logo (25%)
-              `<w:tc>` +
-                `<w:tcPr><w:tcW w:w="5693" w:type="dxa"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
-                `<w:p>` +
-                  `<w:pPr><w:pStyle w:val="Header"/><w:spacing w:before="0" w:after="0"/></w:pPr>` +
-                  `<w:r>` +
-                    `<w:rPr/>` +
-                    `<w:drawing>` +
-                      `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
-                        `<wp:extent cx="${logoEmuW}" cy="${logoEmuH}"/>` +
-                        `<wp:docPr id="999" name="Race Logo"/>` +
-                        `<a:graphic>` +
-                          `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
-                            `<pic:pic>` +
-                              `<pic:nvPicPr>` +
-                                `<pic:cNvPr id="0" name="race_logo.png"/>` +
-                                `<pic:cNvPicPr/>` +
-                              `</pic:nvPicPr>` +
-                              `<pic:blipFill>` +
-                                `<a:blip r:embed="${logoRelId}"/>` +
-                                `<a:stretch><a:fillRect/></a:stretch>` +
-                              `</pic:blipFill>` +
-                              `<pic:spPr>` +
-                                `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${logoEmuW}" cy="${logoEmuH}"/></a:xfrm>` +
-                                `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
-                              `</pic:spPr>` +
-                            `</pic:pic>` +
-                          `</a:graphicData>` +
-                        `</a:graphic>` +
-                      `</wp:inline>` +
-                    `</w:drawing>` +
-                  `</w:r>` +
-                `</w:p>` +
-              `</w:tc>` +
-              // Center cell — project title (50% — sits centered on page)
-              `<w:tc>` +
-                `<w:tcPr><w:tcW w:w="11385" w:type="dxa"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
-                `<w:p>` +
-                  `<w:pPr>` +
-                    `<w:pStyle w:val="Header"/>` +
-                    `<w:jc w:val="center"/>` +
-                    `<w:spacing w:before="0" w:after="0"/>` +
-                  `</w:pPr>` +
-                  titleHeaderRunXml +
-                `</w:p>` +
-              `</w:tc>` +
-              // Right cell — client logo (right-aligned) when present, else
-              // an empty spacer that balances the RACE logo column (25%).
-              `<w:tc>` +
-                `<w:tcPr><w:tcW w:w="5693" w:type="dxa"/>${HDR_NO_BORDER}${HDR_ZERO_MAR}<w:vAlign w:val="center"/></w:tcPr>` +
-                rightCellInner +
-              `</w:tc>` +
-            `</w:tr>` +
-          `</w:tbl>` +
-          // Trailing empty paragraph required after a table inside ftr/hdr.
-          `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>` +
+          // Tab-stop header (NOT a table). The logo sits at the LEFT; a CENTER
+          // tab at the page midpoint (11385 twips = half of the 22771-twip
+          // content width) centres the title; a RIGHT tab at 22771 right-aligns
+          // the optional client logo. Tab stops are honoured by Word, Google
+          // Docs AND LibreOffice, so the title is reliably page-centred — tables
+          // were collapsing the empty column in some renderers and shifting it.
+          `<w:p>` +
+            `<w:pPr>` +
+              `<w:pStyle w:val="Header"/>` +
+              `<w:tabs>` +
+                `<w:tab w:val="center" w:pos="11385"/>` +
+                `<w:tab w:val="right" w:pos="22771"/>` +
+              `</w:tabs>` +
+              `<w:spacing w:before="0" w:after="0"/>` +
+            `</w:pPr>` +
+            // Logo — inline, at the left of the line.
+            `<w:r><w:rPr/><w:drawing>` +
+              `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                `<wp:extent cx="${logoEmuW}" cy="${logoEmuH}"/>` +
+                `<wp:docPr id="999" name="Race Logo"/>` +
+                `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                  `<pic:pic>` +
+                    `<pic:nvPicPr><pic:cNvPr id="0" name="race_logo.png"/><pic:cNvPicPr/></pic:nvPicPr>` +
+                    `<pic:blipFill><a:blip r:embed="${logoRelId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+                    `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${logoEmuW}" cy="${logoEmuH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+                  `</pic:pic>` +
+                `</a:graphicData></a:graphic>` +
+              `</wp:inline>` +
+            `</w:drawing></w:r>` +
+            // Center tab, then the title centred at the page midpoint. The title
+            // run is raised (w:position, half-points) so it sits at the vertical
+            // middle of the taller logo instead of on the logo's baseline.
+            `<w:r><w:tab/></w:r>` +
+            (titleUpperForHeader
+              ? `<w:r>` +
+                  `<w:rPr>` +
+                    `<w:rFonts w:ascii="Neue Haas Grotesk Text Pro" w:hAnsi="Neue Haas Grotesk Text Pro"/>` +
+                    `<w:b/><w:bCs/>` +
+                    `<w:position w:val="${Math.max(0, Math.round((logoEmuH / 914400) * 72 - 22))}"/>` +
+                    `<w:sz w:val="44"/><w:szCs w:val="44"/>` +
+                    `<w:color w:val="44546A"/>` +
+                  `</w:rPr>` +
+                  `<w:t xml:space="preserve">${escapedTitleForHeader}</w:t>` +
+                `</w:r>`
+              : "") +
+            // Optional client logo: right tab, then the image at the right edge.
+            (clientLogoBuffer
+              ? `<w:r><w:tab/></w:r>` +
+                `<w:r><w:rPr/><w:drawing>` +
+                  `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                    `<wp:extent cx="${clientEmuW}" cy="${clientEmuH}"/>` +
+                    `<wp:docPr id="998" name="Client Logo"/>` +
+                    `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                      `<pic:pic>` +
+                        `<pic:nvPicPr><pic:cNvPr id="0" name="client_logo.${clientLogoExt}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+                        `<pic:blipFill><a:blip r:embed="${clientRelId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+                        `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${clientEmuW}" cy="${clientEmuH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+                      `</pic:pic>` +
+                    `</a:graphicData></a:graphic>` +
+                  `</wp:inline>` +
+                `</w:drawing></w:r>`
+              : "") +
+          `</w:p>` +
           `</w:hdr>`;
 
         // Find existing header files or create header1.xml.
