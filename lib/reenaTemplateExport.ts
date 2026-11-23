@@ -6492,27 +6492,21 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             }
           }
 
-          // 6. Keep each point together across page breaks: every row keeps its
-          //    content on one page (cantSplit — a tall text cell no longer
-          //    splits), and the LAST (data) row keeps with the next block so the
-          //    point's PHOTO stays on the SAME page as its table.
+          // 6. Keep each ROW's content on one page (cantSplit — a tall text
+          //    cell no longer splits across pages).
+          //    NOTE: we deliberately do NOT add <w:keepNext/> to bind the table
+          //    to the photo. Each point already starts at the TOP of a fresh
+          //    page, so when the table + photo fit they stay together anyway;
+          //    and binding them when they DON'T fit (a tall table + a big photo)
+          //    forced Word to push the whole block to the next page, stranding a
+          //    BLANK page before it. Without the binding, a tall table fills its
+          //    page and the photo flows to the next page — no blank page.
           out = out.replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (trXml: string) => {
             if (/<w:cantSplit\b/.test(trXml)) return trXml;
             return /<w:trPr>/.test(trXml)
               ? trXml.replace("<w:trPr>", "<w:trPr><w:cantSplit/>")
               : trXml.replace(/(<w:tr\b[^>]*>)/, "$1<w:trPr><w:cantSplit/></w:trPr>");
           });
-          const keepTrs = out.match(/<w:tr\b[\s\S]*?<\/w:tr>/g);
-          if (keepTrs && keepTrs.length) {
-            const lastTr = keepTrs[keepTrs.length - 1];
-            // keepNext goes right after <w:pPr> (after an optional <w:pStyle>),
-            // which is the correct OOXML position (before jc / spacing).
-            const keptTr = lastTr.replace(
-              /<w:pPr>(\s*<w:pStyle\b[^>]*\/>)?/g,
-              (_m, ps) => `<w:pPr>${ps || ""}<w:keepNext/>`
-            );
-            if (keptTr !== lastTr) out = out.replace(lastTr, keptTr);
-          }
 
           // 7. Fill the gaps: align DATA-row cells to the TOP. When an
           //    Observation is long the row is tall, and vertically-centred
