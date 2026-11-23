@@ -1318,10 +1318,15 @@ function conclusionHtmlToOoxml(html: string): string {
         );
       }
     } else {
-      // <p> → one justified paragraph
+      // <p> → one paragraph. Justify normal prose (both edges), BUT a paragraph
+      // that contains hard line breaks (<br/>) — e.g. the "Issued By / For and
+      // on behalf of: / RACE LBI …" signature block — must be LEFT-aligned.
+      // Justifying short <br/> lines spreads each word across the whole page.
+      const inner = m[2];
+      const jc = /<br\b/i.test(inner) ? "left" : "both";
       paras.push(
-        `<w:p><w:pPr><w:spacing w:before="0" w:after="120" w:line="264" w:lineRule="auto"/><w:jc w:val="both"/></w:pPr>` +
-          conclusionInlineRunsToOoxml(m[2], BODY) +
+        `<w:p><w:pPr><w:spacing w:before="0" w:after="120" w:line="264" w:lineRule="auto"/><w:jc w:val="${jc}"/></w:pPr>` +
+          conclusionInlineRunsToOoxml(inner, BODY) +
           `</w:p>`
       );
     }
