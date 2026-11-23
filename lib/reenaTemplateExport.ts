@@ -8998,45 +8998,60 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           const FONT = "Neue Haas Grotesk Text Pro";
           const esc = (s: string) =>
             String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-          const cell = (
-            text: string,
-            bold: boolean,
-            fill: string,
-            color: string,
-            w: number
-          ) =>
-            `<w:tc><w:tcPr>${fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/>` : ""}` +
-            `<w:tcW w:w="${w}" w:type="dxa"/><w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="160" w:type="dxa"/><w:bottom w:w="120" w:type="dxa"/><w:right w:w="160" w:type="dxa"/></w:tcMar><w:vAlign w:val="center"/></w:tcPr>` +
-            `<w:p><w:pPr><w:spacing w:before="40" w:after="40" w:line="264" w:lineRule="auto"/></w:pPr>` +
-            `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/>${bold ? "<w:b/><w:bCs/>" : ""}<w:color w:val="${color}"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr><w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p></w:tc>`;
+          // Layout copied from the reference PDF ("SAMEEP … TO MUNDRA PORT"
+          // p7): a bold black "Hindrance Solutions:" heading, then plain
+          // BULLET lines "• Label: text" (bold label, normal text — NOT a
+          // table), then bold "Additional Considerations" with numbered bold
+          // titles and an indented "o body" line under each.
+          const rPrN = `<w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:color w:val="111827"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>`;
+          const rPrB = `<w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>`;
           const heading =
-            `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="160" w:line="240" w:lineRule="auto"/></w:pPr>` +
-            `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="163A2A"/><w:sz w:val="40"/><w:szCs w:val="40"/></w:rPr><w:t>Hindrance Solutions</w:t></w:r></w:p>`;
-          let tableXml = "";
-          if (hRows.length) {
-            const colH = 3200;
-            const colS = 7000;
-            const hr = `<w:tr>${cell("Hindrance", true, "1F7A5A", "FFFFFF", colH)}${cell("Solution", true, "1F7A5A", "FFFFFF", colS)}</w:tr>`;
-            const body = hRows
-              .map(
-                (r) =>
-                  `<w:tr>${cell(r.hindrance || "-", true, "", "111827", colH)}${cell(r.solution || "-", false, "", "111827", colS)}</w:tr>`
-              )
-              .join("");
-            const borders = `<w:tblBorders><w:top w:val="single" w:sz="4" w:color="B7C4BF"/><w:left w:val="single" w:sz="4" w:color="B7C4BF"/><w:bottom w:val="single" w:sz="4" w:color="B7C4BF"/><w:right w:val="single" w:sz="4" w:color="B7C4BF"/><w:insideH w:val="single" w:sz="4" w:color="D7E0DC"/><w:insideV w:val="single" w:sz="4" w:color="D7E0DC"/></w:tblBorders>`;
-            const grid = `<w:tblGrid><w:gridCol w:w="${colH}"/><w:gridCol w:w="${colS}"/></w:tblGrid>`;
-            tableXml = `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>${borders}<w:tblLayout w:type="fixed"/></w:tblPr>${grid}${hr}${body}</w:tbl>`;
-          }
-          const addlHeading = considerations.length
-            ? `<w:p><w:pPr><w:spacing w:before="240" w:after="100"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr><w:t>Additional Considerations</w:t></w:r></w:p>`
-            : "";
-          const addlItems = considerations
-            .map(
-              (c, i) =>
-                `<w:p><w:pPr><w:spacing w:before="20" w:after="20" w:line="264" w:lineRule="auto"/><w:ind w:left="360" w:hanging="360"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:color w:val="111827"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr><w:t xml:space="preserve">${i + 1}. ${esc(c)}</w:t></w:r></w:p>`
-            )
+            `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="140" w:line="240" w:lineRule="auto"/></w:pPr>` +
+            `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr><w:t>Hindrance Solutions:</w:t></w:r></w:p>`;
+          // "• Major Obstacles: Height / width clearance …" bullet per row.
+          const rowsXml = hRows
+            .map((r) => {
+              const label = r.hindrance ? `${r.hindrance}:` : "";
+              return (
+                `<w:p><w:pPr><w:spacing w:before="40" w:after="40" w:line="264" w:lineRule="auto"/><w:ind w:left="446" w:hanging="230"/></w:pPr>` +
+                `<w:r>${rPrN}<w:t xml:space="preserve">•  </w:t></w:r>` +
+                (label
+                  ? `<w:r>${rPrB}<w:t xml:space="preserve">${esc(label)} </w:t></w:r>`
+                  : "") +
+                `<w:r>${rPrN}<w:t xml:space="preserve">${esc(r.solution || "")}</w:t></w:r>` +
+                `</w:p>`
+              );
+            })
             .join("");
-          const block = heading + tableXml + `<w:p/>` + addlHeading + addlItems + `<w:p/>`;
+          const addlHeading = considerations.length
+            ? `<w:p><w:pPr><w:spacing w:before="280" w:after="120"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr><w:t>Additional Considerations</w:t></w:r></w:p>`
+            : "";
+          // Each consideration "Title: body" becomes
+          //   1. Title:            (bold)
+          //      o body            (indented sub-line, like the PDF)
+          // A consideration without a "Title:" prefix prints as a plain
+          // numbered line.
+          const addlItems = considerations
+            .map((c, i) => {
+              const m = c.match(/^([^:]{1,60}):\s*([\s\S]*)$/);
+              const title = m ? m[1].trim() : "";
+              const body = m ? m[2].trim() : c;
+              const numberLine =
+                `<w:p><w:pPr><w:spacing w:before="60" w:after="0" w:line="264" w:lineRule="auto"/><w:ind w:left="360" w:hanging="360"/></w:pPr>` +
+                `<w:r>${rPrN}<w:t xml:space="preserve">${i + 1}. </w:t></w:r>` +
+                (title
+                  ? `<w:r>${rPrB}<w:t xml:space="preserve">${esc(title)}:</w:t></w:r>`
+                  : `<w:r>${rPrN}<w:t xml:space="preserve">${esc(body)}</w:t></w:r>`) +
+                `</w:p>`;
+              const subLine = title
+                ? `<w:p><w:pPr><w:spacing w:before="0" w:after="40" w:line="264" w:lineRule="auto"/><w:ind w:left="900" w:hanging="180"/></w:pPr>` +
+                  `<w:r>${rPrN}<w:t xml:space="preserve">o </w:t></w:r>` +
+                  `<w:r>${rPrN}<w:t xml:space="preserve">${esc(body)}</w:t></w:r></w:p>`
+                : "";
+              return numberLine + subLine;
+            })
+            .join("");
+          const block = heading + rowsXml + addlHeading + addlItems + `<w:p/>`;
           // Insert just BEFORE the first per-point observation table (its header
           // contains "GPS LOCATION"), so the order reads
           // Summary of Observations → Hindrance → Stage Summary → per-point
