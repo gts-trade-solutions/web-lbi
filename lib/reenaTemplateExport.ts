@@ -9231,24 +9231,30 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     if (df) {
       let dx = df.asText();
       let changed = 0;
-      let keptCover = false;
+      // Force EVERY centred section (including the cover) to TOP. Section-level
+      // <w:vAlign w:val="center"> is honoured by Microsoft Word but IGNORED by
+      // Google Docs / LibreOffice, so the cover title looked top-pinned whenever
+      // the file was opened/converted there. We instead centre the cover title
+      // deterministically with a tall spacer paragraph (below), which every
+      // renderer honours.
       dx = dx.replace(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g, (sect: string) => {
         if (!/<w:vAlign\b[^>]*w:val="center"/i.test(sect)) return sect;
-        // First centred section = cover/title page: leave it centred so the
-        // title sits in the middle of the page.
-        if (!keptCover) {
-          keptCover = true;
-          return sect;
-        }
         changed++;
         return sect.replace(/<w:vAlign\b[^>]*\/>/g, '<w:vAlign w:val="top"/>');
       });
-      if (changed || keptCover) {
-        zip.file("word/document.xml", dx);
-        console.log(
-          `[export] page vAlign set to top on ${changed} section(s); cover page kept centred: ${keptCover}`
-        );
-      }
+      // Centre the COVER title: push the cover content down to the vertical
+      // middle with ONE tall empty spacer paragraph at the very top of the body.
+      // The cover is the first section, so this spacer only affects page 1; the
+      // ~4.2in height lands the title block near the page centre. (An exact-line
+      // empty paragraph is reliable across Word / Google Docs / LibreOffice,
+      // unlike section vAlign or suppressible spacing-before on the 1st para.)
+      const COVER_SPACER =
+        '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="6000" w:lineRule="exact"/></w:pPr></w:p>';
+      dx = dx.replace(/(<w:body>)/, '$1' + COVER_SPACER);
+      zip.file("word/document.xml", dx);
+      console.log(
+        `[export] sections forced to top: ${changed}; cover centred via spacer`
+      );
     }
   } catch (err) {
     console.error("[export] page vAlign top fix failed (non-fatal):", err);
