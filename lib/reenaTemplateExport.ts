@@ -7382,8 +7382,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const PAIR_STD_H_IN = 6.6 / GRID_ASPECT; // ≈4.24"
         const SINGLE_STD_H_IN = 7.5 / GRID_ASPECT; // in-place single photo ≈4.82"
         const PHOTO_FIT_USABLE_IN = 9.8; // A3-landscape body height minus margins + slack
-        // (9.8 not 10.1: the header moved below the red page border, so the body
-        // now starts at 1640 twips instead of 1140 — ~0.3in less page height.)
+        // (9.8 not 10.1: the header now sits inside the red page border, so the
+        // body starts at 1520 twips instead of 1140 — ~0.26in less page height.)
         const PHOTO_FIT_MIN_H_IN = 2.3; // smaller than this → next page instead
         const stripForEstimate = (s: unknown) =>
           String(s ?? "")
@@ -8712,22 +8712,21 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           }
         }
 
-        // Logo display size: sized by HEIGHT so the whole logo sits INSIDE the
-        // red page border. The header starts 0.514in from the page top
-        // (w:header=740, set in the late pgMar pass) — below the red top line
-        // in every renderer — so the 0.55in-tall logo spans ~0.51–1.06in and
-        // the line never cuts across it. (0.45in was "too small" for the user;
-        // keeping the logo ABOVE the line is impossible because Word caps the
-        // border's page offset at 31pt ≈ 0.43in.) WIDTH is
+        // Logo display size: 0.563in tall — measured straight off the
+        // reference report (SAMEEP…TO MUNDRA PORT, p7: logo x=0.361in,
+        // top=0.395in, 2.996 x 0.563in). The header starts at 0.395in
+        // (w:header=569, set in the late pgMar pass) so the logo spans
+        // 0.395–0.958in: below the red page border at 0.222in and above the
+        // body, exactly like the reference. WIDTH is
         // computed from the source image's true aspect ratio. Resolution order:
         //   1. sharp metadata (works locally)
         //   2. native PNG IHDR parser (works in production even when
         //      sharp/libvips is missing — fixes logo stretching)
         //   3. 2.93in-wide fallback (used only if both readers fail)
-        const LOGO_TARGET_H_IN = 0.55;
+        const LOGO_TARGET_H_IN = 0.563;
         const EMU_PER_INCH = 914400;
         let logoEmuH = Math.round(LOGO_TARGET_H_IN * EMU_PER_INCH);
-        let logoEmuW = Math.round(2.93 * EMU_PER_INCH); // fallback width
+        let logoEmuW = Math.round(3.0 * EMU_PER_INCH); // fallback width
         let aspectSource: "sharp" | "png-parser" | "fallback" = "fallback";
         let aspectRatio: number | null = null;
         const sharp = getSharp();
@@ -9678,33 +9677,40 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       const COVER_SPACER =
         '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="6000" w:lineRule="exact"/></w:pPr></w:p>';
       dx = dx.replace(/(<w:body>)/, '$1' + COVER_SPACER);
-      // Put the header (logo + title) INSIDE the red page border instead of
-      // above it. The red frame's exact distance from the page edge is NOT
-      // under our control: w:space is capped at 31pt (≈0.43in) by Word, and
-      // LibreOffice/PDF renderers place it differently again (measured ≈0.22in
-      // from the page edge at the template's 48pt). Trying to push the line
-      // DOWN past the logo therefore cannot work — Word simply clamps it — and
-      // the line ended up drawn straight through the logo and the title.
-      // So the header moves down instead, below every renderer's line:
-      //   w:header → 740: header content starts 0.514in from the page top —
-      //     clear of the line at both 0.22in (PDF) and 0.43in (Word). The
-      //     0.55in logo then spans ~0.51–1.06in, fully inside the frame.
-      //   pgMar w:top → 1640: body content starts 1.139in down, just under the
-      //     header, so nothing overlaps.
-      // The border itself is left exactly as the template has it (48pt on all
-      // four sides) so the frame stays square — the earlier 53pt top-only
-      // tweak just made the top line sit lower than the sides.
+      // Header geometry, measured off the reference report (SAMEEP…TO MUNDRA
+      // PORT p7): red frame 0.222in from every page edge, logo at x=0.361in /
+      // top=0.395in / 2.996 x 0.563in, so the frame sits ABOVE the logo and the
+      // logo sits above the body.
+      //
+      // The template ships w:space="48" on the page border, and 48 is what put
+      // the red line straight through the logo:
+      //   • Word masks w:space with 0x1F (the UI only allows 0–31pt), so 48
+      //     draws at 48 & 31 = 16pt and 53 at 53 & 31 = 21pt — which is exactly
+      //     where both were measured in the user's screenshots.
+      //   • LibreOffice (the PDF converter) honours 48 literally but clamps it
+      //     so the line never enters the text area, so it drew the sides at the
+      //     0.361in margin and the TOP at the full 0.667in — through the logo.
+      // Writing the real value, 16pt, makes every renderer agree at 0.222in and
+      // matches the reference exactly.
+      dx = dx.replace(
+        /<w:pgBorders(?![^>]*\/>)[^>]*>[\s\S]*?<\/w:pgBorders>/g,
+        (block: string) => block.replace(/w:space="\d+"/g, 'w:space="16"')
+      );
+      //   w:header → 569: header content starts 0.395in down, so the 0.563in
+      //     logo spans 0.395–0.958in — below the 0.222in border line.
+      //   pgMar w:top → 1520: body content starts 1.056in down, just under the
+      //     logo, so the header and the body never overlap.
       dx = dx.replace(
         /(<w:pgMar\b[^>]*?w:header=")\d+(")/g,
-        (_m: string, a: string, b: string) => a + "740" + b
+        (_m: string, a: string, b: string) => a + "569" + b
       );
       dx = dx.replace(
         /(<w:pgMar\b[^>]*?w:top=")\d+(")/g,
-        (_m: string, a: string, b: string) => a + "1640" + b
+        (_m: string, a: string, b: string) => a + "1520" + b
       );
       zip.file("word/document.xml", dx);
       console.log(
-        `[export] sections forced to top: ${changed}; cover centred via spacer; header moved inside the red border (header=740, top=1640, border left at the template's 48pt)`
+        `[export] sections forced to top: ${changed}; cover centred via spacer; reference header geometry applied (border space=16pt ≈ 0.222in, header=569, top=1520)`
       );
     }
   } catch (err) {
