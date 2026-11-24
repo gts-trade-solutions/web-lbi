@@ -765,6 +765,15 @@ function renderRouteLocationsStepperPng(
 // openable in Word and the server's peak memory stays bounded.
 let OBS_PHOTO_TARGET = { width: 1120, height: 720, quality: 82 };
 
+// Watermark text burned INTO each observation photo when the export's
+// watermark option is on. The page watermark sits BEHIND images, so a photo
+// copied/extracted out of the .docx would otherwise be clean — stamping the
+// text onto the pixels protects the photos themselves. Set per-export in
+// generateReenaDocx ("" = off). Only real camera photos (photo_* keys) are
+// stamped; GA drawings / route maps / flow charts stay clean so their
+// technical detail stays readable.
+let PHOTO_WATERMARK_TEXT = "";
+
 async function optimizeDocxImage(
   input: Buffer,
   type: "observation" | "routeMap" | "gaDrawing" | "category",
@@ -824,6 +833,57 @@ async function optimizeDocxImage(
           mozjpeg: true,
         })
         .toBuffer();
+
+      // Burn the watermark text diagonally across the photo pixels so a photo
+      // extracted from the .docx still carries it. Semi-transparent white with
+      // a faint dark outline so it reads on bright sky AND dark tarmac. Sized
+      // to span ~the photo diagonal, so cropping it out ruins the photo.
+      if (type === "observation" && key.startsWith("photo_") && PHOTO_WATERMARK_TEXT) {
+        try {
+          const meta = await sharp(optimized).metadata();
+          const w = meta.width || 0;
+          const h = meta.height || 0;
+          if (w > 50 && h > 50) {
+            const text = PHOTO_WATERMARK_TEXT;
+            const escSvg = (s: string) =>
+              s
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
+            const diagLen = Math.sqrt(w * w + h * h);
+            // Fit the text along ~88% of the diagonal; clamps keep short texts
+            // from turning huge and long project names readable.
+            const fontSize = Math.max(
+              14,
+              Math.min(h / 5, (diagLen * 0.88) / Math.max(6, text.length * 0.56))
+            );
+            const angle = (-Math.atan2(h, w) * 180) / Math.PI; // along the diagonal
+            const svg =
+              `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
+              `<text x="${w / 2}" y="${h / 2}" transform="rotate(${angle.toFixed(1)} ${w / 2} ${h / 2})"` +
+              ` text-anchor="middle" dominant-baseline="middle"` +
+              ` font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="${fontSize.toFixed(0)}"` +
+              ` fill="#FFFFFF" fill-opacity="0.38" stroke="#000000" stroke-opacity="0.22"` +
+              ` stroke-width="${Math.max(1, fontSize / 26).toFixed(1)}">` +
+              escSvg(text) +
+              `</text></svg>`;
+            optimized = await sharp(optimized)
+              .keepIccProfile()
+              .composite([{ input: Buffer.from(svg) }])
+              // Slightly higher quality on the re-encode to limit the
+              // second-generation JPEG loss.
+              .jpeg({
+                quality: Math.min(92, OBS_PHOTO_TARGET.quality + 8),
+                chromaSubsampling: "4:4:4",
+                mozjpeg: true,
+              })
+              .toBuffer();
+          }
+        } catch (wmErr) {
+          console.warn("[photo watermark] overlay failed - photo left unstamped:", wmErr);
+        }
+      }
     }
     console.log("[DOCX IMAGE OPTIMIZED]", {
       type,
@@ -3187,9 +3247,12 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   const includePhotos = options.includePhotos !== false;
   const includeGa = options.includeGa !== false; // default true; false = skip GA drawing
   const summaryMode = options.summaryMode === true;
-  // Watermark text (empty = no watermark). Drawn in the header pass below.
+  // Watermark text (empty = no watermark). Drawn in the header pass below AND
+  // burned into every observation photo via optimizeDocxImage (module-level
+  // setting; assigned every export so a watermark-off export resets it).
   const watermarkText =
     options.watermark?.enabled === true ? String(options.watermark?.text || "").trim() : "";
+  PHOTO_WATERMARK_TEXT = watermarkText;
   const reportIdsFilter = (options.reportIds || []).filter(Boolean);
 
   // ----- Editable report-section overrides (Summary of Observations, Hindrance
@@ -3235,8 +3298,12 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // Fetch + size the optional "Route Survey Flow Chart" image shown under the
   // Summary of Observations (uploaded in the setup wizard). Non-fatal: if it
   // fails to load, the section just renders without the image.
+  // Fetched for BOTH modes: the detail report's Route Summary pass and the
+  // pinned Summary report's observations block each embed it. (It was
+  // previously fetched only in detail mode but rendered only in summary mode,
+  // so it never actually appeared anywhere.)
   let flowChartImg: { buffer: Buffer; emuW: number; emuH: number } | null = null;
-  if (!summaryMode && observationSummaryOverride?.flowChartUrl) {
+  if (observationSummaryOverride?.flowChartUrl) {
     try {
       const f = await fetchImageBuffer(String(observationSummaryOverride.flowChartUrl), "flowChart");
       if (f && Buffer.isBuffer(f.buffer) && f.buffer.length) {
@@ -7241,7 +7308,9 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       // ALL of the point's photos, under the point's one table. Cell size
       // shrinks as the photo count grows so the grid stays compact.
       let multiPhotoGridsInjected = 0;
-      if (multiPhotoKeys.size > 0) {
+      // Runs whenever there are observations: multi-photo points get the grid,
+      // and single-photo points get the fit-under-table shrink when needed.
+      if (observations.length > 0) {
         const docRelsFile = renderedZip.file("word/_rels/document.xml.rels");
         let docRelsXml = docRelsFile ? docRelsFile.asText() : "";
 
@@ -7302,6 +7371,36 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         const loneHpx = Math.round((9.0 / GRID_ASPECT) * 96);
         const LONE_CX = loneWpx * PX_TO_EMU;
         const LONE_CY = loneHpx * PX_TO_EMU;
+
+        // ---- FIT-UNDER-TABLE SHRINK. When a point's text is long, its
+        // observation table grows tall and the fixed-size photo (pair) below
+        // no longer fits → Word pushes it to the next page, stranding a gap.
+        // Estimate the table's height from the point's text and, when needed,
+        // SHRINK the first photo/pair just enough to share the page. Below a
+        // minimum legible size we leave the photo full-size on the next page
+        // (texts are never truncated).
+        const PAIR_STD_H_IN = 6.6 / GRID_ASPECT; // ≈4.24"
+        const SINGLE_STD_H_IN = 7.5 / GRID_ASPECT; // in-place single photo ≈4.82"
+        const PHOTO_FIT_USABLE_IN = 10.1; // A3-landscape body height minus margins + slack
+        const PHOTO_FIT_MIN_H_IN = 2.3; // smaller than this → next page instead
+        const stripForEstimate = (s: unknown) =>
+          String(s ?? "")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        // Rough chars-per-line for the table's wrapping columns (OBSERVATION /
+        // REMARKS / LOCATION) at their widths; ~0.21" per text line.
+        const photoBudgetFor = (o: any): number => {
+          const lines = Math.max(
+            1,
+            Math.ceil(stripForEstimate(o?.observation).length / 58),
+            Math.ceil(stripForEstimate(o?.remarks).length / 40),
+            Math.ceil(stripForEstimate(o?.location).length / 22)
+          );
+          const rowH = Math.max(0.7, lines * 0.21 + 0.16);
+          const tableH = 0.5 /* header row */ + rowH;
+          return PHOTO_FIT_USABLE_IN - tableH;
+        };
         const NO_BORDER =
           `<w:tcBorders>` +
             `<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>` +
@@ -7373,28 +7472,40 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             `<w:tr><w:trPr><w:cantSplit/></w:trPr>${rowXml}</w:tr>` +
           `</w:tbl>`;
         // One page's worth of photos: a pair side by side, or a lone big one.
-        const pairTable = (a: string, b: string, base: number) =>
+        // cx/cy default to the standard pair size; the FIRST pair can pass a
+        // smaller size so it fits under a tall observation table.
+        const pairTable = (a: string, b: string, base: number, cx = PAIR_CX, cy = PAIR_CY) =>
           tableWrap(
             `<w:gridCol w:w="4680"/><w:gridCol w:w="4680"/>`,
-            photoCell(a, base, "2500", PAIR_CX, PAIR_CY) +
-              photoCell(b || "", base + 1, "2500", PAIR_CX, PAIR_CY)
+            photoCell(a, base, "2500", cx, cy) +
+              photoCell(b || "", base + 1, "2500", cx, cy)
           );
         const loneTable = (a: string, base: number) =>
           tableWrap(
             `<w:gridCol w:w="9360"/>`,
             photoCell(a, base, "5000", LONE_CX, LONE_CY)
           );
-        // Paginate the point's photos TWO PER PAGE: first pair under the table,
-        // each further pair (or odd single) on its own fresh page.
-        const buildPhotoGrid = (rIds: string[], docPrBase: number): string => {
+        // Paginate the point's photos TWO PER PAGE: first pair under the table
+        // (shrunk to firstPairHIn when the table is tall), each further pair
+        // (or odd single) on its own fresh page at the standard size.
+        const buildPhotoGrid = (
+          rIds: string[],
+          docPrBase: number,
+          firstPairHIn: number | null = null
+        ): string => {
           if (rIds.length <= 1) return loneTable(rIds[0] || "", docPrBase);
           let out = "";
           let page = 0;
           for (let r = 0; r < rIds.length; r += 2) {
             if (page > 0) out += PHOTO_PAGE_BREAK; // every pair after the first → new page
+            const scaled = page === 0 && firstPairHIn !== null;
+            const cx = scaled
+              ? Math.round(Math.min(6.6, firstPairHIn! * GRID_ASPECT) * 96) * PX_TO_EMU
+              : PAIR_CX;
+            const cy = scaled ? Math.round(firstPairHIn! * 96) * PX_TO_EMU : PAIR_CY;
             out +=
               r + 1 < rIds.length
-                ? pairTable(rIds[r], rIds[r + 1], docPrBase + r)
+                ? pairTable(rIds[r], rIds[r + 1], docPrBase + r, cx, cy)
                 : loneTable(rIds[r], docPrBase + r); // odd last photo, big & centred
             page += 1;
           }
@@ -7402,14 +7513,24 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         };
 
         // Walk observation photo paragraphs in order; for each multi-photo
-        // observation, REPLACE its single-photo paragraph with the full grid.
+        // observation REPLACE its single-photo paragraph with the full grid,
+        // and for a SINGLE-photo observation under a tall table SHRINK the
+        // in-place photo so it stays on the same page as the table.
         const obsWithPhotos = observations.filter((o) => {
           const pkey = String((o as { photo?: unknown }).photo || "");
           return pkey !== "" && imageMap.has(pkey);
         });
         const photoParaRe = /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:drawing\b[\s\S]*?<\/w:drawing>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g;
-        type Hit = { paraStart: number; paraEnd: number; rIds: string[] };
+        type Hit = {
+          paraStart: number;
+          paraEnd: number;
+          rIds: string[];
+          firstPairHIn: number | null;
+          xmlNew?: string; // prebuilt replacement (single-photo shrink)
+        };
         const replaceAt: Hit[] = [];
+        let singlePhotosShrunk = 0;
+        let firstPairsShrunk = 0;
         let docPrCounter = 8000;
         let photoParaIdx = 0;
         let pm: RegExpExecArray | null;
@@ -7422,22 +7543,59 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           photoParaIdx += 1;
           if (!obs) continue;
           const photoKey = String((obs as { photo?: unknown }).photo || "");
-          if (!multiPhotoKeys.has(photoKey)) continue;
+          const budget = photoBudgetFor(obs);
+          if (!multiPhotoKeys.has(photoKey)) {
+            // Single photo rendered in place. Shrink it only when the table is
+            // tall enough to push the standard size off the page, and the
+            // shrunken photo stays legible.
+            if (budget < SINGLE_STD_H_IN - 0.05 && budget >= PHOTO_FIT_MIN_H_IN) {
+              const newH = budget;
+              const newW = Math.min(7.5, newH * GRID_ASPECT);
+              const cyNew = Math.round(newH * 96) * PX_TO_EMU;
+              const cxNew = Math.round(newW * 96) * PX_TO_EMU;
+              const patched = pm[0]
+                .replace(/<wp:extent\s+cx="\d+"\s+cy="\d+"\s*\/>/, `<wp:extent cx="${cxNew}" cy="${cyNew}"/>`)
+                .replace(/<a:ext\s+cx="\d+"\s+cy="\d+"\s*\/>/, `<a:ext cx="${cxNew}" cy="${cyNew}"/>`);
+              if (patched !== pm[0]) {
+                replaceAt.push({
+                  paraStart: pm.index,
+                  paraEnd: pm.index + pm[0].length,
+                  rIds: [],
+                  firstPairHIn: null,
+                  xmlNew: patched,
+                });
+                singlePhotosShrunk += 1;
+              }
+            }
+            continue;
+          }
           // Photo 0's r:embed is already in the rendered paragraph.
           const embedMatch = pm[0].match(/r:embed="([^"]+)"/);
           if (!embedMatch) continue;
           const leftRId = embedMatch[1];
           const rIds = [leftRId, ...(extraRIdsByKey.get(photoKey) || [])];
-          replaceAt.push({ paraStart: pm.index, paraEnd: pm.index + pm[0].length, rIds });
+          // Shrink the FIRST pair when the table is tall; below the minimum
+          // size keep the standard size (Word moves it to the next page).
+          let firstPairHIn: number | null = null;
+          if (budget < PAIR_STD_H_IN - 0.05 && budget >= PHOTO_FIT_MIN_H_IN) {
+            firstPairHIn = budget;
+            firstPairsShrunk += 1;
+          }
+          replaceAt.push({ paraStart: pm.index, paraEnd: pm.index + pm[0].length, rIds, firstPairHIn });
         }
 
         // Apply replacements from END to START so positions stay valid.
         for (let i = replaceAt.length - 1; i >= 0; i -= 1) {
-          const { paraStart, paraEnd, rIds } = replaceAt[i];
-          const tableXml = buildPhotoGrid(rIds, docPrCounter);
-          docPrCounter += rIds.length + 2;
+          const { paraStart, paraEnd, rIds, firstPairHIn, xmlNew } = replaceAt[i];
+          let tableXml: string;
+          if (xmlNew !== undefined) {
+            tableXml = xmlNew; // single-photo shrink: patched paragraph
+          } else {
+            tableXml = buildPhotoGrid(rIds, docPrCounter, firstPairHIn);
+            docPrCounter += rIds.length + 2;
+            multiPhotoGridsInjected += 1;
+          }
           xml = xml.slice(0, paraStart) + tableXml + xml.slice(paraEnd);
-          multiPhotoGridsInjected += 1;
         }
 
         console.log("[DOCX MULTI-PHOTO GRID INJECTION]", {
@@ -7446,6 +7604,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           observationsWithPhotos: obsWithPhotos.length,
           photoParagraphsScanned: photoParaIdx,
           gridsInjected: multiPhotoGridsInjected,
+          firstPairsShrunkToFit: firstPairsShrunk,
+          singlePhotosShrunkToFit: singlePhotosShrunk,
         });
       }
 
@@ -8552,18 +8712,20 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
 
         // Logo display size: sized by HEIGHT so the whole logo sits ABOVE the
         // red page-border line. The border's top line is drawn ~0.67in from the
-        // page edge (space=48pt); the header starts 0.125in from the top
-        // (w:header=180, set in the pgMar pass) — so a 0.45in-tall logo ends at
-        // ~0.575in, clear of the line instead of being sliced by it. WIDTH is
+        // page edge (space=48pt); the header starts 0.069in from the top
+        // (w:header=100, set in the pgMar pass) — so a 0.55in-tall logo ends at
+        // ~0.62in, clear of the line instead of being sliced by it. (Was 0.45in
+        // with the header at 0.125in — the user found that logo too small, so
+        // the header was raised to make room for a bigger logo.) WIDTH is
         // computed from the source image's true aspect ratio. Resolution order:
         //   1. sharp metadata (works locally)
         //   2. native PNG IHDR parser (works in production even when
         //      sharp/libvips is missing — fixes logo stretching)
-        //   3. 2.4in-wide fallback (used only if both readers fail)
-        const LOGO_TARGET_H_IN = 0.45;
+        //   3. 2.93in-wide fallback (used only if both readers fail)
+        const LOGO_TARGET_H_IN = 0.55;
         const EMU_PER_INCH = 914400;
         let logoEmuH = Math.round(LOGO_TARGET_H_IN * EMU_PER_INCH);
-        let logoEmuW = Math.round(2.4 * EMU_PER_INCH); // fallback width
+        let logoEmuW = Math.round(2.93 * EMU_PER_INCH); // fallback width
         let aspectSource: "sharp" | "png-parser" | "fallback" = "fallback";
         let aspectRatio: number | null = null;
         const sharp = getSharp();
@@ -8981,11 +9143,158 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     console.warn("[stage summary] override load failed - using auto:", ovErr);
   }
 
-  // Set when the Hindrance / Stage Summary blocks are injected before the
-  // first observation table — used further below to push that table onto its
-  // own page (otherwise it starts directly under the injected section, unlike
-  // the reference PDF where point 1 always begins a fresh page).
+  // Set when the Route Summary / Hindrance / Stage Summary blocks are injected
+  // before the first observation table — used further below to push that table
+  // onto its own page (otherwise it starts directly under the injected
+  // section, unlike the reference PDF where point 1 always begins a fresh page).
   let injectedBeforeObservations = false;
+
+  // ----- Route Summary for the DETAIL report: the "OBSERVATIONS:" page with
+  // A. Surveyed Route (From → To, Distance), B. Key Locations and the optional
+  // Route Survey Flow Chart image — the values typed in the setup wizard's
+  // "Route Summary" step. Same wording, fonts and sizes as the pinned Summary
+  // report's observations block, so Word and the PDF (converted from this same
+  // file) match the reference layout. Appears once the wizard section has been
+  // saved (same opt-in rule as Hindrance). Runs BEFORE the Hindrance pass, and
+  // every pass anchors just before the first observation table, so the final
+  // order reads Route Summary → Hindrance → Stage Summary → observations.
+  try {
+    if (!summaryMode && observationSummaryOverride) {
+      const zip = doc.getZip();
+      const docFile = zip.file("word/document.xml");
+      if (docFile) {
+        let xml = docFile.asText();
+        if (!xml.includes("A. Surveyed Route:")) {
+          const esc = (s: unknown) =>
+            String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          const headingP = (text: string, pageBreak = false) =>
+            `<w:p><w:pPr>${pageBreak ? "<w:pageBreakBefore/>" : ""}<w:spacing w:before="200" w:after="80"/></w:pPr>` +
+            `<w:r><w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/><w:color w:val="1F2937"/></w:rPr>` +
+            `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p>`;
+          const bodyP = (text: string, opt: { bold?: boolean } = {}) =>
+            '<w:p><w:pPr><w:spacing w:before="20" w:after="20"/></w:pPr>' +
+            `<w:r><w:rPr>${opt.bold ? "<w:b/>" : ""}<w:sz w:val="20"/><w:szCs w:val="20"/><w:color w:val="1F2937"/></w:rPr>` +
+            `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p>`;
+
+          // Saved wizard values win; blanks fall back to values derived from
+          // the points — the exact same rules the Summary report uses.
+          const obsRS: any[] = observations || [];
+          const routeNameRS = String(projectName || "").toUpperCase();
+          const maxKmRS = obsRS.reduce((m: number, o: any) => {
+            const v = parseFloat(String(o.km || "").replace(/[^\d.]/g, ""));
+            return Number.isFinite(v) && v > m ? v : m;
+          }, 0);
+          const keyLocsRS = Array.from(
+            new Set(obsRS.map((o: any) => String(o.location || "").trim()).filter(Boolean))
+          ).join(" - ");
+          const ovFromRS = String(observationSummaryOverride?.fromText || "").trim();
+          const ovToRS = String(observationSummaryOverride?.toText || "").trim();
+          const ovDistanceRS = String(observationSummaryOverride?.distance || "").trim();
+          const ovKeyLocsRS = String(observationSummaryOverride?.keyLocations || "").trim();
+          const surveyedRouteLineRS = ovFromRS
+            ? ovToRS
+              ? `From ${ovFromRS} to ${ovToRS}`
+              : `From ${ovFromRS}`
+            : routeNameRS
+              ? `From ${routeNameRS}`
+              : "-";
+          const distanceLineRS = ovDistanceRS
+            ? `Distance: ${ovDistanceRS}`
+            : maxKmRS > 0
+              ? `Distance: ${maxKmRS.toFixed(2)} km`
+              : "Distance: -";
+
+          // Optional flow-chart image — embedded the same proven way as the
+          // Summary report (media file + relationship + inline drawing).
+          let flowChartParaRS = "";
+          if (flowChartImg) {
+            try {
+              const ctF = zip.file("[Content_Types].xml");
+              if (ctF) {
+                let ctX = ctF.asText();
+                if (!/Extension="jpeg"/i.test(ctX) && ctX.includes("</Types>")) {
+                  ctX = ctX.replace(
+                    "</Types>",
+                    `<Default Extension="jpeg" ContentType="image/jpeg"/></Types>`
+                  );
+                  zip.file("[Content_Types].xml", ctX);
+                }
+              }
+              zip.file("word/media/flow_chart.jpeg", flowChartImg.buffer);
+              const relsF = zip.file("word/_rels/document.xml.rels");
+              let relsX = relsF ? relsF.asText() : "";
+              const fcRId = "rIdFlowChart";
+              if (relsX && !relsX.includes(`Id="${fcRId}"`)) {
+                relsX = relsX.replace(
+                  "</Relationships>",
+                  `<Relationship Id="${fcRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/flow_chart.jpeg"/></Relationships>`
+                );
+                zip.file("word/_rels/document.xml.rels", relsX);
+              }
+              flowChartParaRS =
+                `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="80" w:after="80"/><w:keepLines/></w:pPr>` +
+                `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">` +
+                `<wp:extent cx="${flowChartImg.emuW}" cy="${flowChartImg.emuH}"/>` +
+                `<wp:docPr id="9401" name="Route Survey Flow Chart"/>` +
+                `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+                `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                `<pic:nvPicPr><pic:cNvPr id="0" name=""/><pic:cNvPicPr/></pic:nvPicPr>` +
+                `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${fcRId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+                `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${flowChartImg.emuW}" cy="${flowChartImg.emuH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+                `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+            } catch (fcErr) {
+              console.warn("[route summary detail] flow-chart embed failed - omitting:", fcErr);
+              flowChartParaRS = "";
+            }
+          }
+
+          const blockRS =
+            headingP("OBSERVATIONS:", true) +
+            bodyP("Route Summary", { bold: true }) +
+            bodyP("A. Surveyed Route:", { bold: true }) +
+            bodyP(surveyedRouteLineRS) +
+            bodyP(distanceLineRS) +
+            bodyP("B. Key Locations:", { bold: true }) +
+            bodyP(ovKeyLocsRS || keyLocsRS || "-") +
+            flowChartParaRS +
+            `<w:p/>`;
+
+          // Insert just BEFORE the first per-point observation table ("GPS
+          // LOCATION" sits inside it, so the nearest <w:tbl> before it is that
+          // table). Falls back to the end of the document.
+          const gpsIdxRS = xml.indexOf("GPS LOCATION");
+          let insertAtRS = -1;
+          if (gpsIdxRS !== -1) {
+            insertAtRS = Math.max(
+              xml.lastIndexOf("<w:tbl>", gpsIdxRS),
+              xml.lastIndexOf("<w:tbl ", gpsIdxRS)
+            );
+          }
+          if (insertAtRS === -1) {
+            const bodyCloseRS = xml.lastIndexOf("</w:body>");
+            if (bodyCloseRS !== -1) {
+              const lastSectPrRS = xml.lastIndexOf("<w:sectPr", bodyCloseRS);
+              insertAtRS = lastSectPrRS !== -1 ? lastSectPrRS : bodyCloseRS;
+            }
+          }
+          if (insertAtRS > 0) {
+            xml = xml.slice(0, insertAtRS) + blockRS + xml.slice(insertAtRS);
+            zip.file("word/document.xml", xml);
+            if (gpsIdxRS !== -1) injectedBeforeObservations = true;
+            console.log("[route summary detail] injected", {
+              from: ovFromRS || routeNameRS || "-",
+              to: ovToRS || "-",
+              flowChart: !!flowChartParaRS,
+              beforeObservations: gpsIdxRS !== -1,
+            });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[route summary detail] injection failed - non-fatal:", err);
+  }
 
   // ----- Hindrance Solutions + Additional Considerations. A new section the
   // template never had; injected before the final section properties (the same
@@ -9356,8 +9665,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="6000" w:lineRule="exact"/></w:pPr></w:p>';
       dx = dx.replace(/(<w:body>)/, '$1' + COVER_SPACER);
       // Keep the header clear of the red page border, and the body below it:
-      //   w:header → 180: the header (logo + title) starts 0.125in from the
-      //     page top, so the 0.45in logo ends ~0.575in — ABOVE the border's top
+      //   w:header → 100: the header (logo + title) starts 0.069in from the
+      //     page top, so the 0.55in logo ends ~0.62in — ABOVE the border's top
       //     line, which is drawn ~0.67in from the page edge (space=48pt). The
       //     template's 240/420 values pushed the logo down INTO the line.
       //   pgMar w:top → 1040: body content starts 0.72in down — BELOW the
@@ -9366,7 +9675,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       //     pushed the body to ~0.86in.)
       dx = dx.replace(
         /(<w:pgMar\b[^>]*?w:header=")\d+(")/g,
-        (_m: string, a: string, b: string) => a + "180" + b
+        (_m: string, a: string, b: string) => a + "100" + b
       );
       dx = dx.replace(
         /(<w:pgMar\b[^>]*?w:top=")\d+(")/g,
@@ -9374,7 +9683,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       );
       zip.file("word/document.xml", dx);
       console.log(
-        `[export] sections forced to top: ${changed}; cover centred via spacer; header/top margins normalised (header=180, top=1040)`
+        `[export] sections forced to top: ${changed}; cover centred via spacer; header/top margins normalised (header=100, top=1040)`
       );
     }
   } catch (err) {
