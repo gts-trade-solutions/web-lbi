@@ -9587,8 +9587,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // zero-height paragraph with pageBreakBefore (a paragraph PROPERTY, same
   // pattern as the photo-grid breaks) pushes the table to a fresh page and
   // can never strand a fully blank page the way a hard page break can.
+  //
+  // This applies to the SUMMARY report too: it always injects its own blocks
+  // (Route Summary / Key Obstacle tables above, Stage Summary below) ahead of
+  // the first point table, so the table must likewise start a fresh page —
+  // it was running on under the Stage Summary there.
   try {
-    if (!summaryMode && injectedBeforeObservations) {
+    if (summaryMode || injectedBeforeObservations) {
       const zip = doc.getZip();
       const docFile = zip.file("word/document.xml");
       if (docFile) {
