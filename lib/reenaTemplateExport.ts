@@ -950,6 +950,15 @@ const TEMPLATE_PATH = path.join(process.cwd(), "templates", "reena-all-template.
 const ROUTE_MAP_SIZE: [number, number] = [1248, 672];
 const GA_DRAWING_SIZE: [number, number] = [1142, 775];
 
+/**
+ * "ROUTE SURVEY KEY POINTS" page (the START ▶ ①..N ▶ DESTINATION snake drawn
+ * under the route map). Turned OFF on 2026-11-24 — the client doesn't want
+ * that page in the report. Setting this back to true restores it; the
+ * renderers (generateRouteLocationsSnake / renderRouteLocationsStepperPng /
+ * buildRouteLocationsStepperTableXml) are all still here and unchanged.
+ */
+const ROUTE_KEY_POINTS_PAGE: boolean = false;
+
 // The GA drawing slot in the template holds ONE image. When several GA images
 // were uploaded, lay them out in a grid on a single canvas that matches the GA
 // slot's aspect ratio, so all of them show (not just the first) and nothing is
@@ -4052,7 +4061,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   //   3. Word-table fallback (only if both PNG paths fail; handled
   //      by the post-render injection pass)
   try {
-    if (routeLocationLabels.length > 0) {
+    if (ROUTE_KEY_POINTS_PAGE && routeLocationLabels.length > 0) {
       // Primary: a horizontal numbered "snake" map (START ▶ ①..N ▶ DEST)
       // rendered via sharp (SVG→PNG). If that fails (no sharp / no librsvg),
       // the post-render pass falls back to the OOXML snake table instead — so
@@ -7783,7 +7792,11 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       }
 
       const routeLocEntry = imageMap.get("routeLocations");
-      if (!routeLocationsStepperInjected && routeLocEntry?.buffer && routeLocEntry.buffer.length > 0) {
+      if (!ROUTE_KEY_POINTS_PAGE) {
+        console.log("[DOCX ROUTE LOCATIONS STEPPER SKIPPED]", {
+          reason: "ROUTE_KEY_POINTS_PAGE is off — the client removed this page",
+        });
+      } else if (!routeLocationsStepperInjected && routeLocEntry?.buffer && routeLocEntry.buffer.length > 0) {
         // 1. Add the stepper PNG to the zip + register a relationship.
         const docRelsFile2 = renderedZip.file("word/_rels/document.xml.rels");
         let docRelsXml2 = docRelsFile2 ? docRelsFile2.asText() : "";
@@ -9171,15 +9184,22 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         if (!xml.includes("A. Surveyed Route:")) {
           const esc = (s: unknown) =>
             String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-          // 13pt body / 16pt heading — matches the Hindrance page; the summary
-          // report's 10pt read too small on the A3 landscape detail page.
+          // 18pt throughout (sz 36 half-points) — measured off the reference
+          // report's Observations page (p6: "OBSERVATIONS:", "A. Surveyed
+          // Route", "B. Key Locations" and every body line are all 18pt).
+          // 16pt/13pt read too small on the A3 landscape page.
+          // The runs also name the font: without w:rFonts they fell back to the
+          // document default (Times), so this page rendered SERIF while the
+          // Hindrance page next to it was sans — the reference is sans on both.
+          const RS_FONT = "Neue Haas Grotesk Text Pro";
+          const rFontsRS = `<w:rFonts w:ascii="${RS_FONT}" w:hAnsi="${RS_FONT}"/>`;
           const headingP = (text: string, pageBreak = false) =>
             `<w:p><w:pPr>${pageBreak ? "<w:pageBreakBefore/>" : ""}<w:spacing w:before="200" w:after="80"/></w:pPr>` +
-            `<w:r><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="32"/><w:color w:val="1F2937"/></w:rPr>` +
+            `<w:r><w:rPr>${rFontsRS}<w:b/><w:bCs/><w:sz w:val="36"/><w:szCs w:val="36"/><w:color w:val="1F2937"/></w:rPr>` +
             `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p>`;
           const bodyP = (text: string, opt: { bold?: boolean } = {}) =>
             '<w:p><w:pPr><w:spacing w:before="20" w:after="20"/></w:pPr>' +
-            `<w:r><w:rPr>${opt.bold ? "<w:b/>" : ""}<w:sz w:val="26"/><w:szCs w:val="26"/><w:color w:val="1F2937"/></w:rPr>` +
+            `<w:r><w:rPr>${rFontsRS}${opt.bold ? "<w:b/><w:bCs/>" : ""}<w:sz w:val="36"/><w:szCs w:val="36"/><w:color w:val="1F2937"/></w:rPr>` +
             `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p>`;
 
           // Saved wizard values win; blanks fall back to values derived from
@@ -9342,13 +9362,14 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           // BULLET lines "• Label: text" (bold label, normal text — NOT a
           // table), then bold "Additional Considerations" with numbered bold
           // titles and an indented "o body" line under each.
-          // 13pt body / 16pt headings — 11pt read too small on the A3
-          // landscape page (user feedback 2026-11-24).
-          const rPrN = `<w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:color w:val="111827"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>`;
-          const rPrB = `<w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>`;
+          // 18pt throughout (sz 36) — measured off the reference p7, where the
+          // "Hindrance Solutions:" heading and every bullet are 18pt. 13pt/16pt
+          // still read too small on the A3 landscape page.
+          const rPrN = `<w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:color w:val="111827"/><w:sz w:val="36"/><w:szCs w:val="36"/></w:rPr>`;
+          const rPrB = `<w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="36"/><w:szCs w:val="36"/></w:rPr>`;
           const heading =
             `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="140" w:line="240" w:lineRule="auto"/></w:pPr>` +
-            `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr><w:t>Hindrance Solutions:</w:t></w:r></w:p>`;
+            `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="36"/><w:szCs w:val="36"/></w:rPr><w:t>Hindrance Solutions:</w:t></w:r></w:p>`;
           // "• Major Obstacles: Height / width clearance …" bullet per row.
           const rowsXml = hRows
             .map((r) => {
@@ -9365,7 +9386,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             })
             .join("");
           const addlHeading = considerations.length
-            ? `<w:p><w:pPr><w:spacing w:before="280" w:after="120"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr><w:t>Additional Considerations</w:t></w:r></w:p>`
+            ? `<w:p><w:pPr><w:spacing w:before="280" w:after="120"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="36"/><w:szCs w:val="36"/></w:rPr><w:t>Additional Considerations</w:t></w:r></w:p>`
             : "";
           // Each consideration "Title: body" becomes
           //   1. Title:            (bold)
@@ -9475,7 +9496,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         // Stage Summary start its own page WITHOUT a standalone hard-break
         // paragraph that would strand a blank page when the preceding
         // observation fills its page — see the PAGE_BREAK_PARA note above.
-        const heading = `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="163A2A"/><w:sz w:val="40"/><w:szCs w:val="40"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
+        // 24pt (sz 48) — the reference p8 heading "STAGE SUMMARY" is 24pt.
+        const heading = `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="163A2A"/><w:sz w:val="48"/><w:szCs w:val="48"/></w:rPr><w:t>Stage Summary</w:t></w:r></w:p>`;
 
         // If the user uploaded a Stage-Summary image (e.g. a pie chart made
         // elsewhere), show that image INSTEAD of the auto table. Embedded the

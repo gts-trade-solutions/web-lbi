@@ -3967,22 +3967,25 @@ export default function ProjectReportsPage() {
                   placeholder="Example: TSPL to Nallur"
                 />
 
-                {/* DOCX only: Split ranges */}
+                {/* Word + PDF: Split ranges (PDF is the same report, converted
+                    on the server, so every DOCX option applies to it too —
+                    these used to be gated on "docx" alone, which greyed the
+                    watermark out whenever PDF was picked). */}
                 <div style={styles.routeLabel}>Stage split</div>
                 <input
                   style={{
                     ...styles.input,
-                    opacity: exportFormat === "docx" && exportMode === "selectedSplit" ? 1 : 0.5,
+                    opacity: exportFormat !== "gpx" && exportMode === "selectedSplit" ? 1 : 0.5,
                   }}
-                  disabled={exportFormat !== "docx" || exportMode !== "selectedSplit"}
+                  disabled={exportFormat === "gpx" || exportMode !== "selectedSplit"}
                   value={stageRanges}
                   onChange={(e) => setStageRanges(e.target.value)}
                   placeholder='Example: "1-12,13-14,15-25"'
                 />
 
-                {/* DOCX only: Options */}
+                {/* Word + PDF: Options */}
                 <div style={styles.routeLabel}>Options</div>
-                {exportFormat === "docx" ? (
+                {exportFormat !== "gpx" ? (
                   <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
                     <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontWeight: 800 }}>
                       <input
@@ -4020,12 +4023,12 @@ export default function ProjectReportsPage() {
                   </div>
                 )}
 
-                {/* DOCX only: Watermark text */}
+                {/* Word + PDF: Watermark text */}
                 <div style={styles.routeLabel}>Watermark text</div>
                 <input
-                  style={{ ...styles.input, opacity: exportFormat === "docx" && wmEnabled ? 1 : 0.5 }}
+                  style={{ ...styles.input, opacity: exportFormat !== "gpx" && wmEnabled ? 1 : 0.5 }}
                   value={wmText}
-                  disabled={exportFormat !== "docx" || !wmEnabled}
+                  disabled={exportFormat === "gpx" || !wmEnabled}
                   placeholder={`CONFIDENTIAL REPORT: ${projectName}`}
                   onChange={(e) => {
                     setWmDirty(true);
@@ -4043,7 +4046,7 @@ export default function ProjectReportsPage() {
                 </button>
               </div>
 
-              {exportFormat === "docx" ? (
+              {exportFormat !== "gpx" ? (
                 <div style={styles.modalNote}>
                   Tip: If export is slow, try disabling <b>Include photos</b>.
                 </div>
