@@ -1183,6 +1183,47 @@ export default function ProjectReportsPage() {
       setStageLoading(false);
     }
   };
+  // Copy the Stage Summary table to the clipboard (tab-separated, so pasting
+  // into Excel / a Word table lands each value in its own cell). Includes the
+  // % column and Total row, same as the Word export's table.
+  const copyStageSummary = async () => {
+    const total = stageRows.reduce((a, r) => a + (Number(r.count) || 0), 0);
+    const pctBase = total || 1;
+    const lines = ["Category\tCount\t%"];
+    for (const r of stageRows) {
+      const c = Number(r.count) || 0;
+      lines.push(`${String(r.label || "").replace(/[\r\n\t]+/g, " ")}\t${c}\t${Math.round((c / pctBase) * 100)}%`);
+    }
+    lines.push(`Total\t${total}\t100%`);
+    try {
+      await navigator.clipboard.writeText(lines.join("\r\n"));
+      toast("Stage Summary copied — paste it into Excel or Word.");
+    } catch {
+      toast("Copy failed — the browser blocked clipboard access.");
+    }
+  };
+  // Download the Stage Summary as a .csv file (opens directly in Excel).
+  const downloadStageSummary = () => {
+    const q = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
+    const total = stageRows.reduce((a, r) => a + (Number(r.count) || 0), 0);
+    const pctBase = total || 1;
+    const rows: (string | number)[][] = [["Category", "Count", "%"]];
+    for (const r of stageRows) {
+      const c = Number(r.count) || 0;
+      rows.push([String(r.label || ""), c, `${Math.round((c / pctBase) * 100)}%`]);
+    }
+    rows.push(["Total", total, "100%"]);
+    // BOM so Excel opens the UTF-8 CSV with correct characters.
+    const csv = "﻿" + rows.map((cols) => cols.map(q).join(",")).join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${sanitizeFileBaseName(projectName || "project")}-Stage-Summary.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
   const saveStageSummary = async () => {
     if (!projectId || stageSaving) return;
     const rows = stageRows.map((r) => ({ label: r.label.trim(), count: Number(r.count) || 0 })).filter((r) => r.label);
@@ -3339,6 +3380,24 @@ export default function ProjectReportsPage() {
                     <span style={{ fontSize: 12, fontWeight: 800, color: "#667085" }}>
                       Total: {stageRows.reduce((a, r) => a + (Number(r.count) || 0), 0)}
                     </span>
+                    <button
+                      type="button"
+                      onClick={copyStageSummary}
+                      disabled={!stageRows.length}
+                      style={{ ...styles.btnGhost, opacity: stageRows.length ? 1 : 0.5 }}
+                      title="Copy the table — paste it into Excel or Word"
+                    >
+                      📋 Copy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={downloadStageSummary}
+                      disabled={!stageRows.length}
+                      style={{ ...styles.btnGhost, opacity: stageRows.length ? 1 : 0.5 }}
+                      title="Download as a CSV file (opens in Excel)"
+                    >
+                      ⬇ Download
+                    </button>
                     {stageOverridden && (
                       <button type="button" onClick={resetStageSummary} disabled={stageSaving} style={{ ...styles.btnGhost, borderColor: "#FDA29B", color: "#B42318", marginLeft: "auto" }}>
                         Reset to auto
