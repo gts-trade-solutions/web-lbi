@@ -8711,12 +8711,12 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         }
 
         // Logo display size: sized by HEIGHT so the whole logo sits ABOVE the
-        // red page-border line. The border's top line is drawn ~0.67in from the
-        // page edge (space=48pt); the header starts 0.069in from the top
-        // (w:header=100, set in the pgMar pass) — so a 0.55in-tall logo ends at
-        // ~0.62in, clear of the line instead of being sliced by it. (Was 0.45in
-        // with the header at 0.125in — the user found that logo too small, so
-        // the header was raised to make room for a bigger logo.) WIDTH is
+        // red page-border line. The header starts ~0.097in from the page top
+        // (w:header=140) and the border's TOP line is moved to ~0.74in
+        // (space=53pt) — both set in the late pgMar/pgBorders pass — so the
+        // 0.55in-tall logo spans ~0.10–0.65in: clear of the page edge at the
+        // top AND of the red line below. (0.45in was "too small" for the user;
+        // 100-twip header clipped the logo's top at the page edge.) WIDTH is
         // computed from the source image's true aspect ratio. Resolution order:
         //   1. sharp metadata (works locally)
         //   2. native PNG IHDR parser (works in production even when
@@ -9167,13 +9167,15 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         if (!xml.includes("A. Surveyed Route:")) {
           const esc = (s: unknown) =>
             String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          // 13pt body / 16pt heading — matches the Hindrance page; the summary
+          // report's 10pt read too small on the A3 landscape detail page.
           const headingP = (text: string, pageBreak = false) =>
             `<w:p><w:pPr>${pageBreak ? "<w:pageBreakBefore/>" : ""}<w:spacing w:before="200" w:after="80"/></w:pPr>` +
-            `<w:r><w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/><w:color w:val="1F2937"/></w:rPr>` +
+            `<w:r><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="32"/><w:color w:val="1F2937"/></w:rPr>` +
             `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p>`;
           const bodyP = (text: string, opt: { bold?: boolean } = {}) =>
             '<w:p><w:pPr><w:spacing w:before="20" w:after="20"/></w:pPr>' +
-            `<w:r><w:rPr>${opt.bold ? "<w:b/>" : ""}<w:sz w:val="20"/><w:szCs w:val="20"/><w:color w:val="1F2937"/></w:rPr>` +
+            `<w:r><w:rPr>${opt.bold ? "<w:b/>" : ""}<w:sz w:val="26"/><w:szCs w:val="26"/><w:color w:val="1F2937"/></w:rPr>` +
             `<w:t xml:space="preserve">${esc(text)}</w:t></w:r></w:p>`;
 
           // Saved wizard values win; blanks fall back to values derived from
@@ -9336,11 +9338,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           // BULLET lines "• Label: text" (bold label, normal text — NOT a
           // table), then bold "Additional Considerations" with numbered bold
           // titles and an indented "o body" line under each.
-          const rPrN = `<w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:color w:val="111827"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>`;
-          const rPrB = `<w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>`;
+          // 13pt body / 16pt headings — 11pt read too small on the A3
+          // landscape page (user feedback 2026-11-24).
+          const rPrN = `<w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:color w:val="111827"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>`;
+          const rPrB = `<w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>`;
           const heading =
             `<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="0" w:after="140" w:line="240" w:lineRule="auto"/></w:pPr>` +
-            `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr><w:t>Hindrance Solutions:</w:t></w:r></w:p>`;
+            `<w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr><w:t>Hindrance Solutions:</w:t></w:r></w:p>`;
           // "• Major Obstacles: Height / width clearance …" bullet per row.
           const rowsXml = hRows
             .map((r) => {
@@ -9357,7 +9361,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             })
             .join("");
           const addlHeading = considerations.length
-            ? `<w:p><w:pPr><w:spacing w:before="280" w:after="120"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr><w:t>Additional Considerations</w:t></w:r></w:p>`
+            ? `<w:p><w:pPr><w:spacing w:before="280" w:after="120"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${FONT}" w:hAnsi="${FONT}"/><w:b/><w:bCs/><w:color w:val="111827"/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr><w:t>Additional Considerations</w:t></w:r></w:p>`
             : "";
           // Each consideration "Title: body" becomes
           //   1. Title:            (bold)
@@ -9665,25 +9669,32 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="6000" w:lineRule="exact"/></w:pPr></w:p>';
       dx = dx.replace(/(<w:body>)/, '$1' + COVER_SPACER);
       // Keep the header clear of the red page border, and the body below it:
-      //   w:header → 100: the header (logo + title) starts 0.069in from the
-      //     page top, so the 0.55in logo ends ~0.62in — ABOVE the border's top
-      //     line, which is drawn ~0.67in from the page edge (space=48pt). The
-      //     template's 240/420 values pushed the logo down INTO the line.
-      //   pgMar w:top → 1040: body content starts 0.72in down — BELOW the
-      //     line — explicitly, instead of relying on a tall header to push it.
-      //     (Slightly MORE usable page height than before: the old header
-      //     pushed the body to ~0.86in.)
+      //   w:header → 140: the header (logo + title) starts ~0.097in from the
+      //     page top — enough breathing room that the logo's top is never
+      //     clipped at the page edge (100 twips put it at 0.069in and the top
+      //     of the logo looked cut off).
+      //   pgBorders top space → 53pt: the red top line moves to ~0.74in from
+      //     the page edge (was 48pt ≈ 0.67in), so the 0.55in logo ending at
+      //     ~0.65in still clears it with ~0.09in to spare. Only the TOP line
+      //     moves; the side/bottom lines keep the template's 48pt.
+      //   pgMar w:top → 1140: body content starts ~0.79in down — BELOW the
+      //     moved line — explicitly, instead of relying on a tall header to
+      //     push it.
       dx = dx.replace(
         /(<w:pgMar\b[^>]*?w:header=")\d+(")/g,
-        (_m: string, a: string, b: string) => a + "100" + b
+        (_m: string, a: string, b: string) => a + "140" + b
       );
       dx = dx.replace(
         /(<w:pgMar\b[^>]*?w:top=")\d+(")/g,
-        (_m: string, a: string, b: string) => a + "1040" + b
+        (_m: string, a: string, b: string) => a + "1140" + b
+      );
+      dx = dx.replace(
+        /(<w:pgBorders\b[^>]*><w:top\b[^>]*?w:space=")\d+(")/g,
+        (_m: string, a: string, b: string) => a + "53" + b
       );
       zip.file("word/document.xml", dx);
       console.log(
-        `[export] sections forced to top: ${changed}; cover centred via spacer; header/top margins normalised (header=100, top=1040)`
+        `[export] sections forced to top: ${changed}; cover centred via spacer; header/top margins normalised (header=140, top=1140, border top space=53pt)`
       );
     }
   } catch (err) {
