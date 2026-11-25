@@ -1833,14 +1833,16 @@ export default function ProjectReportsPage() {
 
   // Export a Summary report from the PINNED points only (reuses the Word
   // engine with summaryMode: adds the category + key-obstacle summary tables).
-  const [summaryBusy, setSummaryBusy] = useState(false);
-  const exportPinnedSummary = async () => {
+  // "" = idle; otherwise the format being built, so each button shows its
+  // own "Building…" while the other one stays disabled.
+  const [summaryBusy, setSummaryBusy] = useState<"" | "docx" | "pdf">("");
+  const exportPinnedSummary = async (format: "docx" | "pdf") => {
     const ids = filteredSortedReports.filter((r) => pinnedIds[r.id]).map((r) => String(r.id));
     if (!ids.length) {
       alert("Pin at least one point (📌) first — the Summary report includes only pinned points.");
       return;
     }
-    setSummaryBusy(true);
+    setSummaryBusy(format);
     try {
       await fetchProjectExportDocx({
         projectId,
@@ -1849,11 +1851,12 @@ export default function ProjectReportsPage() {
         includeGa: true,
         fileName: `${projectName} Summary`,
         summaryMode: true,
+        format,
       });
     } catch (e: any) {
       alert("Summary report failed: " + (e?.message || "unknown error"));
     } finally {
-      setSummaryBusy(false);
+      setSummaryBusy("");
     }
   };
 
@@ -4457,31 +4460,55 @@ export default function ProjectReportsPage() {
               buttons, tick-boxes and photos.
               {(() => {
                 const pinnedCount = filteredSortedReports.filter((r) => pinnedIds[r.id]).length;
+                const idle = summaryBusy === "";
+                const canExport = pinnedCount > 0 && idle;
+                // Same report in either format — the server renders the DOCX
+                // and converts it with LibreOffice when PDF is asked for.
+                const btnBase = {
+                  padding: "8px 14px",
+                  borderRadius: 10,
+                  fontWeight: 900,
+                  fontSize: 13,
+                  cursor: canExport ? "pointer" : "not-allowed",
+                  whiteSpace: "nowrap" as const,
+                };
+                const tip =
+                  pinnedCount === 0
+                    ? "Pin points (📌) to build a Summary report from them"
+                    : `Build a Summary report from the ${pinnedCount} pinned point(s)`;
                 return (
-                  <button
-                    type="button"
-                    onClick={exportPinnedSummary}
-                    disabled={summaryBusy || pinnedCount === 0}
-                    title={
-                      pinnedCount === 0
-                        ? "Pin points (📌) to build a Summary report from them"
-                        : `Build a Summary report from the ${pinnedCount} pinned point(s)`
-                    }
-                    style={{
-                      marginLeft: "auto",
-                      padding: "8px 14px",
-                      borderRadius: 10,
-                      border: "1px solid " + (pinnedCount ? "#1D4ED8" : "#E4E7EC"),
-                      background: pinnedCount && !summaryBusy ? "#2563EB" : "#F2F4F7",
-                      color: pinnedCount && !summaryBusy ? "#fff" : "#98A2B3",
-                      fontWeight: 900,
-                      fontSize: 13,
-                      cursor: summaryBusy || pinnedCount === 0 ? "not-allowed" : "pointer",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {summaryBusy ? "Building…" : `📋 Summary report${pinnedCount ? ` (${pinnedCount} pinned)` : ""}`}
-                  </button>
+                  <span style={{ marginLeft: "auto", display: "inline-flex", gap: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() => exportPinnedSummary("docx")}
+                      disabled={!canExport}
+                      title={tip + " (Word)"}
+                      style={{
+                        ...btnBase,
+                        border: "1px solid " + (pinnedCount ? "#1D4ED8" : "#E4E7EC"),
+                        background: canExport ? "#2563EB" : "#F2F4F7",
+                        color: canExport ? "#fff" : "#98A2B3",
+                      }}
+                    >
+                      {summaryBusy === "docx"
+                        ? "Building…"
+                        : `📋 Summary report${pinnedCount ? ` (${pinnedCount} pinned)` : ""}`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => exportPinnedSummary("pdf")}
+                      disabled={!canExport}
+                      title={tip + " (PDF)"}
+                      style={{
+                        ...btnBase,
+                        border: "1px solid " + (pinnedCount ? "#1D4ED8" : "#E4E7EC"),
+                        background: "#FFFFFF",
+                        color: canExport ? "#1D4ED8" : "#98A2B3",
+                      }}
+                    >
+                      {summaryBusy === "pdf" ? "Building…" : "📕 PDF"}
+                    </button>
+                  </span>
                 );
               })()}
             </div>

@@ -70,7 +70,12 @@ const REPORT_DROP = new Set([
   "project_id",
   "point_key",
   "sort_order",
-  "created_at",
+  // created_at is deliberately NOT dropped: it holds when the point was
+  // actually surveyed (the importer stores the date typed at import time),
+  // and the report footer + survey date read the EARLIEST created_at of the
+  // included points. Dropping it made every copied point inherit the moment
+  // of the combine, so a combined survey + imported report was dated the day
+  // it was combined instead of the day it was surveyed.
   "updated_at",
   "deleted_at",
   "deleted_by",

@@ -774,10 +774,100 @@ let OBS_PHOTO_TARGET = { width: 1120, height: 720, quality: 82 };
 // technical detail stays readable.
 let PHOTO_WATERMARK_TEXT = "";
 
+// ---- Scan-for-location QR code -------------------------------------------
+// Each observation photo carries a small QR in its bottom-right corner that
+// opens that point's coordinates in a map app — the "scan option for location"
+// the client asked for, matching the sample report they sent. Stamped into the
+// PIXELS (like the watermark) so it survives a photo being copied out of the
+// .docx, and so nothing about the report's layout has to change.
+let _qrgen: any = null;
+let _qrgenLoadAttempted = false;
+function getQrGen(): any {
+  if (_qrgenLoadAttempted) return _qrgen;
+  _qrgenLoadAttempted = true;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    _qrgen = require("qrcode-generator");
+  } catch (err) {
+    // Missing module (e.g. deployed without `npm install`) must never break an
+    // export — photos simply render without a QR.
+    console.warn("[photo QR] qrcode-generator unavailable - photos left without a QR:", err);
+    _qrgen = null;
+  }
+  return _qrgen;
+}
+
+/**
+ * Map URL a scanned QR opens: the point's exact coordinates in Google Maps
+ * (opens the app when installed, the browser otherwise — works on any phone,
+ * no account or API key). 6 decimals ≈ 11cm, i.e. the recorded position
+ * unrounded. "maps.google.com/?q=" is the shortest form that still works
+ * everywhere, which keeps the QR at 33 modules and easy to scan.
+ */
+function buildLocationQrUrl(lat: number, lng: number): string {
+  return `https://maps.google.com/?q=${lat.toFixed(6)},${lng.toFixed(6)}`;
+}
+
+/**
+ * Render a QR as a crisp PNG. Drawn as RAW PIXELS at an integer module scale
+ * rather than via SVG: every module lands on exact pixel boundaries (no
+ * anti-aliased edges for the JPEG to smear), and it doesn't depend on sharp
+ * having librsvg. Returns null if anything is unavailable.
+ */
+async function renderLocationQrPng(
+  sharpLib: any,
+  url: string,
+  targetSidePx: number
+): Promise<{ buffer: Buffer; side: number } | null> {
+  const qrgen = getQrGen();
+  if (!qrgen || !sharpLib) return null;
+  try {
+    // Level M (15% recovery) — survives JPEG softening and a smudged print,
+    // and costs only 4 modules over level L (33 vs 29) for a map URL.
+    const qr = qrgen(0, "M");
+    qr.addData(url);
+    qr.make();
+    const n = qr.getModuleCount();
+    const QUIET = 4; // spec-mandated quiet zone, in modules
+    const total = n + QUIET * 2;
+    // ROUND (not floor) the module size: a map URL needs 33 modules + an
+    // 8-module quiet zone, and flooring dropped 4px/module to 4 — rounding to 5
+    // takes each printed module from 0.60mm to 0.74mm, which is the difference
+    // between "scans if you hold still" and "scans instantly" on paper.
+    const scale = Math.max(2, Math.round(targetSidePx / total));
+    const side = total * scale;
+    const px = Buffer.alloc(side * side * 3, 255); // white page
+    for (let row = 0; row < n; row += 1) {
+      for (let col = 0; col < n; col += 1) {
+        if (!qr.isDark(row, col)) continue;
+        const y0 = (row + QUIET) * scale;
+        const x0 = (col + QUIET) * scale;
+        for (let y = y0; y < y0 + scale; y += 1) {
+          const rowOff = y * side * 3;
+          for (let x = x0; x < x0 + scale; x += 1) {
+            const o = rowOff + x * 3;
+            px[o] = 0;
+            px[o + 1] = 0;
+            px[o + 2] = 0;
+          }
+        }
+      }
+    }
+    const buffer = await sharpLib(px, { raw: { width: side, height: side, channels: 3 } })
+      .png()
+      .toBuffer();
+    return { buffer, side };
+  } catch (err) {
+    console.warn("[photo QR] render failed - photo left without a QR:", err);
+    return null;
+  }
+}
+
 async function optimizeDocxImage(
   input: Buffer,
   type: "observation" | "routeMap" | "gaDrawing" | "category",
-  key: string
+  key: string,
+  opts?: { qrUrl?: string | null }
 ): Promise<Buffer> {
   if (!input || !Buffer.isBuffer(input) || input.length === 0) return input;
   const sharp = getSharp();
@@ -835,15 +925,19 @@ async function optimizeDocxImage(
         .toBuffer();
 
       // Burn the watermark text diagonally across the photo pixels so a photo
-      // extracted from the .docx still carries it. Semi-transparent white with
-      // a faint dark outline so it reads on bright sky AND dark tarmac. Sized
-      // to span ~the photo diagonal, so cropping it out ruins the photo.
-      if (type === "observation" && key.startsWith("photo_") && PHOTO_WATERMARK_TEXT) {
+      // extracted from the .docx still carries it, and stamp the scan-for-
+      // location QR into its bottom-right corner. Both overlays go on in ONE
+      // composite + ONE re-encode so the photo is never JPEG-compressed twice.
+      const wantsWatermark =
+        type === "observation" && key.startsWith("photo_") && !!PHOTO_WATERMARK_TEXT;
+      const wantsQr = type === "observation" && key.startsWith("photo_") && !!opts?.qrUrl;
+      if (wantsWatermark || wantsQr) {
         try {
           const meta = await sharp(optimized).metadata();
           const w = meta.width || 0;
           const h = meta.height || 0;
-          if (w > 50 && h > 50) {
+          const layers: Array<Record<string, unknown>> = [];
+          if (w > 50 && h > 50 && wantsWatermark) {
             const text = PHOTO_WATERMARK_TEXT;
             const escSvg = (s: string) =>
               s
@@ -868,9 +962,26 @@ async function optimizeDocxImage(
               ` stroke-width="${Math.max(1, fontSize / 26).toFixed(1)}">` +
               escSvg(text) +
               `</text></svg>`;
+            layers.push({ input: Buffer.from(svg) });
+          }
+          if (w > 50 && h > 50 && wantsQr) {
+            // ~26% of the photo's short side, so it reads like the sample
+            // report's QR without swallowing the picture.
+            const targetSide = Math.round(Math.min(w, h) * 0.26);
+            const qr = await renderLocationQrPng(sharp, String(opts?.qrUrl), targetSide);
+            if (qr) {
+              const margin = Math.max(6, Math.round(Math.min(w, h) * 0.025));
+              layers.push({
+                input: qr.buffer,
+                top: Math.max(0, h - qr.side - margin),
+                left: Math.max(0, w - qr.side - margin),
+              });
+            }
+          }
+          if (layers.length > 0) {
             optimized = await sharp(optimized)
               .keepIccProfile()
-              .composite([{ input: Buffer.from(svg) }])
+              .composite(layers as any)
               // Slightly higher quality on the re-encode to limit the
               // second-generation JPEG loss.
               .jpeg({
@@ -1366,7 +1477,9 @@ function conclusionInlineRunsToOoxml(inner: string, sz: number): string {
 // Word paragraphs: proper paragraph breaks, bold sub-headers and bullet lists,
 // instead of one flat run (or a blank page when the saved value is empty).
 function conclusionHtmlToOoxml(html: string): string {
-  const BODY = 22; // 11pt
+  // 16pt (sz 32) — the reference report's Conclusion & Certification page sets
+  // every body line and bullet at 16pt. 11pt read far too small on A3.
+  const BODY = 32;
   const src = String(html || "");
   const paras: string[] = [];
   // <p> and <div> both act as paragraph blocks (contentEditable emits <div> for
@@ -1505,6 +1618,40 @@ function formatRemarksAction(written: unknown, difficultyKey: string): string {
   return note; // user typed something → show exactly that, on its own
 }
 
+/**
+ * "B. Key Locations" chain for the Observations page.
+ *
+ * The reference report prints bare place names joined by a hyphen:
+ *   "Navsari-Palsana-Ena-Ankleshwar-Bharuch-…-Mundra Port"
+ * We were printing the raw reverse-geocoded location of EVERY point, which
+ * repeated the state on each entry and let placeholders through:
+ *   "Ennore Port, Tamil Nadu - NTECL Township, Tamil Nadu - - Ward 18, …"
+ * (the old filter(Boolean) kept "-" because "-" is truthy). So: keep the part
+ * before the first comma, drop placeholders and administrative ward/zone
+ * labels, de-duplicate case-insensitively while preserving route order, and
+ * join with "-" exactly like the reference.
+ */
+function buildKeyLocationsChain(rows: Array<{ location?: unknown }>): string {
+  const PLACEHOLDER = /^[-–—.\s]*$/;
+  // "Ward 18" / "Zone 4" / "Block 7" are administrative labels the geocoder
+  // returns for a stretch of road, not places a driver can navigate to.
+  const ADMIN_LABEL = /^(ward|zone|block|sector)\s*[-\s]*\d+$/i;
+  const seen = new Set<string>();
+  const chain: string[] = [];
+  for (const row of rows || []) {
+    const raw = String(row?.location ?? "").trim();
+    if (!raw || PLACEHOLDER.test(raw)) continue;
+    // "Minjur, Tamil Nadu" -> "Minjur"; a name with no comma is kept whole.
+    const name = raw.split(",")[0].trim().replace(/\s+/g, " ");
+    if (!name || PLACEHOLDER.test(name) || ADMIN_LABEL.test(name)) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    chain.push(name);
+  }
+  return chain.join("-");
+}
+
 function cleanFileName(name: string, fallback: string) {
   const s = String(name || "")
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
@@ -1558,6 +1705,11 @@ type ObservationData = {
   // Per-point Summary-report risk override from the points grid
   // ("low" | "medium" | "high"; empty = derive from difficultyKey).
   summaryRisk: string;
+  // Google Maps URL for this point's exact coordinates, rendered as a
+  // scan-for-location QR in the LOCATION cell. "" when the point has no GPS.
+  // Carried on the observation (not a parallel array) so it stays aligned
+  // when empty rows are filtered out of `observations`.
+  locationQrUrl: string;
   // Per-row difficulty styling — feeds either rawXml placeholders for cell
   // shading or the {#isRedDifficulty}/{#isYellowDifficulty}/{#isGreenDifficulty}
   // conditional blocks that triplicate the observation table in the template.
@@ -4338,9 +4490,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       // 0 fetched → no photo (placeholder).
       if (fetchedBuffers.length >= 1) {
         photoKey = `photo_${i}`;
+        // Scan-for-location QR for THIS point. Only when the point actually has
+        // coordinates — a QR pointing at 0,0 would be worse than none.
+        const qrUrl =
+          hasLat && hasLon ? buildLocationQrUrl(lat as number, lng as number) : null;
         const optimizedAll = await Promise.all(
           fetchedBuffers.map((b, bi) =>
-            optimizeDocxImage(b.buffer, "observation", `${photoKey}_${bi}`)
+            optimizeDocxImage(b.buffer, "observation", `${photoKey}_${bi}`, { qrUrl })
           )
         );
         // Photo 0 → imageMap (template renders it; the grid pass replaces it
@@ -4423,7 +4579,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               const optimized = await optimizeDocxImage(
                 fetched.buffer,
                 "observation",
-                photoKey
+                photoKey,
+                {
+                  qrUrl:
+                    hasLat && hasLon
+                      ? buildLocationQrUrl(lat as number, lng as number)
+                      : null,
+                }
               );
               imageMap.set(photoKey, {
                 ...fetched,
@@ -4644,6 +4806,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     observations.push({
       gpsLat: hasLat ? formatGpsLat(lat) : "-",
       gpsLon: hasLon ? formatGpsLon(lng) : "-",
+      locationQrUrl:
+        hasLat && hasLon ? buildLocationQrUrl(lat as number, lng as number) : "",
       km: kmText,
       location: locationText || "-",
       category: valueOrDash(r.category),
@@ -4976,6 +5140,41 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
     // swap pass's `observations.length` count matches what was rendered.
     observations.length = 0;
     for (const o of validObservations) observations.push(o);
+  }
+  // ---- SUMMARY report: cap the per-point text ----------------------------
+  // The Summary report is a condensed overview, and a very long surveyor's
+  // note made its row tall enough to push the photo onto the next page. Cap
+  // the two free-text columns so every row stays short; the photo-shrink pass
+  // further down still runs, so the two together keep table + photo on one
+  // page. The DETAIL report is untouched and keeps every word.
+  if (summaryMode) {
+    // Column widths: OBSERVATION fits ~58 chars a line, REMARKS ~40, so these
+    // limits are roughly 5 lines each — generous, but bounded.
+    const OBS_MAX = 300;
+    const REM_MAX = 200;
+    const capText = (value: string, max: number): string => {
+      const text = String(value ?? "");
+      if (text.length <= max) return text;
+      // Cut on a word boundary so the text never ends mid-word.
+      const slice = text.slice(0, max);
+      const lastSpace = slice.lastIndexOf(" ");
+      const cut = lastSpace > max * 0.6 ? slice.slice(0, lastSpace) : slice;
+      return cut.replace(/[\s.,;:–-]+$/, "") + "…";
+    };
+    let capped = 0;
+    for (const o of observations) {
+      const obsBefore = o.observation;
+      const remBefore = o.remarks;
+      o.observation = capText(obsBefore, OBS_MAX);
+      o.remarks = capText(remBefore, REM_MAX);
+      if (o.observation !== obsBefore || o.remarks !== remBefore) capped += 1;
+    }
+    console.log("[summary text cap]", {
+      points: observations.length,
+      rowsCapped: capped,
+      observationMax: OBS_MAX,
+      remarksMax: REM_MAX,
+    });
   }
 
   // ---- REVERTED: photo-key remap is intentionally a NO-OP.
@@ -6022,9 +6221,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             const v = parseFloat(String(o.km || "").replace(/[^\d.]/g, ""));
             return Number.isFinite(v) && v > m ? v : m;
           }, 0);
-          const keyLocs = Array.from(
-            new Set((observations || []).map((o: any) => String(o.location || "").trim()).filter(Boolean))
-          ).join(" - ");
+          const keyLocs = buildKeyLocationsChain(observations || []);
           // Prefer the per-project editable override (Summary of Observations
           // step in the setup wizard) over the auto-derived text.
           const ovFrom = String(observationSummaryOverride?.fromText || "").trim();
@@ -6328,6 +6525,83 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // bumps body-text run sizes by 1pt for readability across 395+ rows,
   // tightens excessive paragraph spacing, and updates the footer contact
   // line. None of these touch business logic, ordering, or render data.
+  // ---- Scan-for-location QR for the LOCATION cell -------------------------
+  // One QR per point, added to the package up front (async) so the synchronous
+  // table-restyle pass below can drop the drawing straight into the cell.
+  // Keyed by the point's index in `observations`, which is the same order the
+  // observation tables appear in the document.
+  const locationQrRIds = new Map<number, string>();
+  try {
+    const sharpQr = getSharp();
+    if (sharpQr && getQrGen() && observations.length > 0) {
+      const zipQr = doc.getZip();
+      const ctQr = zipQr.file("[Content_Types].xml");
+      if (ctQr) {
+        let ctXmlQr = ctQr.asText();
+        if (!ctXmlQr.includes('Extension="png"')) {
+          ctXmlQr = ctXmlQr.replace(
+            "</Types>",
+            `<Default Extension="png" ContentType="image/png"/></Types>`
+          );
+          zipQr.file("[Content_Types].xml", ctXmlQr);
+        }
+      }
+      const relsQrFile = zipQr.file("word/_rels/document.xml.rels");
+      let relsQr = relsQrFile ? relsQrFile.asText() : "";
+      let added = 0;
+      for (let qi = 0; qi < observations.length; qi += 1) {
+        const url = String(observations[qi]?.locationQrUrl || "");
+        if (!url) continue;
+        // 220px ≈ 5px/module at 41 modules — the cell renders it at 1.1in.
+        const qrPng = await renderLocationQrPng(sharpQr, url, 220);
+        if (!qrPng) continue;
+        const media = `word/media/qr_loc_${qi}.png`;
+        zipQr.file(media, qrPng.buffer);
+        const rId = `rIdQrLoc${qi}`;
+        if (relsQr && !relsQr.includes(`Id="${rId}"`)) {
+          relsQr = relsQr.replace(
+            "</Relationships>",
+            `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/qr_loc_${qi}.png"/></Relationships>`
+          );
+        }
+        locationQrRIds.set(qi, rId);
+        added += 1;
+      }
+      if (added > 0 && relsQr) {
+        zipQr.file("word/_rels/document.xml.rels", relsQr);
+      }
+      console.log("[location QR] generated", {
+        points: observations.length,
+        withQr: added,
+        withoutGps: observations.length - added,
+      });
+    }
+  } catch (qrErr) {
+    console.warn("[location QR] generation failed - cells left without a QR:", qrErr);
+  }
+
+  /** Inline QR drawing for a LOCATION cell, 1.1in square. */
+  const locationQrParaXml = (rId: string, docPrId: number): string => {
+    const EMU = Math.round(1.1 * 914400);
+    return (
+      `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="60" w:after="0"/></w:pPr>` +
+      `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">` +
+      `<wp:extent cx="${EMU}" cy="${EMU}"/>` +
+      `<wp:docPr id="${docPrId}" name="Scan location"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:nvPicPr><pic:cNvPr id="0" name=""/><pic:cNvPicPr/></pic:nvPicPr>` +
+      `<pic:blipFill>` +
+      `<a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${rId}"/>` +
+      `<a:stretch><a:fillRect/></a:stretch>` +
+      `</pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${EMU}" cy="${EMU}"/></a:xfrm>` +
+      `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`
+    );
+  };
+
   try {
     const renderedZip = doc.getZip();
     const docFile = renderedZip.file("word/document.xml");
@@ -6436,6 +6710,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       let obsCellsResized = 0;
       let obsHeadersRecolored = 0;
       let obsSerial = 0; // running point number for the "#" column
+      let obsQrCellsInjected = 0; // LOCATION cells that got a scan QR
 
       /**
        * Recolour every text run in the given row to white (#FFFFFF) so
@@ -6515,7 +6790,41 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
                 : `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>${obsSerial}</w:t></w:r></w:p>`;
               const serialCell = `<w:tc>${newTcPr}${para}</w:tc>`;
               injected += 1;
-              return trXml.replace(firstCell, serialCell + firstCell);
+              let rowOut = trXml;
+              // Scan-for-location QR under the place name, in the DATA row's
+              // LOCATION cell (cells[2] of the 6 the template emits:
+              // GPS / KM / LOCATION / CATEGORY / OBSERVATION / REMARKS).
+              const qrRId = isHeaderRow ? null : locationQrRIds.get(obsSerial - 1);
+              if (qrRId) {
+                const locCell = cells[2];
+                // Walk the cells in order with a cursor to get the LOCATION
+                // cell's TRUE offset. A plain indexOf would land on an earlier
+                // byte-identical cell (e.g. two blank ones) and stamp the QR
+                // into the wrong column.
+                let cursor = 0;
+                let locStart = -1;
+                for (let ci = 0; ci < cells.length; ci += 1) {
+                  const at = rowOut.indexOf(cells[ci], cursor);
+                  if (at < 0) break;
+                  if (ci === 2) {
+                    locStart = at;
+                    break;
+                  }
+                  cursor = at + cells[ci].length;
+                }
+                if (locStart >= 0) {
+                  const newLocCell = locCell.replace(
+                    /<\/w:tc>\s*$/,
+                    locationQrParaXml(qrRId, 9500 + obsSerial) + "</w:tc>"
+                  );
+                  rowOut =
+                    rowOut.slice(0, locStart) +
+                    newLocCell +
+                    rowOut.slice(locStart + locCell.length);
+                  obsQrCellsInjected += 1;
+                }
+              }
+              return rowOut.replace(firstCell, serialCell + firstCell);
             }
           );
 
@@ -6632,6 +6941,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         obsTablesRestyled,
         obsCellsResized,
         obsHeadersRecolored,
+        obsQrCellsInjected,
         headerTextColor: "#FFFFFF (white)",
         columnDxa: OBS_COL_DXA,
       });
@@ -7402,13 +7712,23 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         // Rough chars-per-line for the table's wrapping columns (OBSERVATION /
         // REMARKS / LOCATION) at their widths; ~0.21" per text line.
         const photoBudgetFor = (o: any): number => {
+          const locLines = Math.max(1, Math.ceil(stripForEstimate(o?.location).length / 22));
           const lines = Math.max(
             1,
             Math.ceil(stripForEstimate(o?.observation).length / 58),
             Math.ceil(stripForEstimate(o?.remarks).length / 40),
-            Math.ceil(stripForEstimate(o?.location).length / 22)
+            locLines
           );
-          const rowH = Math.max(0.7, lines * 0.21 + 0.16);
+          // The LOCATION cell also carries the 1.1in scan-for-location QR under
+          // the place name, so that cell — not the longest text — can be what
+          // sets the row height. Without this the photo below would be sized
+          // for a shorter table and spill onto the next page.
+          const qrH = o?.locationQrUrl ? 1.1 + 0.15 : 0;
+          const rowH = Math.max(
+            0.7,
+            lines * 0.21 + 0.16,
+            locLines * 0.21 + 0.16 + qrH
+          );
           const tableH = 0.5 /* header row */ + rowH;
           return PHOTO_FIT_USABLE_IN - tableH;
         };
@@ -7779,6 +8099,26 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
         }
       } catch (concErr) {
         console.warn("[conclusion body inject] failed - leaving placeholder:", concErr);
+      }
+      // The template's "Conclusion & Certification" heading is 32pt; the
+      // reference report's is 36pt. Bump just that one heading paragraph.
+      try {
+        let headingsResized = 0;
+        xml = xml.replace(
+          /<w:p>(?:(?!<\/w:p>)[\s\S])*?Conclusion &amp; Certification(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/g,
+          (para: string) => {
+            const bumped = para
+              .replace(/w:sz w:val="64"/g, 'w:sz w:val="72"')
+              .replace(/w:szCs w:val="64"/g, 'w:szCs w:val="72"');
+            if (bumped !== para) headingsResized += 1;
+            return bumped;
+          }
+        );
+        if (headingsResized > 0) {
+          console.log("[conclusion heading] 32pt -> 36pt", { paragraphs: headingsResized });
+        }
+      } catch (headErr) {
+        console.warn("[conclusion heading] resize failed - leaving 32pt:", headErr);
       }
       // Safety net: never let the raw sentinel show. If it somehow survived,
       // replace it with the plain conclusion text.
@@ -9132,7 +9472,10 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // section properties. Non-fatal. (Re-enabled: the earlier "unreadable
   // content" corruption was the template's orphaned .undefined media, fixed
   // above — not this table.)
-  const STAGE_SUMMARY_ENABLED = true;
+  // DETAIL report only: the client asked for the Stage Summary table to be
+  // dropped from the pinned SUMMARY report (2026-11-25), which already has
+  // its own category and key-obstacle tables above the points.
+  const STAGE_SUMMARY_ENABLED = !summaryMode;
   // Per-project Stage Summary OVERRIDE (edited in the app via
   // /api/projects/:id/stage-summary). When present it replaces the
   // auto-computed rows in the table below, in the saved order.
@@ -9210,9 +9553,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
             const v = parseFloat(String(o.km || "").replace(/[^\d.]/g, ""));
             return Number.isFinite(v) && v > m ? v : m;
           }, 0);
-          const keyLocsRS = Array.from(
-            new Set(obsRS.map((o: any) => String(o.location || "").trim()).filter(Boolean))
-          ).join(" - ");
+          const keyLocsRS = buildKeyLocationsChain(obsRS);
           const ovFromRS = String(observationSummaryOverride?.fromText || "").trim();
           const ovToRS = String(observationSummaryOverride?.toText || "").trim();
           const ovDistanceRS = String(observationSummaryOverride?.distance || "").trim();
