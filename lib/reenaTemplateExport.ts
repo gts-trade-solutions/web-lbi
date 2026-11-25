@@ -866,8 +866,7 @@ async function renderLocationQrPng(
 async function optimizeDocxImage(
   input: Buffer,
   type: "observation" | "routeMap" | "gaDrawing" | "category",
-  key: string,
-  opts?: { qrUrl?: string | null }
+  key: string
 ): Promise<Buffer> {
   if (!input || !Buffer.isBuffer(input) || input.length === 0) return input;
   const sharp = getSharp();
@@ -925,13 +924,12 @@ async function optimizeDocxImage(
         .toBuffer();
 
       // Burn the watermark text diagonally across the photo pixels so a photo
-      // extracted from the .docx still carries it, and stamp the scan-for-
-      // location QR into its bottom-right corner. Both overlays go on in ONE
-      // composite + ONE re-encode so the photo is never JPEG-compressed twice.
+      // extracted from the .docx still carries it. (The scan-for-location QR
+      // lives in the LOCATION cell only — the client did not want it over the
+      // photo, 2026-11-25.)
       const wantsWatermark =
         type === "observation" && key.startsWith("photo_") && !!PHOTO_WATERMARK_TEXT;
-      const wantsQr = type === "observation" && key.startsWith("photo_") && !!opts?.qrUrl;
-      if (wantsWatermark || wantsQr) {
+      if (wantsWatermark) {
         try {
           const meta = await sharp(optimized).metadata();
           const w = meta.width || 0;
@@ -963,20 +961,6 @@ async function optimizeDocxImage(
               escSvg(text) +
               `</text></svg>`;
             layers.push({ input: Buffer.from(svg) });
-          }
-          if (w > 50 && h > 50 && wantsQr) {
-            // ~26% of the photo's short side, so it reads like the sample
-            // report's QR without swallowing the picture.
-            const targetSide = Math.round(Math.min(w, h) * 0.26);
-            const qr = await renderLocationQrPng(sharp, String(opts?.qrUrl), targetSide);
-            if (qr) {
-              const margin = Math.max(6, Math.round(Math.min(w, h) * 0.025));
-              layers.push({
-                input: qr.buffer,
-                top: Math.max(0, h - qr.side - margin),
-                left: Math.max(0, w - qr.side - margin),
-              });
-            }
           }
           if (layers.length > 0) {
             optimized = await sharp(optimized)
@@ -4490,13 +4474,9 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       // 0 fetched → no photo (placeholder).
       if (fetchedBuffers.length >= 1) {
         photoKey = `photo_${i}`;
-        // Scan-for-location QR for THIS point. Only when the point actually has
-        // coordinates — a QR pointing at 0,0 would be worse than none.
-        const qrUrl =
-          hasLat && hasLon ? buildLocationQrUrl(lat as number, lng as number) : null;
         const optimizedAll = await Promise.all(
           fetchedBuffers.map((b, bi) =>
-            optimizeDocxImage(b.buffer, "observation", `${photoKey}_${bi}`, { qrUrl })
+            optimizeDocxImage(b.buffer, "observation", `${photoKey}_${bi}`)
           )
         );
         // Photo 0 → imageMap (template renders it; the grid pass replaces it
@@ -4579,13 +4559,7 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
               const optimized = await optimizeDocxImage(
                 fetched.buffer,
                 "observation",
-                photoKey,
-                {
-                  qrUrl:
-                    hasLat && hasLon
-                      ? buildLocationQrUrl(lat as number, lng as number)
-                      : null,
-                }
+                photoKey
               );
               imageMap.set(photoKey, {
                 ...fetched,
