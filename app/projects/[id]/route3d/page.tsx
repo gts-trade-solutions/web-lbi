@@ -1367,6 +1367,29 @@ export default function RouteMapPage() {
       </div>`;
   };
 
+  // ---- Google key rejected ----
+  // When Google refuses the key it draws its OWN grey "Sorry! Something went
+  // wrong" panel inside the map div and tells the user to open the JavaScript
+  // console. It also calls window.gm_authFailure, so hook that and say what to
+  // actually fix. (A key that is simply MISSING never gets here - the
+  // "API key required" card above catches that case.)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const prev = (window as any).gm_authFailure;
+    (window as any).gm_authFailure = () => {
+      const host = window.location.hostname;
+      setMapError(
+        `Google rejected the Maps key for ${host}. In Google Cloud Console check: ` +
+          `billing is enabled on the project, "Maps JavaScript API" is enabled, and the ` +
+          `key’s HTTP-referrer restriction allows https://${host}/* — then rebuild ` +
+          `(NEXT_PUBLIC_ keys are baked in at build time).`
+      );
+    };
+    return () => {
+      (window as any).gm_authFailure = prev;
+    };
+  }, []);
+
   // ---- 2. Init the satellite map once points are loaded ----
   useEffect(() => {
     if (!GMAPS_KEY || !points.length || !containerRef.current) return;

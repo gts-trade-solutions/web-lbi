@@ -121,6 +121,14 @@ function ownKm(r: ReportRow): number {
   return Number.isFinite(n) ? n : NaN;
 }
 
+// KM shown in the grid. Adding distances in floating point produces values
+// like 0.41000000000000003 (0.19 + 0.22), which is what the raw number renders
+// as. Chainage is only meaningful to the metre, and the Word report already
+// prints 2 decimals, so show 2 here too.
+function fmtKm(n: number): string {
+  return Number.isFinite(n) ? (Math.round(n * 100) / 100).toFixed(2) : "";
+}
+
 // Great-circle distance in km (same formula the Word export uses for KM).
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
@@ -1727,11 +1735,18 @@ export default function ProjectReportsPage() {
     }
     try {
       setKmSaving(true);
+      // Store to 2 decimals (metre precision) so float addition never leaves
+      // 0.41000000000000003 in the database.
+      // null = the user cleared the field, which clears the point’s own KM;
+      // rounding it would silently store 0 instead.
+      const kmRounded = km == null ? null : Math.round(km * 100) / 100;
       await apiRequestJson(`/api/reports/${encodeURIComponent(r.id)}`, {
         method: "PUT",
-        body: JSON.stringify({ kms: km, km }),
+        body: JSON.stringify({ kms: kmRounded, km: kmRounded }),
       });
-      setReports((prev) => prev.map((x) => (x.id === r.id ? { ...x, kms: km, km } : x)));
+      setReports((prev) =>
+        prev.map((x) => (x.id === r.id ? { ...x, kms: kmRounded, km: kmRounded } : x))
+      );
       setKmEditId("");
     } catch (e: any) {
       toast(e?.message || "Could not save KM");
@@ -2504,7 +2519,11 @@ export default function ProjectReportsPage() {
     const finalDifficulty = payload.difficulty ? payload.difficulty : null;
     const finalLat = payload.latitude;
     const finalLon = payload.longitude;
-    const finalKm = payload.km;
+    // Round to 2 decimals (metre precision) — see fmtKm.
+    const finalKm =
+      typeof payload.km === "number" && Number.isFinite(payload.km)
+        ? Math.round(payload.km * 100) / 100
+        : payload.km;
 
     await apiRequestJson(`/api/reports/${encodeURIComponent(reportId)}`, {
       method: "PUT",
@@ -4798,7 +4817,7 @@ export default function ProjectReportsPage() {
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     setKmEditId(r.id);
-                                    setKmEditVal(Number.isFinite(k) ? String(k) : "");
+                                    setKmEditVal(Number.isFinite(k) ? fmtKm(k) : "");
                                   }}
                                   title="KM for this point. A value with ~ is estimated from the GPS distance (same as the report); click to set the exact KM."
                                   style={{
@@ -4813,9 +4832,9 @@ export default function ProjectReportsPage() {
                                 >
                                   {bad ? "⚠ " : ""}KM:{" "}
                                   {Number.isFinite(k)
-                                    ? k
+                                    ? fmtKm(k)
                                     : Number.isFinite(displayKm(r))
-                                      ? `~${displayKm(r)}`
+                                      ? `~${fmtKm(displayKm(r))}`
                                       : "—"}
                                   <span style={{ fontSize: 11, opacity: 0.6 }}>✏️</span>
                                 </div>
@@ -7739,8 +7758,10 @@ function RouteSetupModal({
   // Observations · 4 Hindrance Solutions · 5 Stage Summary · 6 Conclusion ·
   // 7 Review
   const [step, setStep] = useState(0);
+  // The old step 1 ("Route — From → To" stop chain) was removed on 2026-11-26:
+  // the Conclusion now takes From/To straight from the Route Summary step, so
+  // the same names were being typed twice.
   const WIZARD_STEPS = [
-    "Route",
     "Objective & Map",
     "Diagrams",
     "Route Summary",
@@ -7827,32 +7848,13 @@ function RouteSetupModal({
   // From→To changes then no longer overwrite it.
   const [conclusionTouched, setConclusionTouched] = useState(false);
 
-  // ✅ Locations — dynamic, no fixed limit. Starts with 4 (typical
-  //    start + 2 stops + end), but the user can add or remove rows.
-  const [routeLocations, setRouteLocations] = useState<string[]>(["", "", "", ""]);
-  const updateLoc = (idx: number, val: string) => {
-    setRouteLocations((p) => {
-      const copy = [...p];
-      copy[idx] = val;
-      return copy;
-    });
-  };
-  const addLocationRow = () => {
-    setRouteLocations((p) => [...p, ""]);
-  };
-  const removeLocationRow = (idx: number) => {
-    setRouteLocations((p) => {
-      // Always keep at least 2 rows so the route has a start and an end.
-      if (p.length <= 2) return p;
-      return p.filter((_, i) => i !== idx);
-    });
-  };
 
-  // From = first location, To = last location. These are the ONLY things that
-  // change the standard Conclusion text — it is regenerated whenever either
-  // endpoint changes.
-  const fromLabel = (routeLocations[0] || "").trim();
-  const toLabel = (routeLocations[routeLocations.length - 1] || "").trim();
+  // From / To for the standard Conclusion text come from the Route Summary
+  // step ("From (start)" / "To (destination)"), the same two names that fill
+  // the report’s A. Surveyed Route line. They are the ONLY things that change
+  // the Conclusion, which is regenerated whenever either one changes.
+  const fromLabel = soFrom.trim();
+  const toLabel = soTo.trim();
   useEffect(() => {
     // Keep the standard text in sync with From→To ONLY while the user hasn't
     // edited the Conclusion themselves. Once they edit it, their text wins.
@@ -8063,16 +8065,9 @@ function RouteSetupModal({
           }
         }
 
-        const locs = Array.isArray(data?.locations) ? (data.locations as RouteLocationRow[]) : [];
-        if (locs.length) {
-          // Load ALL saved labels (no longer truncated to 4). Pad up to
-          // a minimum of 2 so the user always sees at least Start + End.
-          const labels = locs
-            .map((x) => String(x.label || ""))
-            .filter((s, i) => s.trim() !== "" || i < locs.length);
-          while (labels.length < 2) labels.push("");
-          setRouteLocations(labels);
-        }
+        // data.locations is still returned by the API but no longer loaded:
+        // the Route step that edited it is gone, and the Conclusion takes its
+        // From/To from the Route Summary step instead.
 
         // Load the GA drawing images already saved for this page so the user
         // can just add a point without re-uploading the whole GA drawing.
@@ -8360,7 +8355,9 @@ function RouteSetupModal({
           presetMapKey: preset_map_key,
           mapFileUrl: map_file_url,
           conclusionHtml: currentConclusion || null,
-          routeLocations,
+          // routeLocations is no longer collected (the Route step is gone and
+          // the Key Points page was removed). Not sent, so any previously saved
+          // locations are left as they are rather than blanked.
           gaImages: rows,
           imageUrl: rows[0]?.file_url || null,
           imageKey: rows[0]?.imageKey || null,
@@ -8428,114 +8425,9 @@ function RouteSetupModal({
         {err ? <div style={{ ...styles.modalHint, color: "#b42318", fontWeight: 900 }}>{err}</div> : null}
 
         {/* ===== STEP 0 · Route (From → To) ===== */}
-        {step === 0 && (
-          <div style={{ display: "grid", gap: 8 }}>
-            <div style={styles.routeLabel}>Route — From → To</div>
-            <div style={styles.modalNote}>
-              The <b>first</b> location is the start (<b>From</b>) and the <b>last</b> is the
-              destination (<b>To</b>). These two names fill the report&apos;s standard Conclusion
-              automatically. Add stops in between if the route has them.
-            </div>
-
-            {/* Locations — dynamic add/remove (no fixed limit) */}
-            <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "36px 1fr 36px", gap: 12, alignItems: "start" }}>
-                <div style={{ display: "grid", gap: 0, paddingTop: 8, justifyItems: "center", alignContent: "start" }}>
-                  {routeLocations.map((_, idx) => {
-                    const isLast = idx === routeLocations.length - 1;
-                    return (
-                      <div key={`marker-${idx}`} style={{ display: "grid", gap: 0, justifyItems: "center" }}>
-                        {isLast ? (
-                          <div style={{ ...locStyles.pin, marginBottom: 30 }}>📍</div>
-                        ) : (
-                          <>
-                            <div style={locStyles.circle} />
-                            <div style={locStyles.dots} />
-                          </>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div style={{ display: "grid", gap: 12 }}>
-                  {routeLocations.map((val, idx) => {
-                    const isLast = idx === routeLocations.length - 1;
-                    const placeholder =
-                      idx === 0 ? "From (start location)" : isLast ? "To (destination)" : "Stop location";
-                    return (
-                      <input
-                        key={idx}
-                        value={val}
-                        onChange={(e) => updateLoc(idx, e.target.value)}
-                        placeholder={placeholder}
-                        style={{
-                          height: 44,
-                          borderRadius: 14,
-                          border: "1px solid #D0D5DD",
-                          padding: "0 14px",
-                          fontWeight: 900,
-                          outline: "none",
-                          background: "#fff",
-                        }}
-                      />
-                    );
-                  })}
-                </div>
-
-                <div style={{ display: "grid", gap: 12 }}>
-                  {routeLocations.map((_, idx) => (
-                    <button
-                      key={`rm-${idx}`}
-                      type="button"
-                      onClick={() => removeLocationRow(idx)}
-                      disabled={routeLocations.length <= 2}
-                      title="Remove this location"
-                      style={{
-                        height: 44,
-                        width: 36,
-                        borderRadius: 12,
-                        border: "1px solid #E4E7EC",
-                        background: "#fff",
-                        color: routeLocations.length <= 2 ? "#D0D5DD" : "#B91C2A",
-                        fontSize: 22,
-                        fontWeight: 700,
-                        cursor: routeLocations.length <= 2 ? "not-allowed" : "pointer",
-                        lineHeight: 1,
-                      }}
-                    >
-                      ×
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={addLocationRow}
-                style={{
-                  marginTop: 4,
-                  alignSelf: "start",
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 10,
-                  border: "1px dashed #6F7A8F",
-                  background: "#F8FAFC",
-                  color: "#1F2937",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-              >
-                + Add a stop in between
-              </button>
-
-              <div style={styles.modalNote}>Example: Sameep Engineering, Navsari → … → Mundra Port</div>
-            </div>
-          </div>
-        )}
 
         {/* ===== STEP 3 · Texts: Objective ===== */}
-        {step === 1 && (
+        {step === 0 && (
         <div style={{ display: "grid", gap: 8 }}>
           <div style={styles.routeLabel}>Objective (edit the cargo size as needed)</div>
           <textarea
@@ -8559,7 +8451,7 @@ function RouteSetupModal({
         )}
 
         {/* ===== STEP 1 · Route Map ===== */}
-        {step === 1 && (
+        {step === 0 && (
         <>
         {/* Map picker */}
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -8689,7 +8581,7 @@ function RouteSetupModal({
         )}
 
         {/* ===== STEP 2 · Diagrams (each uploaded separately, under its heading) ===== */}
-        {step === 2 && (
+        {step === 1 && (
         <div style={{ display: "grid", gap: 8 }}>
           <div style={styles.routeLabel}>Diagrams — upload each separately</div>
           <div style={styles.modalNote}>
@@ -8796,7 +8688,7 @@ function RouteSetupModal({
         )}
 
         {/* ===== STEP 3 · Route Summary (editable) ===== */}
-        {step === 3 && (
+        {step === 2 && (
           <div style={{ display: "grid", gap: 12 }}>
             <div style={styles.routeLabel}>Route Summary</div>
             <div style={styles.modalNote}>
@@ -8859,7 +8751,7 @@ function RouteSetupModal({
         )}
 
         {/* ===== STEP 4 · Hindrance Solutions (editable table + considerations) ===== */}
-        {step === 4 && (
+        {step === 3 && (
           <div style={{ display: "grid", gap: 12 }}>
             <div style={styles.routeLabel}>Hindrance Solutions</div>
             <div style={styles.modalNote}>
@@ -8991,7 +8883,7 @@ function RouteSetupModal({
         )}
 
         {/* ===== STEP 5 · Stage Summary image (optional, replaces the auto table) ===== */}
-        {step === 5 && (
+        {step === 4 && (
           <div style={{ display: "grid", gap: 12 }}>
             <div style={styles.routeLabel}>Stage Summary</div>
             <div style={styles.modalNote}>
@@ -9041,7 +8933,7 @@ function RouteSetupModal({
         )}
 
         {/* ===== STEP 6 · Conclusion (locked, From→To only) ===== */}
-        {step === 6 && (
+        {step === 5 && (
           <div style={{ display: "grid", gap: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <div style={styles.routeLabel}>Conclusion &amp; Certification (editable)</div>
@@ -9107,7 +8999,7 @@ function RouteSetupModal({
         )}
 
         {/* ===== STEP 7 · Review & Save ===== */}
-        {step === 7 && (
+        {step === 6 && (
           <div style={{ display: "grid", gap: 10 }}>
             <div style={styles.routeLabel}>Review</div>
             <div
@@ -9167,7 +9059,7 @@ function RouteSetupModal({
         </div>
 
         <div style={styles.modalNote}>
-          {step === 0 && (!fromLabel || !toLabel)
+          {false
             ? "Tip: set Start (From) and End (To) — they auto-fill the Conclusion. You can still continue without them."
             : step < WIZARD_STEPS.length - 1
               ? `Step ${step + 1} of ${WIZARD_STEPS.length} — ${WIZARD_STEPS[step]}.`

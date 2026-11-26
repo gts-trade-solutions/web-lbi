@@ -1636,6 +1636,27 @@ function buildKeyLocationsChain(rows: Array<{ location?: unknown }>): string {
   return chain.join("-");
 }
 
+/**
+ * Tidy the OBJECTIVE sentence's dimension separators before it goes in the
+ * report. The cargo size is written L x W x H, but the stored text (typed by
+ * hand, or carried over from an old report) often has the X glued to the
+ * neighbouring word:
+ *   "31.3m length, X4.85m WidthX6.15m height"
+ * which reads as one broken word on the page. Put a single space either side
+ * of an X that separates dimensions. Only an UPPERCASE X directly before a
+ * number, preceded by a digit or lowercase letter, counts - so an all-caps
+ * word like "MAX6" is left alone.
+ */
+function tidyObjectiveText(value: string): string {
+  return String(value || "")
+    // "WidthX6.15m" / "m X4.85m" -> "Width X 6.15m" / "m X 4.85m"
+    .replace(/([a-z0-9])\s*X\s*(?=[\d.])/g, "$1 X ")
+    // ", X4.85m" / "(X4.85m" -> ", X 4.85m"
+    .replace(/(^|[\s,(])X\s*(?=[\d.])/g, "$1X ")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 function cleanFileName(name: string, fallback: string) {
   const s = String(name || "")
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
@@ -3453,18 +3474,36 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
       const f = await fetchImageBuffer(String(observationSummaryOverride.flowChartUrl), "flowChart");
       if (f && Buffer.isBuffer(f.buffer) && f.buffer.length) {
         const opt = await optimizeDocxImage(f.buffer, "observation", "flowChart");
+        // Fill the page. A3 landscape leaves ~15.8in of content width, and the
+        // old fixed 7.5in used less than half of it, stranding a big empty gap
+        // under the chart. Size to the full width, then scale back if that
+        // would make it too tall for what is left under the A/B text.
         const EMU_PER_INCH_FC = 914400;
-        const emuW = Math.round(7.5 * EMU_PER_INCH_FC);
-        let emuH = Math.round(4.0 * EMU_PER_INCH_FC);
+        const FC_MAX_W_IN = 15.0;
+        const FC_MAX_H_IN = 7.6;
+        let wIn = FC_MAX_W_IN;
+        let hIn = 4.0; // fallback when the image size cannot be read
         const shFc = getSharp();
         if (shFc) {
           try {
             const m = await shFc(opt).metadata();
-            if (m.width && m.height && m.width > 0) emuH = Math.round((emuW * m.height) / m.width);
+            if (m.width && m.height && m.width > 0) {
+              hIn = wIn * (m.height / m.width);
+              if (hIn > FC_MAX_H_IN) {
+                hIn = FC_MAX_H_IN;
+                wIn = hIn * (m.width / m.height);
+              }
+            }
           } catch {
             /* keep fallback height */
           }
         }
+        const emuW = Math.round(wIn * EMU_PER_INCH_FC);
+        const emuH = Math.round(hIn * EMU_PER_INCH_FC);
+        console.log("[flow chart] sized", {
+          widthInches: wIn.toFixed(2),
+          heightInches: hIn.toFixed(2),
+        });
         flowChartImg = { buffer: opt, emuW, emuH };
       }
     } catch (fcErr) {
@@ -3576,17 +3615,23 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
          FROM report_photos
          WHERE report_id IN (${placeholders})
          ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC`;
-      const sql = `SELECT id, report_id, url, file_name, image_key, point_key, path, created_at
+      // Fallback for schemas missing image_key / point_key / path. It KEEPS the
+      // sort_order ordering: the user drags photos into the order they want in
+      // the points grid (which writes report_photos.sort_order), and dropping
+      // that from the ORDER BY silently published them in upload order instead.
+      const sql = `SELECT id, report_id, url, file_name, created_at, include_in_export, sort_order
          FROM report_photos
          WHERE report_id IN (${placeholders})
-         ORDER BY created_at ASC`;
+         ORDER BY (sort_order IS NULL), sort_order ASC, created_at ASC`;
       console.error("[PHOTOS_DEBUG_2026_04_27_B] sql", { sql: sqlWithInclude, args: reportIds });
+      let photoQueryUsed = "full";
       try {
         const [photoRows] = await pool.execute(sqlWithInclude, reportIds);
         photos = Array.isArray(photoRows) ? (photoRows as Row[]) : [];
       } catch {
         try {
-          // Fallback: schemas without the include_in_export column.
+          // Fallback: schemas without image_key / point_key / path.
+          photoQueryUsed = "no-optional-columns";
           const [photoRows] = await pool.execute(sql, reportIds);
           photos = Array.isArray(photoRows) ? (photoRows as Row[]) : [];
         } catch (selectErr) {
@@ -3599,10 +3644,20 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
              FROM report_photos
              WHERE report_id IN (${placeholders})
              ORDER BY created_at ASC`;
+          photoQueryUsed = "legacy-created-at-only";
           const [photoRows] = await pool.execute(fallbackSql, reportIds);
           photos = Array.isArray(photoRows) ? (photoRows as Row[]) : [];
         }
       }
+      // Which variant ran, and whether the user’s drag-order actually reached
+      // us. withSortOrder = 0 while the grid shows a custom order means the
+      // reorder never saved; photoQueryUsed != "full" means a column is
+      // missing on this database.
+      console.log("[export photos] query", {
+        photoQueryUsed,
+        rows: photos.length,
+        withSortOrder: photos.filter((p) => p.sort_order != null).length,
+      });
       // Respect the photo-picker selection: photos unticked by the user
       // (include_in_export = 0) never reach the DOCX. Rows without the
       // column (legacy schema fallback) are always included.
@@ -4104,8 +4159,8 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   console.log("[export actual] routeLocations:", routeLocationLabels);
 
   // ----- Resolve scalar template values.
-  const objective = valueOrDash(
-    routePageRow?.objective ?? projectRow.objective ?? projectRow.description
+  const objective = tidyObjectiveText(
+    valueOrDash(routePageRow?.objective ?? projectRow.objective ?? projectRow.description)
   );
   // ----- Conclusion & Certification body.
   // Prefer the saved conclusion HTML; otherwise fall back to the fixed RACE
@@ -9446,10 +9501,13 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // section properties. Non-fatal. (Re-enabled: the earlier "unreadable
   // content" corruption was the template's orphaned .undefined media, fixed
   // above — not this table.)
-  // DETAIL report only: the client asked for the Stage Summary table to be
-  // dropped from the pinned SUMMARY report (2026-11-25), which already has
-  // its own category and key-obstacle tables above the points.
-  const STAGE_SUMMARY_ENABLED = !summaryMode;
+  // OFF in BOTH reports: dropped from the pinned SUMMARY report on 2026-11-25
+  // and from the DETAIL report on 2026-11-26 — the client does not want this
+  // table in the Word/PDF at all. The in-app "Stage Summary" button (with its
+  // Copy / Download CSV) is unaffected, and so is the wizard step that edits
+  // the rows; only the injection into the document stops. Set this back to
+  // `true` (or `!summaryMode`) to bring the section back.
+  const STAGE_SUMMARY_ENABLED = false;
   // Per-project Stage Summary OVERRIDE (edited in the app via
   // /api/projects/:id/stage-summary). When present it replaces the
   // auto-computed rows in the table below, in the saved order.
