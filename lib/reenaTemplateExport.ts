@@ -997,6 +997,87 @@ async function optimizeDocxImage(
   }
 }
 
+/**
+ * Prepare the Route Survey Flow Chart for embedding in the DOCX.
+ *
+ * This deliberately does NOT go through optimizeDocxImage. That helper returns
+ * the ORIGINAL bytes untouched on three paths (sharp missing, sharp unable to
+ * read the file - an SVG export, a WEBP, an image past sharp's pixel limit -
+ * or any other throw), and the caller then wrote those bytes as
+ * "word/media/flow_chart.jpeg" and declared them image/jpeg. A PNG or SVG
+ * wearing a JPEG label is the one failure that looks like THIS: LibreOffice
+ * sniffs the bytes and still draws the chart, so the PDF looks right, while
+ * WORD trusts the label, finds no JPEG, and silently shows nothing.
+ *
+ * It also re-encodes at a print-worthy size. optimizeDocxImage caps at
+ * 1120x720, and the chart is drawn roughly 12in wide - under 100 DPI, which is
+ * visibly soft for thin connector lines and small box labels. PNG is used
+ * because line art stays crisp and compresses well.
+ *
+ * Returns null when the bytes are not a format Word can display, so the caller
+ * can say so in the log instead of shipping an image Word will drop.
+ */
+async function prepareFlowChartImage(
+  input: Buffer,
+  serverContentType: string
+): Promise<{ buffer: Buffer; ext: string; contentType: string; width: number; height: number } | null> {
+  const FC_MAX_PX = 2600; // ~215 DPI at the ~12in the chart is drawn
+  const sharp = getSharp();
+  if (sharp) {
+    try {
+      const out = await sharp(input)
+        .rotate()
+        // Charts are often PNGs with a transparent background. Word renders
+        // transparency as black in some views; a white matte matches the page.
+        .flatten({ background: "#FFFFFF" })
+        .resize({
+          width: FC_MAX_PX,
+          height: FC_MAX_PX,
+          fit: "inside",
+          withoutEnlargement: true,
+        })
+        .png({ compressionLevel: 9 })
+        .toBuffer({ resolveWithObject: true });
+      return {
+        buffer: out.data,
+        ext: "png",
+        contentType: "image/png",
+        width: out.info.width || 0,
+        height: out.info.height || 0,
+      };
+    } catch (err) {
+      console.warn("[flow chart] re-encode failed - falling back to the original bytes:", err);
+    }
+  }
+
+  // Fallback: keep the original bytes, but label them HONESTLY so Word picks
+  // the right decoder. Anything Word cannot display is refused outright.
+  const sniffed = detectImageMimeFromBytes(input) || String(serverContentType || "").toLowerCase();
+  const EXT_BY_MIME: Record<string, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpeg",
+    "image/jpg": "jpeg",
+    "image/gif": "gif",
+    "image/bmp": "bmp",
+    "image/tiff": "tiff",
+  };
+  const ext = EXT_BY_MIME[sniffed];
+  if (!ext) {
+    console.warn("[flow chart] not a format Word can display:", sniffed || "unknown");
+    return null;
+  }
+  let width = 0;
+  let height = 0;
+  if (ext === "png") {
+    const d = readPngDimensions(input);
+    if (d && d.width > 0) {
+      width = d.width;
+      height = d.height;
+    }
+  }
+  return { buffer: input, ext, contentType: ext === "jpeg" ? "image/jpeg" : sniffed, width, height };
+}
+
 // Side-by-side images are rendered as a 2-column borderless Word table
 // (one image per cell) instead of compositing into a single JPEG.
 // See the post-render SIDE-BY-SIDE TABLE INJECTION pass for the
@@ -3468,43 +3549,59 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
   // pinned Summary report's observations block each embed it. (It was
   // previously fetched only in detail mode but rendered only in summary mode,
   // so it never actually appeared anywhere.)
-  let flowChartImg: { buffer: Buffer; emuW: number; emuH: number } | null = null;
+  // `ext`/`contentType` travel with the buffer so BOTH embed sites name the
+  // media part and declare its content type from what the bytes actually are.
+  let flowChartImg:
+    | { buffer: Buffer; emuW: number; emuH: number; ext: string; contentType: string }
+    | null = null;
   if (observationSummaryOverride?.flowChartUrl) {
+    const fcUrl = String(observationSummaryOverride.flowChartUrl);
     try {
-      const f = await fetchImageBuffer(String(observationSummaryOverride.flowChartUrl), "flowChart");
-      if (f && Buffer.isBuffer(f.buffer) && f.buffer.length) {
-        const opt = await optimizeDocxImage(f.buffer, "observation", "flowChart");
-        // Fill the page. A3 landscape leaves ~15.8in of content width, and the
-        // old fixed 7.5in used less than half of it, stranding a big empty gap
-        // under the chart. Size to the full width, then scale back if that
-        // would make it too tall for what is left under the A/B text.
-        const EMU_PER_INCH_FC = 914400;
-        const FC_MAX_W_IN = 15.0;
-        const FC_MAX_H_IN = 7.6;
-        let wIn = FC_MAX_W_IN;
-        let hIn = 4.0; // fallback when the image size cannot be read
-        const shFc = getSharp();
-        if (shFc) {
-          try {
-            const m = await shFc(opt).metadata();
-            if (m.width && m.height && m.width > 0) {
-              hIn = wIn * (m.height / m.width);
-              if (hIn > FC_MAX_H_IN) {
-                hIn = FC_MAX_H_IN;
-                wIn = hIn * (m.width / m.height);
-              }
+      const f = await fetchImageBuffer(fcUrl, "flowChart");
+      if (!f || !Buffer.isBuffer(f.buffer) || !f.buffer.length) {
+        // Loud, because the user DID upload a chart and the report will not
+        // have one. Silence here is what made this look like a render bug.
+        console.warn("[flow chart] saved but could not be fetched - report will have NO chart:", fcUrl);
+      } else {
+        const prepared = await prepareFlowChartImage(f.buffer, f.contentType);
+        if (!prepared) {
+          console.warn("[flow chart] unusable image - report will have NO chart:", fcUrl);
+        } else {
+          // Fill the page. A3 landscape leaves ~15.8in of content width, and
+          // the old fixed 7.5in used less than half of it, stranding a big
+          // empty gap under the chart. Size to the full width, then scale back
+          // if that would make it too tall for what is left under the A/B text.
+          const EMU_PER_INCH_FC = 914400;
+          const FC_MAX_W_IN = 15.0;
+          const FC_MAX_H_IN = 7.6;
+          let wIn = FC_MAX_W_IN;
+          let hIn = 4.0; // fallback when the image size cannot be read
+          if (prepared.width > 0 && prepared.height > 0) {
+            hIn = wIn * (prepared.height / prepared.width);
+            if (hIn > FC_MAX_H_IN) {
+              hIn = FC_MAX_H_IN;
+              wIn = hIn * (prepared.width / prepared.height);
             }
-          } catch {
-            /* keep fallback height */
           }
+          const emuW = Math.round(wIn * EMU_PER_INCH_FC);
+          const emuH = Math.round(hIn * EMU_PER_INCH_FC);
+          console.log("[flow chart] ready", {
+            url: fcUrl,
+            sourceContentType: f.contentType,
+            embeddedAs: prepared.contentType,
+            pixels: prepared.width + "x" + prepared.height,
+            widthInches: wIn.toFixed(2),
+            heightInches: hIn.toFixed(2),
+            bytes: prepared.buffer.length,
+          });
+          flowChartImg = {
+            buffer: prepared.buffer,
+            emuW,
+            emuH,
+            ext: prepared.ext,
+            contentType: prepared.contentType,
+          };
         }
-        const emuW = Math.round(wIn * EMU_PER_INCH_FC);
-        const emuH = Math.round(hIn * EMU_PER_INCH_FC);
-        console.log("[flow chart] sized", {
-          widthInches: wIn.toFixed(2),
-          heightInches: hIn.toFixed(2),
-        });
-        flowChartImg = { buffer: opt, emuW, emuH };
       }
     } catch (fcErr) {
       console.warn("[flow chart] load failed - skipping:", fcErr);
@@ -6276,25 +6373,28 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           let flowChartPara = "";
           if (flowChartImg) {
             try {
+              // Name the part after the REAL format. Writing PNG bytes as
+              // "flow_chart.jpeg" is why Word showed nothing while the PDF was fine.
+              const fcExt = flowChartImg.ext;
               const ctF = renderedZip.file("[Content_Types].xml");
               if (ctF) {
                 let ctX = ctF.asText();
-                if (!/Extension="jpeg"/i.test(ctX) && ctX.includes("</Types>")) {
+                if (ctX.indexOf('Extension="' + fcExt + '"') === -1 && ctX.includes("</Types>")) {
                   ctX = ctX.replace(
                     "</Types>",
-                    `<Default Extension="jpeg" ContentType="image/jpeg"/></Types>`
+                    `<Default Extension="${fcExt}" ContentType="${flowChartImg.contentType}"/></Types>`
                   );
                   renderedZip.file("[Content_Types].xml", ctX);
                 }
               }
-              renderedZip.file("word/media/flow_chart.jpeg", flowChartImg.buffer);
+              renderedZip.file(`word/media/flow_chart.${fcExt}`, flowChartImg.buffer);
               const relsF = renderedZip.file("word/_rels/document.xml.rels");
               let relsX = relsF ? relsF.asText() : "";
               const fcRId = "rIdFlowChart";
               if (relsX && !relsX.includes(`Id="${fcRId}"`)) {
                 relsX = relsX.replace(
                   "</Relationships>",
-                  `<Relationship Id="${fcRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/flow_chart.jpeg"/></Relationships>`
+                  `<Relationship Id="${fcRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/flow_chart.${fcExt}"/></Relationships>`
                 );
                 renderedZip.file("word/_rels/document.xml.rels", relsX);
               }
@@ -9608,25 +9708,28 @@ export async function generateReenaDocx(options: ExportOptions): Promise<ExportR
           let flowChartParaRS = "";
           if (flowChartImg) {
             try {
+              // Name the part after the REAL format. Writing PNG bytes as
+              // "flow_chart.jpeg" is why Word showed nothing while the PDF was fine.
+              const fcExt = flowChartImg.ext;
               const ctF = zip.file("[Content_Types].xml");
               if (ctF) {
                 let ctX = ctF.asText();
-                if (!/Extension="jpeg"/i.test(ctX) && ctX.includes("</Types>")) {
+                if (ctX.indexOf('Extension="' + fcExt + '"') === -1 && ctX.includes("</Types>")) {
                   ctX = ctX.replace(
                     "</Types>",
-                    `<Default Extension="jpeg" ContentType="image/jpeg"/></Types>`
+                    `<Default Extension="${fcExt}" ContentType="${flowChartImg.contentType}"/></Types>`
                   );
                   zip.file("[Content_Types].xml", ctX);
                 }
               }
-              zip.file("word/media/flow_chart.jpeg", flowChartImg.buffer);
+              zip.file(`word/media/flow_chart.${fcExt}`, flowChartImg.buffer);
               const relsF = zip.file("word/_rels/document.xml.rels");
               let relsX = relsF ? relsF.asText() : "";
               const fcRId = "rIdFlowChart";
               if (relsX && !relsX.includes(`Id="${fcRId}"`)) {
                 relsX = relsX.replace(
                   "</Relationships>",
-                  `<Relationship Id="${fcRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/flow_chart.jpeg"/></Relationships>`
+                  `<Relationship Id="${fcRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/flow_chart.${fcExt}"/></Relationships>`
                 );
                 zip.file("word/_rels/document.xml.rels", relsX);
               }

@@ -7781,6 +7781,9 @@ function RouteSetupModal({
   const [soKeyLocations, setSoKeyLocations] = useState("");
   const [soFlowChartFile, setSoFlowChartFile] = useState<File | null>(null);
   const [soFlowChartUrl, setSoFlowChartUrl] = useState("");
+  // Distinguishes "the user removed the chart" from "the form has no chart
+  // in it yet". Only the first may blank a chart that is already saved.
+  const [soFlowChartCleared, setSoFlowChartCleared] = useState(false);
 
   // ----- #5 Hindrance Solutions (editable table + considerations) -----
   const [hindranceRows, setHindranceRows] = useState<{ hindrance: string; solution: string }[]>(
@@ -8037,6 +8040,51 @@ function RouteSetupModal({
       try {
         const token =
           typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+        // Load the editable report sections (Summary of Observations, Hindrance
+        // Solutions, Stage-Summary image). These are per-project and independent
+        // of the page. Any missing section keeps its default.
+        try {
+          const secHeaders = token ? { Authorization: `Bearer ${token}` } : undefined;
+          const getSection = async (key: string) => {
+            const r = await fetch(
+              `/api/projects/${encodeURIComponent(projectId)}/report-sections/${key}`,
+              { method: "GET", credentials: "include", headers: secHeaders }
+            );
+            const j = await r.json().catch(() => ({} as any));
+            return r.ok ? j?.data ?? null : null;
+          };
+          const [obs, hin, stg] = await Promise.all([
+            getSection("observation-summary"),
+            getSection("hindrance"),
+            getSection("stage-image"),
+          ]);
+          if (obs) {
+            setSoFrom(String(obs.fromText || ""));
+            setSoTo(String(obs.toText || ""));
+            setSoDistance(String(obs.distance || ""));
+            setSoKeyLocations(String(obs.keyLocations || ""));
+            setSoFlowChartUrl(String(obs.flowChartUrl || ""));
+          }
+          if (hin) {
+            if (Array.isArray(hin.rows) && hin.rows.length) {
+              setHindranceRows(
+                hin.rows.map((r: any) => ({
+                  hindrance: String(r?.hindrance || ""),
+                  solution: String(r?.solution || ""),
+                }))
+              );
+            }
+            if (Array.isArray(hin.considerations) && hin.considerations.length) {
+              setConsiderations(hin.considerations.map((s: any) => String(s || "")));
+            }
+          }
+          if (stg && stg.imageUrl) {
+            setStageImageUrl(String(stg.imageUrl || ""));
+          }
+        } catch {
+          /* non-fatal: keep defaults */
+        }
+
         const qs = existingPageId ? `?pageId=${encodeURIComponent(existingPageId)}` : "";
         const res = await fetch(
           `/api/projects/${encodeURIComponent(projectId)}/ga-drawing${qs}`,
@@ -8083,50 +8131,6 @@ function RouteSetupModal({
             .filter((x) => x.file_url)
         );
 
-        // Load the editable report sections (Summary of Observations, Hindrance
-        // Solutions, Stage-Summary image). These are per-project and independent
-        // of the page. Any missing section keeps its default.
-        try {
-          const secHeaders = token ? { Authorization: `Bearer ${token}` } : undefined;
-          const getSection = async (key: string) => {
-            const r = await fetch(
-              `/api/projects/${encodeURIComponent(projectId)}/report-sections/${key}`,
-              { method: "GET", credentials: "include", headers: secHeaders }
-            );
-            const j = await r.json().catch(() => ({} as any));
-            return r.ok ? j?.data ?? null : null;
-          };
-          const [obs, hin, stg] = await Promise.all([
-            getSection("observation-summary"),
-            getSection("hindrance"),
-            getSection("stage-image"),
-          ]);
-          if (obs) {
-            setSoFrom(String(obs.fromText || ""));
-            setSoTo(String(obs.toText || ""));
-            setSoDistance(String(obs.distance || ""));
-            setSoKeyLocations(String(obs.keyLocations || ""));
-            setSoFlowChartUrl(String(obs.flowChartUrl || ""));
-          }
-          if (hin) {
-            if (Array.isArray(hin.rows) && hin.rows.length) {
-              setHindranceRows(
-                hin.rows.map((r: any) => ({
-                  hindrance: String(r?.hindrance || ""),
-                  solution: String(r?.solution || ""),
-                }))
-              );
-            }
-            if (Array.isArray(hin.considerations) && hin.considerations.length) {
-              setConsiderations(hin.considerations.map((s: any) => String(s || "")));
-            }
-          }
-          if (stg && stg.imageUrl) {
-            setStageImageUrl(String(stg.imageUrl || ""));
-          }
-        } catch {
-          /* non-fatal: keep defaults */
-        }
       } catch (e: any) {
         setErr(e?.message || String(e));
       } finally {
@@ -8164,6 +8168,10 @@ function RouteSetupModal({
   const saveAll = async () => {
     setSaving(true);
     setErr(null);
+    // Set when the flow chart could not be stored. Everything else still
+    // saves; this is reported at the end instead of closing as though it had
+    // worked.
+    let flowChartWarning = "";
 
     try {
       // ---- Persist the editable report sections FIRST ----
@@ -8186,8 +8194,35 @@ function RouteSetupModal({
               soFlowChartFile
             );
             flowChartUrl = up.publicUrl;
+            if (!flowChartUrl) {
+              flowChartWarning =
+                "The flow chart uploaded but no address came back, so the report cannot show it. Everything else was saved.";
+            }
           } catch (upErr) {
-            console.warn("[setup] flow-chart upload failed (non-fatal):", upErr);
+            console.warn("[setup] flow-chart upload failed:", upErr);
+            flowChartWarning =
+              "The flow chart image could not be uploaded, so it will NOT appear in the report. Everything else was saved - try a smaller image (under 8 MB) and press Save again.";
+          }
+        } else if (!flowChartUrl && !soFlowChartCleared) {
+          // Nothing new was chosen and the form holds no chart - usually
+          // because this modal was reopened to edit the GA drawing and the
+          // section GET had not answered yet. Writing "" would QUIETLY delete
+          // a chart uploaded earlier, so keep whatever is stored unless the
+          // user pressed Remove.
+          try {
+            const r = await fetch(
+              `/api/projects/${encodeURIComponent(projectId)}/report-sections/observation-summary`,
+              {
+                method: "GET",
+                credentials: "include",
+                headers: secToken ? { Authorization: `Bearer ${secToken}` } : undefined,
+              }
+            );
+            const j = await r.json().catch(() => ({} as any));
+            const prior = String(j?.data?.flowChartUrl || "");
+            if (prior) flowChartUrl = prior;
+          } catch {
+            /* non-fatal: leave it blank */
           }
         }
         let stageImgUrl = stageImageUrl;
@@ -8369,6 +8404,12 @@ function RouteSetupModal({
         throw new Error(saveData?.error || "Failed to save GA drawing");
       }
 
+      if (flowChartWarning) {
+        // Everything is saved - say plainly why the chart will be missing
+        // rather than closing the wizard as if nothing had gone wrong.
+        setErr(flowChartWarning);
+        return;
+      }
       onSaved();
     } catch (e: any) {
       setErr(e?.message || "Failed to save GA drawing");
@@ -8737,13 +8778,36 @@ function RouteSetupModal({
               Route Survey Flow Chart image (optional)
               <input
                 type="file"
-                accept="image/*"
-                onChange={(e) => setSoFlowChartFile(e.target.files?.[0] || null)}
+                accept="image/png,image/jpeg,image/gif,image/bmp,image/webp"
+                onChange={(e) => {
+                  setSoFlowChartFile(e.target.files?.[0] || null);
+                  setSoFlowChartCleared(false);
+                }}
                 style={{ fontWeight: 600 }}
               />
               {(soFlowChartFile || soFlowChartUrl) && (
-                <div style={styles.modalNote}>
-                  {soFlowChartFile ? `Selected: ${soFlowChartFile.name}` : "Kept (already uploaded)"}
+                <div style={{ ...styles.modalNote, display: "flex", alignItems: "center", gap: 10 }}>
+                  <span>
+                    {soFlowChartFile ? `Selected: ${soFlowChartFile.name}` : "Kept (already uploaded)"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSoFlowChartFile(null);
+                      setSoFlowChartUrl("");
+                      setSoFlowChartCleared(true);
+                    }}
+                    style={{
+                      border: "1px solid #D0D5DD",
+                      background: "#fff",
+                      borderRadius: 6,
+                      padding: "2px 8px",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Remove
+                  </button>
                 </div>
               )}
             </div>
