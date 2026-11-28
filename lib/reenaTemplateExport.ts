@@ -1477,18 +1477,65 @@ async function fetchImageBuffer(
   return null;
 }
 
+/**
+ * Decode HTML entities to the real characters, in ONE pass.
+ *
+ * XML (and therefore OOXML) predefines only &amp; &lt; &gt; &quot; &apos;.
+ * Everything else - &nbsp; above all - is an HTML entity that Word cannot
+ * resolve, so it has to become the CHARACTER before the text is escaped for
+ * the document. The conclusion is edited in a contentEditable box and every
+ * browser writes &nbsp; into innerHTML for leading, trailing and repeated
+ * spaces, so saved conclusions are full of them.
+ *
+ * One pass, deliberately: chained replaces turn "&amp;lt;" into "<", which
+ * is not what the author typed.
+ */
+function decodeHtmlEntities(input: string): string {
+  const NAMED: Record<string, string> = {
+    nbsp: "\u00A0", amp: "&", lt: "<", gt: ">", quot: '"', apos: "'",
+    ndash: "\u2013", mdash: "\u2014", minus: "\u2212",
+    lsquo: "\u2018", rsquo: "\u2019", sbquo: "\u201A",
+    ldquo: "\u201C", rdquo: "\u201D", bdquo: "\u201E",
+    hellip: "\u2026", bull: "\u2022", middot: "\u00B7",
+    deg: "\u00B0", times: "\u00D7", divide: "\u00F7",
+    plusmn: "\u00B1", ne: "\u2260", le: "\u2264", ge: "\u2265",
+    larr: "\u2190", rarr: "\u2192", harr: "\u2194",
+    copy: "\u00A9", reg: "\u00AE", trade: "\u2122", sect: "\u00A7",
+    para: "\u00B6", laquo: "\u00AB", raquo: "\u00BB",
+    frac12: "\u00BD", frac14: "\u00BC", frac34: "\u00BE",
+    sup2: "\u00B2", sup3: "\u00B3", micro: "\u00B5",
+    euro: "\u20AC", pound: "\u00A3", yen: "\u00A5", cent: "\u00A2",
+    ensp: "\u2002", emsp: "\u2003", thinsp: "\u2009", shy: "",
+  };
+  return String(input || "").replace(
+    /&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);/g,
+    (whole: string, body: string) => {
+      if (body.charAt(0) === "#") {
+        const hex = body.charAt(1) === "x" || body.charAt(1) === "X";
+        const code = hex ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+        if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff) return whole;
+        try {
+          return String.fromCodePoint(code);
+        } catch {
+          return whole;
+        }
+      }
+      const hit = NAMED[body.toLowerCase()];
+      return hit === undefined ? whole : hit;
+    }
+  );
+}
+
 function stripHtml(input: string) {
-  return String(input || "")
+  // Tags first, THEN entities: decoding earlier would turn a literal
+  // "&lt;br&gt;" the author typed into a tag and delete it.
+  const text = String(input || "")
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/(p|div|li|h[1-6])>/gi, "\n")
     .replace(/<li>/gi, "- ")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
+    .replace(/<[^>]*>/g, "");
+  return decodeHtmlEntities(text)
+    .replace(/[\u00A0\u2002\u2003\u2009]/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -1498,15 +1545,25 @@ function stripHtml(input: string) {
 // neatly-formatted Conclusion & Certification body (see conclusionHtmlToOoxml).
 const CONCLUSION_SENTINEL = "RACE_CONCLUSION_BODY_PLACEHOLDER_X7";
 
-// Make an inline text slice XML-safe for a <w:t>. The standard conclusion HTML
-// is already escaped, but a user-EDITED conclusion (contentEditable) can contain
-// stray tags (<span>, <div>, <font>…) or a lone "&"/"<". Drop unknown tags and
-// escape lone &/< so the run never breaks the document XML.
+// Make an inline text slice XML-safe for a <w:t>. A user-EDITED conclusion
+// (contentEditable) can contain stray tags (<span>, <div>, <font>…), HTML
+// entities, or a lone "&"/"<".
+//
+// Order matters and used to be wrong: the old code passed &nbsp; THROUGH its
+// escape (only amp/lt/gt/quot/apos and numeric refs were spared), so its "&"
+// came out as "&amp;" and the page showed a literal "&nbsp;" wherever the
+// editor had written one - which is every leading, trailing or repeated space
+// a browser touches. Decode entities to real characters FIRST, then escape.
 function conclusionSanitizeInline(t: string): string {
-  return String(t)
-    .replace(/<[^>]*>/g, "") // drop stray editor tags (bold/br handled by caller)
-    .replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/gi, "&amp;")
+  const decoded = decodeHtmlEntities(
+    String(t).replace(/<[^>]*>/g, "") // drop stray editor tags (bold/br handled by caller)
+  );
+  return decoded
+    .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    // JS \\s also matches U+00A0, so a decoded &nbsp; collapses into the
+    // ordinary single space the rest of the paragraph uses.
     .replace(/\s+/g, " ");
 }
 
